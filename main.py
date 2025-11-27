@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Exam Generator (v1.8c)
+Crypto Exam Generator (v1.8d)
 
-Novinky v 1.8c
-- Přidána aplikace ikona (icon/icon.png). Pokud existuje, nastaví se na QApplication i hlavní okno.
-- Oprava chyby: chybějící metoda MainWindow._import_from_docx (menu „Import z DOCX…“).
-- Import DOCX: jemné vylepšení – přenáší informaci o typu číslování (decimal / lowerLetter / upperLetter / bullet).
+Změny v 1.8d
+- **Export DOCX – robustní náhrada placeholderů**:
+  * funguje i **inline** v jednom odstavci (není nutné, aby placeholder stál samostatně),
+  * pro `<PoznamkaVerze>`, `<DatumČas>`, `<MinBody>`, `<MaxBody>` se provádí **nahrazení napříč běhy (runs)**,
+  * `<OtázkaX>/<BONUSX>`: pokud je placeholder **sám v odstavci** → nahradí se celým blokem (zachová styly otázky),
+    pokud je **inline** s textem → vloží se **plain‑text** verze otázky přímo do daného odstavce (bez rozbití okolního textu).
+  * náhrady probíhají ve **všech částech**: `word/document.xml`, `word/header*.xml`, `word/footer*.xml` atd.
+- **Lepší sken šablony** v průvodci: placeholdery tolerují případné **mezery** uvnitř ostrých závorek (`< BONUS1 >`).
 
-Pozn.: Word numbering (numbering.xml) je mapováno pouze na výsledné vizuální <ol>/<ul> v HTML, bez úprav numbering.xml
-(vizualně věrné, minimální zásah).
+Pozn.: Word umí tokeny rozdělit do více runů; tato verze provádí v takových případech bezpečný rebuild textu
+daného odstavce při jednoduchých náhradách (zachová formát odstavce). Při inline vložení otázky
+(z HTML do existujícího odstavce) se použije plain‑text reprezentace otázky (pro zachování integrity okolních runů).
 """
 from __future__ import annotations
 
@@ -73,7 +78,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.8c"
+APP_VERSION = "1.8d"
 
 
 # --------------------------- Datové typy ---------------------------
@@ -448,7 +453,8 @@ class ExportWizard(QWizard):
         self.placeholders_b: List[str] = []
         self.has_datumcas = False
         self.has_pozn = False
-        self.has_minmax = (False, False)
+        the_min, the_max = False, False
+        self.has_minmax = (the_min, the_max)
 
         self._build_pages()
 
@@ -516,7 +522,8 @@ class ExportWizard(QWizard):
         except Exception as e:
             QMessageBox.warning(self, "Šablona", f"Nelze číst šablonu:\n{e}"); return
 
-        ph = re.findall(r"&lt;([^&<>]+)&gt;", xml) + re.findall(r"<([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+[0-9]*)>", xml)
+        # Toleruj mezery uvnitř závorek: <  Otázka1   >
+        ph = re.findall(r"(?:&lt;|<)\s*([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+[0-9]*)\s*(?:&gt;|>)", xml)
         seen, uniq = set(), []
         for p in ph:
             if p not in seen:
@@ -1350,7 +1357,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _find_question_by_id(self, qid: str) -> Optional[Question]:
-        def walk(lst: List[Subgroup]) -> Optional[Question]:
+        def walk(lst: List[Subgroup]):
             for sg in lst:
                 for q in sg.questions:
                     if q.id == qid:
@@ -1776,35 +1783,77 @@ class MainWindow(QMainWindow):
 
     def _generate_docx_from_template(self, template_path: Path, output_path: Path,
                                      simple_repl: Dict[str, str], rich_repl_html: Dict[str, str]) -> None:
+        def html_to_plain(html: str) -> str:
+            # hrubé "plain text" z HTML: <li> → "• ", <br>/<p> → " "
+            txt = re.sub(r'<\s*li[^>]*>', '• ', html, flags=re.I)
+            txt = re.sub(r'</\s*li\s*>', ' ', txt, flags=re.I)
+            txt = re.sub(r'<\s*br\s*/?\s*>', ' ', txt, flags=re.I)
+            txt = re.sub(r'</?\s*p[^>]*>', ' ', txt, flags=re.I)
+            txt = re.sub(r'<[^>]+>', '', txt)
+            return _html.unescape(txt).strip()
+
+        def get_para_text(p):
+            return "".join((t.text or "") for t in p.findall(".//w:t", NSMAP))
+
+        def set_para_text_single_run(p, new_text: str):
+            # zachovej pPr, vyhoď stávající runy, vlož jediný run s textem
+            for r in list(p.findall("w:r", NSMAP)):
+                p.remove(r)
+            p.append(make_w_run(new_text))
+
+        def replace_rich_full_paragraph(root, p, html):
+            paras = parse_html_to_paragraphs(html)
+            new_elements = [ make_w_paragraph(d['align'], d['runs'], d.get('prefix','')) for d in paras ]
+            # find parent and replace
+            parent = None
+            for elem in root.iter():
+                for e in list(elem):
+                    if e is p:
+                        parent = elem
+                        break
+                if parent is not None: break
+            if parent is not None:
+                idx = list(parent).index(p); parent.remove(p)
+                for off, newp in enumerate(new_elements):
+                    parent.insert(idx + off, newp)
+
+        token_re = re.compile(r"<\s*([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+[0-9]*)\s*>")
+
         def replace_in_tree(tree: ET.ElementTree) -> None:
             root = tree.getroot()
-            for ph_name, html in rich_repl_html.items():
-                token1 = f"<{ph_name}>"; token2 = f"&lt;{ph_name}&gt;"
-                paragraphs = list(root.findall(".//w:p", NSMAP))
-                for p in paragraphs:
-                    texts = [t.text or "" for t in p.findall(".//w:t", NSMAP)]
-                    full = "".join(texts).strip()
-                    if full == token1 or full == token2:
-                        paras = parse_html_to_paragraphs(html)
-                        new_elements = [ make_w_paragraph(d['align'], d['runs'], d.get('prefix','')) for d in paras ]
-                        def find_parent(r, child):
-                            for elem in r.iter():
-                                for e in list(elem):
-                                    if e is child: return elem
-                            return None
-                        parent = find_parent(root, p)
-                        if parent is not None:
-                            idx = list(parent).index(p); parent.remove(p)
-                            for off, newp in enumerate(new_elements):
-                                parent.insert(idx + off, newp)
-            for t in root.findall(".//w:t", NSMAP):
-                txt = t.text or ""
-                for k, v in simple_repl.items():
-                    token1 = f"<{k}>"; token2 = f"&lt;{k}&gt;"
-                    if token1 in txt or token2 in txt:
-                        txt = txt.replace(token1, v).replace(token2, v)
-                        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-                t.text = txt
+
+            # 1) Full-paragraph rich tokens
+            for p in list(root.findall(".//w:p", NSMAP)):
+                full = get_para_text(p).strip()
+                m = token_re.fullmatch(full)
+                if not m:
+                    continue
+                name = m.group(1)
+                if name in rich_repl_html:
+                    html = rich_repl_html[name]
+                    replace_rich_full_paragraph(root, p, html)
+
+            # 2) Inline simple tokens + inline rich (as plain text)
+            simple_tokens = {f"<{k}>": v for k,v in simple_repl.items()}
+            simple_tokens.update({f"< {k} >": v for k,v in simple_repl.items()})
+            inline_rich = {}
+            for k, html in rich_repl_html.items():
+                inline_rich[f"<{k}>"] = html_to_plain(html)
+                inline_rich[f"< {k} >"] = html_to_plain(html)
+
+            for p in list(root.findall(".//w:p", NSMAP)):
+                text = get_para_text(p)
+                orig = text
+                # rychlá náhrada po řetězcích (nezávisle na rozdělení runů)
+                for tk, val in simple_tokens.items():
+                    if tk in text:
+                        text = text.replace(tk, val)
+                for tk, val in inline_rich.items():
+                    if tk in text:
+                        text = text.replace(tk, val)
+                if text != orig:
+                    set_para_text_single_run(p, text)
+
         with zipfile.ZipFile(template_path, "r") as zin, zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -1837,7 +1886,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     apply_dark_theme(app)
 
-    # Nastavení ikony na úrovni aplikace (pokud existuje)
+    # Ikona aplikace (pokud existuje)
     project_root = Path.cwd()
     icon_file = project_root / "icon" / "icon.png"
     if icon_file.exists():
