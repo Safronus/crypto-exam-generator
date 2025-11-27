@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Exam Generator (v1.5b)
+Crypto Exam Generator (v1.7)
 
-- Opravy IndentationError (rekonstrukce souboru)
-- Qt6-safe formátování (QFont.Weight.*)
-- Drag&drop: refresh + reselection (okamžitě se zobrazí obsah)
-- Přesun: stromový výběr cíle (MoveTargetDialog)
-- Multiselect + filtr
-- Import DOCX: numbering.xml, ignorace A–F, zachování odrážek (ul/ol)
+- Formátování: zarovnání odstavců (vlevo / střed / vpravo / do bloku) — i pro vybranou část textu.
+- Strom: vizuální odlišení typů (skupina/podskupina/otázka) pomocí standardních ikon.
+- Zachováno: názvy otázek, náhled formátování, DnD refresh, stromový dialog přesunu, DOCX import s odrážkami.
 
 Autor: (doplní uživatel)
 Licence: MIT (nebo dle potřeby)
@@ -28,7 +25,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray
-from PySide6.QtGui import QAction, QKeySequence, QTextCharFormat, QTextCursor, QTextListFormat, QColor, QPalette, QFont
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QKeySequence,
+    QTextCharFormat,
+    QTextCursor,
+    QTextListFormat,
+    QTextBlockFormat,
+    QColor,
+    QPalette,
+    QFont,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -40,6 +48,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QToolBar,
     QTextEdit,
+    QTextBrowser,
     QFileDialog,
     QMessageBox,
     QLineEdit,
@@ -52,10 +61,11 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QLabel,
+    QStyle,
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.6"  # rebuild: fix indentation + UX + import
+APP_VERSION = "1.7"
 
 # --------------------------- Datové typy ---------------------------
 
@@ -119,7 +129,6 @@ class RootData:
 # --------------------------- Utility: Dark theme ---------------------------
 
 def apply_dark_theme(app: QApplication) -> None:
-    app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     QApplication.setStyle("Fusion")
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor(37, 37, 38))
@@ -146,7 +155,7 @@ class DnDTree(QTreeWidget):
         super().__init__()
         self.owner = owner
         self.setHeaderLabels(["Název", "Typ / body"])
-        self.setColumnWidth(0, 280)
+        self.setColumnWidth(0, 300)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
 
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -159,8 +168,6 @@ class DnDTree(QTreeWidget):
     def dropEvent(self, event) -> None:
         ids_before = self.owner._selected_question_ids()
         super().dropEvent(event)
-        # Po vizuálním přesunu stromu přegenerujeme datový model z aktuální struktury,
-        # znovu vykreslíme a vybereme přesunuté otázky, aby se zobrazil obsah.
         self.owner._sync_model_from_tree()
         self.owner._refresh_tree()
         self.owner._reselect_questions(ids_before)
@@ -193,34 +200,34 @@ class MoveTargetDialog(QDialog):
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
 
-        # Naplnit strom
         for g in owner.root.groups:
             g_item = QTreeWidgetItem([g.name, "Skupina"])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
+            g_item.setIcon(0, owner.style().standardIcon(QStyle.SP_DirIcon))
             self.tree.addTopLevelItem(g_item)
-            self._add_subs(g_item, g.id, g.subgroups)
+            self._add_subs(owner, g_item, g.id, g.subgroups)
 
         self.tree.expandAll()
 
-    def _add_subs(self, parent_item: QTreeWidgetItem, gid: str, subs: list[Subgroup]) -> None:
+    def _add_subs(self, owner: "MainWindow", parent_item: QTreeWidgetItem, gid: str, subs: List[Subgroup]) -> None:
         for sg in subs:
             it = QTreeWidgetItem([sg.name, "Podskupina"])
             it.setData(0, Qt.UserRole, {"kind": "subgroup", "id": sg.id, "parent_group_id": gid})
+            it.setIcon(0, owner.style().standardIcon(QStyle.SP_DirOpenIcon))
             parent_item.addChild(it)
             if sg.subgroups:
-                self._add_subs(it, gid, sg.subgroups)
+                self._add_subs(owner, it, gid, sg.subgroups)
 
-    def selected_target(self) -> tuple[str, str]:
-        """Vrátí (group_id, subgroup_id). Pokud je vybrána skupina bez podskupin, subgroup_id může být None."""
+    def selected_target(self) -> tuple[str, Optional[str]]:
         items = self.tree.selectedItems()
         if not items:
-            return "", ""
+            return "", None
         meta = items[0].data(0, Qt.UserRole) or {}
         if meta.get("kind") == "subgroup":
             return meta.get("parent_group_id"), meta.get("id")
         elif meta.get("kind") == "group":
             return meta.get("id"), None
-        return "", ""
+        return "", None
 
 
 # --------------------------- Hlavní okno ---------------------------
@@ -229,15 +236,15 @@ class MainWindow(QMainWindow):
     """Hlavní okno aplikace."""
 
     # ---------- Pomocné (výběr otázek, reselection) ----------
-    def _selected_question_ids(self) -> list[str]:
-        ids: list[str] = []
+    def _selected_question_ids(self) -> List[str]:
+        ids: List[str] = []
         for it in self.tree.selectedItems():
             meta = it.data(0, Qt.UserRole) or {}
             if meta.get("kind") == "question":
                 ids.append(meta.get("id"))
         return ids
 
-    def _reselect_questions(self, ids: list[str]) -> None:
+    def _reselect_questions(self, ids: List[str]) -> None:
         if not ids:
             return
         wanted = set(ids)
@@ -261,9 +268,8 @@ class MainWindow(QMainWindow):
     def __init__(self, data_path: Optional[Path] = None) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(1200, 800)
+        self.resize(1200, 880)
 
-        # cesta k datům (JSON)
         self.project_root = Path.cwd()
         default_data_dir = self.project_root / "data"
         default_data_dir.mkdir(parents=True, exist_ok=True)
@@ -292,7 +298,6 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(6)
 
-        # Filtr a hromadné akce
         filter_bar = QWidget()
         filter_layout = QHBoxLayout(filter_bar)
         filter_layout.setContentsMargins(6, 6, 6, 0)
@@ -306,17 +311,15 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.btn_delete_selected)
         left_layout.addWidget(filter_bar)
 
-        # Strom
         self.tree = DnDTree(self)
         left_layout.addWidget(self.tree, 1)
 
-        # Pravý panel: editor/props
+        # Pravý panel: editor + náhled
         self.detail_stack = QWidget()
         self.detail_layout = QVBoxLayout(self.detail_stack)
         self.detail_layout.setContentsMargins(6, 6, 6, 6)
         self.detail_layout.setSpacing(8)
 
-        # --- Toolbar pro rich text
         self.editor_toolbar = QToolBar("Formát")
         self.editor_toolbar.setIconSize(QSize(18, 18))
         self.action_bold = QAction("Tučné", self)
@@ -332,6 +335,16 @@ class MainWindow(QMainWindow):
         self.action_bullets = QAction("Odrážky", self)
         self.action_bullets.setCheckable(True)
 
+        # Zarovnání
+        self.action_align_left = QAction("Vlevo", self)
+        self.action_align_center = QAction("Na střed", self)
+        self.action_align_right = QAction("Vpravo", self)
+        self.action_align_justify = QAction("Do bloku", self)
+        self.align_group = QActionGroup(self)
+        for a in (self.action_align_left, self.action_align_center, self.action_align_right, self.action_align_justify):
+            a.setCheckable(True)
+            self.align_group.addAction(a)
+
         self.editor_toolbar.addAction(self.action_bold)
         self.editor_toolbar.addAction(self.action_italic)
         self.editor_toolbar.addAction(self.action_underline)
@@ -339,13 +352,20 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.addAction(self.action_color)
         self.editor_toolbar.addSeparator()
         self.editor_toolbar.addAction(self.action_bullets)
+        self.editor_toolbar.addSeparator()
+        self.editor_toolbar.addAction(self.action_align_left)
+        self.editor_toolbar.addAction(self.action_align_center)
+        self.editor_toolbar.addAction(self.action_align_right)
+        self.editor_toolbar.addAction(self.action_align_justify)
 
-        # --- Panel s typem a body
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignLeft)
 
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("Krátký název otázky…")
+
         self.combo_type = QComboBox()
-        self.combo_type.addItems(["Klasická", "BONUS"])  # mapujeme ručně
+        self.combo_type.addItems(["Klasická", "BONUS"])
 
         self.spin_points = QSpinBox()
         self.spin_points.setRange(-999, 999)
@@ -359,26 +379,26 @@ class MainWindow(QMainWindow):
         self.spin_bonus_wrong.setRange(-999, 999)
         self.spin_bonus_wrong.setValue(0)
 
-        self.title_edit = QLineEdit()
-        self.title_edit.setPlaceholderText("Krátký název otázky…")
         form.addRow("Název otázky:", self.title_edit)
-
         form.addRow("Typ otázky:", self.combo_type)
         form.addRow("Body (klasická):", self.spin_points)
         form.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
         form.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
 
-        # --- Rich text editor
         self.text_edit = QTextEdit()
         self.text_edit.setAcceptRichText(True)
-        self.text_edit.setPlaceholderText("Sem napište znění otázky…\nPodporováno: tučné, kurzíva, podtržení, barva, odrážky.")
-        self.text_edit.setMinimumHeight(200)
+        self.text_edit.setPlaceholderText("Sem napište znění otázky…\nPodporováno: tučné, kurzíva, podtržení, barva, odrážky, zarovnání.")
+        self.text_edit.setMinimumHeight(260)
 
-        # --- Tlačítka akce
+        # Náhled (read-only) — renderuje HTML přes QTextBrowser
+        self.preview_label = QLabel("Náhled formátování:")
+        self.preview = QTextBrowser()
+        self.preview.setOpenExternalLinks(True)
+        self.preview.setMinimumHeight(180)
+
         self.btn_save_question = QPushButton("Uložit změny otázky")
         self.btn_save_question.setDefault(True)
 
-        # --- Panel pro přejmenování skupiny/podskupiny
         self.rename_panel = QWidget()
         rename_layout = QFormLayout(self.rename_panel)
         self.rename_line = QLineEdit()
@@ -386,10 +406,11 @@ class MainWindow(QMainWindow):
         rename_layout.addRow("Název:", self.rename_line)
         rename_layout.addRow(self.btn_rename)
 
-        # Skládání pravého panelu
         self.detail_layout.addWidget(self.editor_toolbar)
         self.detail_layout.addLayout(form)
         self.detail_layout.addWidget(self.text_edit, 1)
+        self.detail_layout.addWidget(self.preview_label)
+        self.detail_layout.addWidget(self.preview)
         self.detail_layout.addWidget(self.btn_save_question)
         self.detail_layout.addWidget(self.rename_panel)
         self._set_editor_enabled(False)
@@ -399,7 +420,6 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         self.setCentralWidget(splitter)
 
-        # Hlavní toolbar
         tb = self.addToolBar("Hlavní")
         tb.setIconSize(QSize(18, 18))
         self.act_add_group = QAction("Přidat skupinu", self)
@@ -429,12 +449,13 @@ class MainWindow(QMainWindow):
 
     def _set_editor_enabled(self, enabled: bool) -> None:
         self.editor_toolbar.setEnabled(enabled)
-        self.combo_type.setEnabled(enabled)
         self.title_edit.setEnabled(enabled)
+        self.combo_type.setEnabled(enabled)
         self.spin_points.setEnabled(enabled)
-        self.spin_bonus_correct.setEnabled(enabled)
-        self.spin_bonus_wrong.setEnabled(enabled)
+        self.spin_bonus_correct.setEnabled(enabled and self.combo_type.currentIndex() == 1)
+        self.spin_bonus_wrong.setEnabled(enabled and self.combo_type.currentIndex() == 1)
         self.text_edit.setEnabled(enabled)
+        self.preview.setEnabled(enabled)
         self.btn_save_question.setEnabled(enabled)
 
     def _connect_signals(self) -> None:
@@ -449,7 +470,13 @@ class MainWindow(QMainWindow):
         self.action_underline.triggered.connect(lambda: self._toggle_format("underline"))
         self.action_color.triggered.connect(self._choose_color)
         self.action_bullets.triggered.connect(self._toggle_bullets)
+        self.action_align_left.triggered.connect(lambda: self._apply_alignment(Qt.AlignLeft))
+        self.action_align_center.triggered.connect(lambda: self._apply_alignment(Qt.AlignHCenter))
+        self.action_align_right.triggered.connect(lambda: self._apply_alignment(Qt.AlignRight))
+        self.action_align_justify.triggered.connect(lambda: self._apply_alignment(Qt.AlignJustify))
+
         self.text_edit.cursorPositionChanged.connect(self._sync_toolbar_to_cursor)
+        self.text_edit.textChanged.connect(self._update_preview)
 
         # Toolbar actions
         self.act_add_group.triggered.connect(self._add_group)
@@ -487,7 +514,6 @@ class MainWindow(QMainWindow):
         self.act_move_selected.triggered.connect(self._bulk_move_selected)
         self.act_delete_selected.triggered.connect(self._bulk_delete_selected)
 
-        # Viditelné tlačítko do toolbaru Import
         tb_import = self.addToolBar("Import")
         tb_import.setIconSize(QSize(18, 18))
         tb_import.addAction(self.act_import_docx)
@@ -513,12 +539,9 @@ class MainWindow(QMainWindow):
             self.root = self.default_root_obj()
 
     def save_data(self) -> None:
-        # promítnout rozpracované změny otázky
         self._apply_editor_to_current_question(silent=True)
-
         self.data_path.parent.mkdir(parents=True, exist_ok=True)
         data = {"groups": [self._serialize_group(g) for g in self.root.groups]}
-
         try:
             sf = QSaveFile(str(self.data_path))
             sf.open(QSaveFile.WriteOnly)
@@ -529,31 +552,28 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Uložení selhalo", f"Chyba při ukládání do {self.data_path}:\n{e}")
 
-    # ---- JSON parse/serialize helpers (rekurzivně) ----
-
     def _parse_group(self, g: dict) -> Group:
         subgroups = [self._parse_subgroup(sg) for sg in g.get("subgroups", [])]
         return Group(id=g["id"], name=g["name"], subgroups=subgroups)
 
-    
+    def _parse_subgroup(self, sg: dict) -> Subgroup:
+        subgroups_raw = sg.get("subgroups", [])
+        subgroups = [self._parse_subgroup(s) for s in subgroups_raw]
+        questions = [self._parse_question(q) for q in sg.get("questions", [])]
+        return Subgroup(id=sg["id"], name=sg["name"], subgroups=subgroups, questions=questions)
+
     def _parse_question(self, q: dict) -> Question:
-        # Backward kompatibilita: starší JSON nemá 'title'
-        title = q.get("title") or self._derive_title_from_html(q.get("text_html") or "<p></p>", prefix=("BONUS: " if q.get("type")=="bonus" else ""))
+        title = q.get("title") or self._derive_title_from_html(q.get("text_html") or "<p></p>", prefix=("BONUS: " if q.get("type") == "bonus" else ""))
         return Question(
             id=q.get("id", ""),
             type=q.get("type", "classic"),
             text_html=q.get("text_html", "<p><br></p>"),
             title=title,
             points=int(q.get("points", 1)),
-            bonus_correct=int(q.get("bonus_correct", 1 if q.get("type")=="bonus" else 0)),
+            bonus_correct=int(q.get("bonus_correct", 1 if q.get("type") == "bonus" else 0)),
             bonus_wrong=int(q.get("bonus_wrong", 0)),
             created_at=q.get("created_at", ""),
         )
-def _parse_subgroup(self, sg: dict) -> Subgroup:
-        subgroups_raw = sg.get("subgroups", [])
-        subgroups = [self._parse_subgroup(s) for s in subgroups_raw]
-        questions = [self._parse_question(q) for q in sg.get("questions", [])]
-        return Subgroup(id=sg["id"], name=sg["name"], subgroups=subgroups, questions=questions)
 
     def _serialize_group(self, g: Group) -> dict:
         return {"id": g.id, "name": g.name, "subgroups": [self._serialize_subgroup(sg) for sg in g.subgroups]}
@@ -573,6 +593,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
         for g in self.root.groups:
             g_item = QTreeWidgetItem([g.name, "Skupina"])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
+            g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
             self.tree.addTopLevelItem(g_item)
             self._add_subgroups_to_item(g_item, g.id, g.subgroups)
         self.tree.expandAll()
@@ -584,15 +605,15 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
             parent_sub_id = parent_meta.get("id") if parent_meta.get("kind") == "subgroup" else None
             sg_item = QTreeWidgetItem([sg.name, "Podskupina"])
             sg_item.setData(0, Qt.UserRole, {"kind": "subgroup", "id": sg.id, "parent_group_id": group_id, "parent_subgroup_id": parent_sub_id})
+            sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirOpenIcon))
             parent_item.addChild(sg_item)
-            # questions
             for q in sg.questions:
                 label = "Klasická" if q.type == "classic" else "BONUS"
                 pts = q.points if q.type == "classic" else f"+{q.bonus_correct}/ {q.bonus_wrong}"
                 q_item = QTreeWidgetItem([q.title or "Otázka", f"{label} | {pts}"])
                 q_item.setData(0, Qt.UserRole, {"kind": "question", "id": q.id, "parent_group_id": group_id, "parent_subgroup_id": sg.id})
+                q_item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
                 sg_item.addChild(q_item)
-            # nested subgroups
             if sg.subgroups:
                 self._add_subgroups_to_item(sg_item, group_id, sg.subgroups)
 
@@ -607,8 +628,6 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
         return meta.get("kind"), meta
 
     def _sync_model_from_tree(self) -> None:
-        """Zreplikuje datový model podle aktuální struktury stromu (po DnD)."""
-        # Připravíme mapy id -> objekt
         group_map = {g.id: g for g in self.root.groups}
         subgroup_map: dict[str, Subgroup] = {}
         question_map: dict[str, Question] = {}
@@ -648,7 +667,6 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
                     else:
                         container.questions.append(q)
 
-        # top-level (groups)
         for i in range(self.tree.topLevelItemCount()):
             gi = self.tree.topLevelItem(i)
             meta = gi.data(0, Qt.UserRole) or {}
@@ -766,6 +784,28 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
                 self._clear_editor()
                 self.save_data()
 
+    def _bulk_delete_selected(self) -> None:
+        items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get("kind") == "question"]
+        if not items:
+            QMessageBox.information(self, "Smazat vybrané", "Vyberte ve stromu alespoň jednu otázku.")
+            return
+        if QMessageBox.question(self, "Smazat vybrané", f"Opravdu smazat {len(items)} vybraných otázek?") != QMessageBox.Yes:
+            return
+        deleted = 0
+        for it in items:
+            meta = it.data(0, Qt.UserRole) or {}
+            gid = meta.get("parent_group_id")
+            sgid = meta.get("parent_subgroup_id")
+            qid = meta.get("id")
+            sg = self._find_subgroup(gid, sgid)
+            if sg:
+                sg.questions = [q for q in sg.questions if q.id != qid]
+                deleted += 1
+        self._refresh_tree()
+        self._clear_editor()
+        self.save_data()
+        self.statusBar().showMessage(f"Smazáno {deleted} otázek.", 4000)
+
     def _on_rename_clicked(self) -> None:
         kind, meta = self._selected_node()
         if kind not in ("group", "subgroup"):
@@ -813,10 +853,12 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
     def _clear_editor(self) -> None:
         self._current_question_id = None
         self.text_edit.clear()
+        self.preview.clear()
         self.spin_points.setValue(1)
         self.spin_bonus_correct.setValue(1)
         self.spin_bonus_wrong.setValue(0)
         self.combo_type.setCurrentIndex(0)
+        self.title_edit.clear()
         self._set_editor_enabled(False)
 
     def _load_question_to_editor(self, q: Question) -> None:
@@ -827,6 +869,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
         self.spin_bonus_wrong.setValue(int(q.bonus_wrong))
         self.text_edit.setHtml(q.text_html or "<p><br></p>")
         self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
+        self._update_preview()
         self._set_editor_enabled(True)
         self.rename_panel.hide()
 
@@ -840,7 +883,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
                     if q.id == self._current_question_id:
                         q.type = "classic" if self.combo_type.currentIndex() == 0 else "bonus"
                         q.text_html = self.text_edit.toHtml()
-                        q.title = (self.title_edit.text().strip() or self._derive_title_from_html(q.text_html))
+                        q.title = (self.title_edit.text().strip() or self._derive_title_from_html(q.text_html, prefix=("BONUS: " if q.type == "bonus" else "")))
                         if q.type == "classic":
                             q.points = int(self.spin_points.value())
                             q.bonus_correct = 0
@@ -868,6 +911,11 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
     def _on_save_question_clicked(self) -> None:
         self._apply_editor_to_current_question(silent=False)
 
+    def _update_selected_question_item_title(self, text: str) -> None:
+        items = self.tree.selectedItems()
+        if items:
+            items[0].setText(0, text or "Otázka")
+
     def _update_selected_question_item_subtitle(self, text: str) -> None:
         items = self.tree.selectedItems()
         if items:
@@ -875,34 +923,13 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
 
     # -------------------- Vyhledávače v datech (rekurzivně) --------------------
 
-    def _update_selected_question_item_title(self, text: str) -> None:
-        items = self.tree.selectedItems()
-        if items:
-            items[0].setText(0, text or "Otázka")
-
-
-    def _derive_title_from_html(self, html: str, prefix: str = "") -> str:
-        import re, html as _h
-        txt = re.sub(r'<[^>]+>', ' ', html or '')
-        txt = _h.unescape(txt).strip()
-        if not txt:
-            return (prefix + "Otázka").strip()
-        # pick first sentence or first 80 chars
-        m = re.split(r'[.!?]\s', txt)
-        head = m[0] if m and m[0] else txt
-        head = head.strip()
-        if len(head) > 80:
-            head = head[:77].rstrip() + '…'
-        return (prefix + head).strip()
-
-
     def _find_group(self, gid: str) -> Optional[Group]:
         for g in self.root.groups:
             if g.id == gid:
                 return g
         return None
 
-    def _find_subgroup(self, gid: str, sgid: str) -> Optional[Subgroup]:
+    def _find_subgroup(self, gid: str, sgid: Optional[str]) -> Optional[Subgroup]:
         g = self._find_group(gid)
         if not g:
             return None
@@ -918,7 +945,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
 
         return rec(g.subgroups)
 
-    def _find_question(self, gid: str, sgid: str, qid: str) -> Optional[Question]:
+    def _find_question(self, gid: str, sgid: Optional[str], qid: str) -> Optional[Question]:
         sg = self._find_subgroup(gid, sgid)
         if not sg:
             return None
@@ -964,6 +991,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
         elif which == "underline":
             fmt.setFontUnderline(self.action_underline.isChecked())
         self._merge_format_on_selection(fmt)
+        self._update_preview()
 
     def _choose_color(self) -> None:
         color = QColorDialog.getColor(parent=self, title="Vyberte barvu textu")
@@ -971,6 +999,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
             fmt = QTextCharFormat()
             fmt.setForeground(color)
             self._merge_format_on_selection(fmt)
+            self._update_preview()
 
     def _toggle_bullets(self) -> None:
         cursor = self.text_edit.textCursor()
@@ -985,6 +1014,33 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
             fmt = QTextListFormat()
             fmt.setStyle(QTextListFormat.ListDisc)
             cursor.createList(fmt)
+        self._update_preview()
+
+    def _apply_alignment(self, align_flag: Qt.AlignmentFlag) -> None:
+        cursor = self.text_edit.textCursor()
+        bf = QTextBlockFormat()
+        bf.setAlignment(align_flag)
+        if cursor.hasSelection():
+            # Aplikovat na všechny bloky v rozsahu
+            start = cursor.selectionStart()
+            end = cursor.selectionEnd()
+            cursor.beginEditBlock()
+            tmp = QTextCursor(self.text_edit.document())
+            tmp.setPosition(start)
+            while tmp.position() <= end:
+                block_cursor = QTextCursor(tmp.block())
+                block_format = block_cursor.blockFormat()
+                block_format.setAlignment(align_flag)
+                block_cursor.setBlockFormat(block_format)
+                if tmp.block().position() + tmp.block().length() > end:
+                    break
+                tmp.movePosition(QTextCursor.NextBlock)
+            cursor.endEditBlock()
+        else:
+            cursor.mergeBlockFormat(bf)
+        self.text_edit.setTextCursor(cursor)
+        self._sync_toolbar_to_cursor()
+        self._update_preview()
 
     def _sync_toolbar_to_cursor(self) -> None:
         fmt = self.text_edit.currentCharFormat()
@@ -997,11 +1053,21 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
         in_list = self.text_edit.textCursor().block().textList() is not None
         self.action_bullets.setChecked(in_list)
 
+        # Alignment buttons
+        align = self.text_edit.textCursor().blockFormat().alignment()
+        self.action_align_left.setChecked(bool(align & Qt.AlignLeft))
+        self.action_align_center.setChecked(bool(align & Qt.AlignHCenter))
+        self.action_align_right.setChecked(bool(align & Qt.AlignRight))
+        self.action_align_justify.setChecked(bool(align & Qt.AlignJustify))
+
     def _on_type_changed_ui(self) -> None:
         is_classic = self.combo_type.currentIndex() == 0
         self.spin_points.setEnabled(is_classic)
         self.spin_bonus_correct.setEnabled(not is_classic)
         self.spin_bonus_wrong.setEnabled(not is_classic)
+
+    def _update_preview(self) -> None:
+        self.preview.setHtml(self.text_edit.toHtml())
 
     # -------------------- Výběr datového souboru --------------------
 
@@ -1089,14 +1155,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
         else:
             QMessageBox.information(self, "Import", "Nebyla nalezena žádná otázka.")
 
-    # ---- Numbering helpers ----
-
     def _read_numbering_map(self, z: zipfile.ZipFile) -> tuple[dict[int, int], dict[tuple[int, int], str]]:
-        """
-        Returns:
-            num_to_abstract: map numId -> abstractNumId
-            fmt_map: map (abstractNumId, ilvl) -> numFmt (e.g., 'decimal', 'lowerLetter', 'bullet')
-        """
         num_to_abstract: dict[int, int] = {}
         fmt_map: dict[tuple[int, int], str] = {}
         try:
@@ -1108,7 +1167,6 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
         ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
         root = ET.fromstring(xml)
 
-        # map numId -> abstractNumId
         for num in root.findall(".//w:num", ns):
             nid = num.find("w:abstractNumId", ns)
             val = nid.get("{%s}val" % ns["w"]) if nid is not None else None
@@ -1120,7 +1178,6 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
                 except Exception:
                     pass
 
-        # map (abstractNumId, ilvl) -> numFmt
         for absn in root.findall(".//w:abstractNum", ns):
             aid_attr = absn.get("{%s}abstractNumId" % ns["w"])
             if aid_attr is None:
@@ -1142,11 +1199,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
                 fmt_map[(abs_id, ilvl)] = fmt
         return num_to_abstract, fmt_map
 
-    def _extract_paragraphs_from_docx(self, path: Path) -> list[dict]:
-        """
-        Extract paragraphs with numbering metadata.
-        Returns list of dicts: {'text': str, 'is_numbered': bool, 'num_fmt': str|None, 'ilvl': int|None}
-        """
+    def _extract_paragraphs_from_docx(self, path: Path) -> List[dict]:
         with zipfile.ZipFile(path, "r") as z:
             with z.open("word/document.xml") as f:
                 xml_bytes = f.read()
@@ -1154,7 +1207,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
 
         ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
         root = ET.fromstring(xml_bytes)
-        out: list[dict] = []
+        out: List[dict] = []
         for p in root.findall(".//w:p", ns):
             ppr = p.find("w:pPr", ns)
             is_num = False
@@ -1184,20 +1237,11 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
             out.append({"text": txt, "is_numbered": is_num, "num_fmt": num_fmt, "ilvl": ilvl})
         return out
 
-    def _parse_questions_from_paragraphs(self, paragraphs: list[dict]) -> list[Question]:
-        """
-        Každý číslovaný odstavec na úrovni 0 (hlavní seznam) je 1 KLASICKÁ otázka.
-        BONUS: odstavec začínající "Otázka <číslo>" nebo obsahující "BONUS".
-        Zachováme jednoduché odrážky/číslování v následujících odstavcích jako HTML listy.
-        """
-        # Tolerance k tuple formátu
+    def _parse_questions_from_paragraphs(self, paragraphs: List[dict]) -> List[Question]:
         if paragraphs and isinstance(paragraphs[0], tuple):
-            paragraphs = [
-                {'text': t[0], 'is_numbered': bool(t[1]), 'num_fmt': None, 'ilvl': None}
-                for t in paragraphs
-            ]
+            paragraphs = [{'text': t[0], 'is_numbered': bool(t[1]), 'num_fmt': None, 'ilvl': None} for t in paragraphs]
 
-        out: list[Question] = []
+        out: List[Question] = []
         i = 0
         n = len(paragraphs)
 
@@ -1223,8 +1267,7 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
         def html_escape(s: str) -> str:
             return _html.escape(s or "")
 
-        def wrap_list(items: list[tuple[str, int, str]]) -> str:
-            """Renderujeme jednoduchý (jednoúrovňový) seznam."""
+        def wrap_list(items: List[tuple[str, int, str]]) -> str:
             if not items:
                 return ""
             fmt = items[0][2] or "decimal"
@@ -1250,7 +1293,6 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
                 i += 1
                 continue
 
-            # BONUS otázka
             if rx_bonus_start.match(txt) or ("bonus" in (txt or "").lower()):
                 block_html = f"<p>{html_escape(txt)}</p>"
                 j = i + 1
@@ -1272,11 +1314,10 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
                 i = j
                 continue
 
-            # KLASICKÁ otázka – číslovaný odstavec na top level (ilvl==0) nebo text připomínající otázku
             is_top_numbered = is_num and (ilvl is None or ilvl == 0)
             if is_top_numbered or rx_classic_numtxt.match(txt) or is_question_like(txt):
                 block_html = f"<p>{html_escape(txt)}</p>"
-                list_buffer: list[tuple[str, int, str]] = []
+                list_buffer: List[tuple[str, int, str]] = []
                 j = i + 1
                 while j < n:
                     next_txt = paragraphs[j].get("text", "")
@@ -1288,17 +1329,14 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
                         j += 1
                         continue
 
-                    # Nový začátek otázky?
                     if (next_isnum and (next_ilvl is None or next_ilvl == 0)) or rx_bonus_start.match(next_txt) or rx_classic_numtxt.match(next_txt) or is_question_like(next_txt):
                         break
 
-                    # Seznam (odrážky, a./b./1./…)
                     if next_isnum:
                         list_buffer.append((next_txt.strip(), next_ilvl or 0, (next_fmt or "decimal")))
                         j += 1
                         continue
 
-                    # Krátké řádky jako podřádek
                     if len(next_txt.strip()) <= 120:
                         block_html += f"<p>{html_escape(next_txt.strip())}</p>"
                         j += 1
@@ -1365,7 +1403,10 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
         target_sg.questions.append(q)
         self._refresh_tree()
         self.save_data()
-        self.statusBar().showMessage("Otázka přesunuta.", 4000)
+
+        g_name = g.name if g else ""
+        sg_name = target_sg.name if target_sg else "Default"
+        self.statusBar().showMessage(f"Otázka přesunuta do {g_name} / {sg_name}.", 4000)
 
     def _bulk_move_selected(self) -> None:
         items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get('kind') == 'question']
@@ -1399,7 +1440,25 @@ def _parse_subgroup(self, sg: dict) -> Subgroup:
                 moved += 1
         self._refresh_tree()
         self.save_data()
-        self.statusBar().showMessage(f"Přesunuto {moved} otázek.", 4000)
+
+        g_name = g.name if g else ""
+        sg_name = target_sg.name if target_sg else "Default"
+        self.statusBar().showMessage(f"Přesunuto {moved} otázek do {g_name} / {sg_name}.", 4000)
+
+    # -------------------- Pomocné --------------------
+
+    def _derive_title_from_html(self, html: str, prefix: str = "") -> str:
+        import re as _re, html as _h
+        txt = _re.sub(r'<[^>]+>', ' ', html or '')
+        txt = _h.unescape(txt).strip()
+        if not txt:
+            return (prefix + "Otázka").strip()
+        parts = _re.split(r'[.!?]\s', txt)
+        head = parts[0] if parts and parts[0] else txt
+        head = head.strip()
+        if len(head) > 80:
+            head = head[:77].rstrip() + '…'
+        return (prefix + head).strip()
 
 
 # --------------------------- main ---------------------------
@@ -1409,8 +1468,7 @@ def main() -> int:
     apply_dark_theme(app)
     w = MainWindow()
     w.show()
-    ret = app.exec()
-    return ret
+    return app.exec()
 
 
 if __name__ == "__main__":
