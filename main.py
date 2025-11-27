@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QTreeWidget,
     QTreeWidgetItem,
     QSplitter,
@@ -50,7 +51,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.2a"  # minor: nested subgroups + drag&drop
+APP_VERSION = "1.3"  # minor: nested subgroups + drag&drop
 
 # --------------------------- Datové typy ---------------------------
 
@@ -134,6 +135,7 @@ def apply_dark_theme(app: QApplication) -> None:
 # --------------------------- DnD Tree ---------------------------
 
 class DnDTree(QTreeWidget):
+    # v1.3: multi-select zapnuto (ExtendedSelection)
     """QTreeWidget s podporou drag&drop, po přesunu synchronizuje datový model."""
 
     def __init__(self, owner: "MainWindow") -> None:
@@ -143,6 +145,7 @@ class DnDTree(QTreeWidget):
         self.setColumnWidth(0, 280)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
 
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
@@ -190,8 +193,29 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(8)
 
-        # Levý strom: skupiny/podskupiny/otázky
+        # Levý panel: filtrace + strom
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+
+        # Filtr a hromadné akce
+        filter_bar = QWidget()
+        filter_layout = QHBoxLayout(filter_bar)
+        filter_layout.setContentsMargins(6, 6, 6, 0)
+        filter_layout.setSpacing(6)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filtr: název / obsah otázky…")
+        self.btn_move_selected = QPushButton("Přesunout vybrané…")
+        self.btn_delete_selected = QPushButton("Smazat vybrané")
+        filter_layout.addWidget(self.filter_edit, 1)
+        filter_layout.addWidget(self.btn_move_selected)
+        filter_layout.addWidget(self.btn_delete_selected)
+        left_layout.addWidget(filter_bar)
+
+        # Strom
         self.tree = DnDTree(self)
+        left_layout.addWidget(self.tree, 1)
 
         # Pravý panel: editor/props
         self.detail_stack = QWidget()
@@ -273,10 +297,10 @@ class MainWindow(QMainWindow):
         self.detail_layout.addWidget(self.rename_panel)
         self._set_editor_enabled(False)
 
-        splitter.addWidget(self.tree)
+        splitter.addWidget(left_panel)
         splitter.addWidget(self.detail_stack)
         splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+self.setCentralWidget(splitter)
 
         # Hlavní toolbar: přidání/mazání/uložení
         tb = self.addToolBar("Hlavní")
@@ -336,6 +360,11 @@ class MainWindow(QMainWindow):
         self.act_delete.triggered.connect(self._delete_selected)
         self.act_save_all.triggered.connect(self.save_data)
         self.act_choose_data.triggered.connect(self._choose_data_file)
+        # Filtr + hromadné akce
+        self.filter_edit.textChanged.connect(self._apply_filter)
+        self.btn_move_selected.clicked.connect(self._bulk_move_selected)
+        self.btn_delete_selected.clicked.connect(self._bulk_delete_selected)
+
 
     # -------------------- Menu (import/přesun) --------------------
 
@@ -346,12 +375,16 @@ class MainWindow(QMainWindow):
 
         self.act_import_docx = QAction("Import z DOCX…", self)
         self.act_move_question = QAction("Přesunout otázku…", self)
+        self.act_move_selected = QAction("Přesunout vybrané…", self)
+        self.act_delete_selected = QAction("Smazat vybrané", self)
 
         # Zkratka pro rychlý import
         self.act_import_docx.setShortcut("Ctrl+I")
 
         file_menu.addAction(self.act_import_docx)
         edit_menu.addAction(self.act_move_question)
+        edit_menu.addAction(self.act_move_selected)
+        edit_menu.addAction(self.act_delete_selected)
 
         self.act_import_docx.triggered.connect(self._import_from_docx)
         self.act_move_question.triggered.connect(self._move_question)
@@ -360,6 +393,9 @@ class MainWindow(QMainWindow):
         tb_import = self.addToolBar("Import")
         tb_import.setIconSize(QSize(18, 18))
         tb_import.addAction(self.act_import_docx)
+
+        self.act_move_selected.triggered.connect(self._bulk_move_selected)
+        self.act_delete_selected.triggered.connect(self._bulk_delete_selected)
 
 
     # -------------------- Práce s daty (JSON) --------------------
@@ -429,7 +465,53 @@ class MainWindow(QMainWindow):
             "questions": [asdict(q) for q in sg.questions],
         }
 
-    # -------------------- Tree helpery --------------------
+    # -------------------- Filtr --------------------
+    def _apply_filter(self, text: str) -> None:
+        pat = (text or '').strip().lower()
+        def question_matches(qid: str) -> bool:
+            q = None
+            # najdi otázku podle id
+            for g in self.root.groups:
+                stack = list(g.subgroups)
+                while stack:
+                    sg = stack.pop()
+                    for qq in sg.questions:
+                        if qq.id == qid:
+                            q = qq
+                            break
+                    if q: break
+                    stack.extend(sg.subgroups)
+                if q: break
+            if not q:
+                return False
+            import re, html as _html
+            plain = re.sub(r'<[^>]+>', ' ', q.text_html)
+            plain = _html.unescape(plain).lower()
+            return pat in plain
+        def apply_item(item) -> bool:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = meta.get('kind')
+            # rekurzivně na děti
+            any_child = False
+            for i in range(item.childCount()):
+                if apply_item(item.child(i)):
+                    any_child = True
+            # self match
+            self_match = False
+            if not pat:
+                self_match = True
+            elif kind == 'group' or kind == 'subgroup':
+                name = item.text(0).lower()
+                self_match = pat in name
+            elif kind == 'question':
+                self_match = question_matches(meta.get('id'))
+            show = self_match or any_child
+            item.setHidden(not show)
+            return show
+        for i in range(self.tree.topLevelItemCount()):
+            apply_item(self.tree.topLevelItem(i))
+
+# -------------------- Tree helpery --------------------
 
     def _refresh_tree(self) -> None:
         self.tree.clear()
@@ -860,8 +942,8 @@ class MainWindow(QMainWindow):
         group_id, subgroup_id = self._ensure_unassigned_group()
         for p in paths:
             try:
-                text = self._extract_text_from_docx(Path(p))
-                questions = self._parse_questions_from_text(text)
+                paras = self._extract_paragraphs_from_docx(Path(p))
+                questions = self._parse_questions_from_paragraphs(paras)
                 if questions:
                     sg = self._find_subgroup(group_id, subgroup_id)
                     if not sg:
@@ -878,18 +960,28 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.information(self, "Import", "Nebyla nalezena žádná otázka.")
 
-    def _extract_text_from_docx(self, path: Path) -> str:
-        with zipfile.ZipFile(path, "r") as z:
-            with z.open("word/document.xml") as f:
+    
+
+    def _extract_paragraphs_from_docx(self, path: Path) -> list[tuple[str, bool]]:
+        """Vrátí seznam (text, is_numbered) pro jednotlivé odstavce v DOCX.
+        is_numbered je True, pokud odstavec obsahuje w:numPr (číslovaný seznam ve Wordu).
+        """
+        with zipfile.ZipFile(path, 'r') as z:
+            with z.open('word/document.xml') as f:
                 xml_bytes = f.read()
         root = ET.fromstring(xml_bytes)
-        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-        lines = []
-        for para in root.findall(".//w:p", ns):
-            runs = para.findall(".//w:t", ns)
-            line = "".join(t.text or "" for t in runs)
-            lines.append(line)
-        return "\n".join(lines)
+        ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        out: list[tuple[str, bool]] = []
+        for p in root.findall('.//w:p', ns):
+            ppr = p.find('w:pPr', ns)
+            is_num = False
+            if ppr is not None and ppr.find('w:numPr', ns) is not None:
+                is_num = True
+            texts = [t.text or '' for t in p.findall('.//w:t', ns)]
+            txt = ''.join(texts).strip()
+            out.append((txt, is_num))
+        return out
+
 
     def _ensure_unassigned_group(self) -> tuple[str, str]:
         name = "Neroztříděné"
@@ -901,7 +993,7 @@ class MainWindow(QMainWindow):
             g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name="Default", subgroups=[], questions=[]))
         return g.id, g.subgroups[0].id
 
-    def _parse_questions_from_text(self, text: str) -> list[Question]:
+    def _parse_questions_from_paragraphs(self, paragraphs: list[tuple[str, bool]]) -> list[Question]:
         lines = text.splitlines()
         blocks = []
         buf = []
@@ -988,6 +1080,71 @@ class MainWindow(QMainWindow):
         if not target_sg:
             return
 
+    def _bulk_move_selected(self) -> None:
+        items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get('kind') == 'question']
+        if not items:
+            QMessageBox.information(self, 'Přesun', 'Vyberte ve stromu alespoň jednu otázku.')
+            return
+        # výběr cíle (skupina -> podskupina)
+        from PySide6.QtWidgets import QInputDialog
+        group_names = [g.name for g in self.root.groups]
+        g_name, ok = QInputDialog.getItem(self, 'Přesun vybraných', 'Cílová skupina:', group_names, 0, False)
+        if not ok or not g_name:
+            return
+        g = next((g for g in self.root.groups if g.name == g_name), None)
+        if not g:
+            return
+        def flatten(lst, acc):
+            for s in lst:
+                acc.append(s)
+                flatten(s.subgroups, acc)
+        all_sg = []
+        flatten(g.subgroups, all_sg)
+        if not all_sg:
+            g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name='Default', subgroups=[], questions=[]))
+            all_sg = [g.subgroups[0]]
+        sg_names = [sg.name for sg in all_sg]
+        sg_name, ok = QInputDialog.getItem(self, 'Přesun vybraných', 'Cílová podskupina:', sg_names, 0, False)
+        if not ok or not sg_name:
+            return
+        target_sg = next((s for s in all_sg if s.name == sg_name), None)
+        if not target_sg:
+            return
+        # přesun
+        moved = 0
+        for it in items:
+            meta = it.data(0, Qt.UserRole)
+            qid = meta.get('id')
+            sg = self._find_subgroup(meta.get('parent_group_id'), meta.get('parent_subgroup_id'))
+            q = self._find_question(meta.get('parent_group_id'), meta.get('parent_subgroup_id'), qid)
+            if sg and q:
+                sg.questions = [qq for qq in sg.questions if qq.id != qid]
+                target_sg.questions.append(q)
+                moved += 1
+        self._refresh_tree()
+        self.save_data()
+        self.statusBar().showMessage(f'Přesunuto {moved} otázek do {g_name} / {sg_name}.', 4000)
+
+    def _bulk_delete_selected(self) -> None:
+        items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get('kind') == 'question']
+        if not items:
+            QMessageBox.information(self, 'Mazání', 'Vyberte ve stromu alespoň jednu otázku.')
+            return
+        if QMessageBox.question(self, 'Smazat vybrané', f'Opravdu smazat {len(items)} otázek?') != QMessageBox.Yes:
+            return
+        deleted = 0
+        for it in items:
+            meta = it.data(0, Qt.UserRole) or {}
+            qid = meta.get('id')
+            sg = self._find_subgroup(meta.get('parent_group_id'), meta.get('parent_subgroup_id'))
+            if sg:
+                before = len(sg.questions)
+                sg.questions = [q for q in sg.questions if q.id != qid]
+                if len(sg.questions) < before:
+                    deleted += 1
+        self._refresh_tree()
+        self.save_data()
+        self.statusBar().showMessage(f'Smazáno {deleted} otázek.', 4000)
         # Najdi zdroj
         src_gid = meta["parent_group_id"]
         src_sgid = meta["parent_subgroup_id"]
