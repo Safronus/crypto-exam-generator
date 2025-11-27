@@ -686,12 +686,12 @@ class ExportWizard(QWizard):
         
         # Levý panel: Dostupné otázky (Tree)
         left_layout = QVBoxLayout()
-        left_layout.addWidget(QLabel("<b>Dostupné otázky v databázi:</b>"))
+        left_layout.addWidget(QLabel("<b>Dostupné otázky:</b>"))
         self.tree_source = QTreeWidget()
-        self.tree_source.setHeaderLabels(["Název otázky", "Typ", "Body"])
-        self.tree_source.setColumnWidth(0, 280)
+        self.tree_source.setHeaderLabels(["Struktura otázek"]) # Jen jeden sloupec
+        # self.tree_source.setColumnWidth(0, 300) # Není třeba u jednoho sloupce
         left_layout.addWidget(self.tree_source)
-        l2.addLayout(left_layout, 4) # Ratio 4
+        l2.addLayout(left_layout, 1) # Ratio 1 (50%)
         
         # Pravý panel: Sloty
         right_layout = QVBoxLayout()
@@ -706,10 +706,11 @@ class ExportWizard(QWizard):
         self.scroll_slots.setWidget(self.widget_slots)
         
         right_layout.addWidget(self.scroll_slots)
-        l2.addLayout(right_layout, 6) # Ratio 6
+        l2.addLayout(right_layout, 1) # Ratio 1 (50%) - nebo dejte 4:6 podle libosti
         
         self.addPage(self.page2)
         self.page2.initializePage = self._init_page2
+
 
     def _build_page3(self):
         self.page3 = QWizardPage()
@@ -785,50 +786,51 @@ class ExportWizard(QWizard):
             if item.widget(): item.widget().deleteLater()
         self.layout_slots.addStretch()
         
-        # Helper pro rekurzivní přidávání podskupin
+        # Helper pro rekurzi
         def add_subgroup_recursive(parent_item, subgroup_list):
             for sg in subgroup_list:
-                sg_item = QTreeWidgetItem([sg.name, "", ""])
-                sg_item.setExpanded(True)
-                # Ikonu složky? (volitelné)
+                sg_item = QTreeWidgetItem([sg.name])
                 sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
-                
                 parent_item.addChild(sg_item)
                 
-                # 1. Otázky v této podskupině
+                # Otázky
                 for q in sg.questions:
-                    label = q.title
-                    if q.id in self.selection_map.values():
-                        label += " (VYBRÁNO)"
+                    # Formátování názvu: "Název (Typ, X b)"
+                    info = f"({q.points} b)" if q.type == 'classic' else f"(Bonus: {q.bonus_correct})"
+                    label = f"{q.title} {info}"
                     
-                    q_item = QTreeWidgetItem([label, q.type, str(q.points) if q.type=='classic' else f"B:{q.bonus_correct}"])
+                    if q.id in self.selection_map.values():
+                        label += " [VYBRÁNO]"
+                    
+                    q_item = QTreeWidgetItem([label])
                     q_item.setData(0, Qt.UserRole, q.id)
+                    
+                    # Ikonka otázky
+                    q_item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
                     
                     if q.id in self.selection_map.values():
                         q_item.setHidden(True)
                     
                     sg_item.addChild(q_item)
                 
-                # 2. Vnořené podskupiny
+                # Vnořené
                 if sg.subgroups:
                     add_subgroup_recursive(sg_item, sg.subgroups)
 
         # Load Tree
         groups = self.owner.root.groups
         for g in groups:
-            g_item = QTreeWidgetItem([g.name, "", ""])
-            g_item.setExpanded(True)
-            g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon)) # Ikona složky
-            
-            # Tučný font pro hlavní skupiny
+            g_item = QTreeWidgetItem([g.name])
+            g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
             f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
             
             self.tree_source.addTopLevelItem(g_item)
-            
-            # Spustíme rekurzi pro podskupiny
             add_subgroup_recursive(g_item, g.subgroups)
+            
+        # EXPAND ALL po naplnění
+        self.tree_source.expandAll()
 
-        # Load Slots (zbytek funkce zůstává stejný)
+        # Load Slots (zbytek beze změny)
         if self.placeholders_q:
             lbl = QLabel("--- KLASICKÉ OTÁZKY ---"); lbl.setStyleSheet("font-weight:bold; color:#4da6ff; margin-top:5px;")
             self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
