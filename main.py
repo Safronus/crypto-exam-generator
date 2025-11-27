@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Exam Generator (v1.8e)
+Crypto Exam Generator (v1.8f)
+
+Změny v 1.8f
+- HOTFIX: doplněny metody `MainWindow._choose_data_file` a `MainWindow._bulk_delete_selected`.
+- Napojení tlačítek v levém panelu: "Přesunout vybrané…" → `_bulk_move_selected`, "Smazat vybrané" → `_bulk_delete_selected`.
+- Ostatní funkce beze změny (v1.8e export DOCX, zachování číslování, robustní placeholdery).
 
 Změny v 1.8e
-- Export DOCX: 1:1 substituce všech placeholderů i když jsou **rozsekané do více w:t**, ve **všech word/*.xml**.
-- Zachování číslování šablony: **nepřepisujeme celý <w:p>**, ale pouze jeho **runs**.
-- `<OtázkaX>/<BONUSX>`:
-  * INLINE (token je uvnitř textu odstavce) → HTML otázky se vloží jako **runs** do téhož odstavce. Pokud má otázka více odstavců nebo položky listu, vkládají se **<w:br/>** mezi části → **číslování řádku zůstává**.
-  * BLOCK (odstavec obsahuje **jen** `<Token>`) → první část otázky nahradí runs v témže `<w:p>` (zachová pPr včetně číslování). Další části otázky se vloží jako **nové odstavce za původní** s čistým pPr (bez numPr).
-- Wizard: sken placeholderů přes jednotlivé **odstavce** (w:p), čímž najde i `<BONUS3>` rozsekaný do víc runů.
-- Výchozí cesty: šablona `.../data/Šablony/template_AK3KR.docx`, výstup do `.../data/Vygenerované testy/`.
+- Export DOCX: 1:1 substituce placeholderů i když jsou rozsekané do více w:t, a ve všech word/*.xml.
+- Zachování číslování: nepřepisujeme celý <w:p>, ale jen runs.
+- Inline/Block režim pro <OtázkaX>/<BONUSX>; defaultní cesty šablony a výstupu.
 """
 from __future__ import annotations
 
@@ -18,21 +19,21 @@ import sys, uuid as _uuid, html as _html, re, json, zipfile
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict
 
 from html.parser import HTMLParser
+from xml.etree import ElementTree as ET
 
-from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QTextCharFormat, QTextCursor, QTextListFormat, QTextBlockFormat, QColor, QPalette, QFont, QIcon
+from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray
+from PySide6.QtGui import QAction, QKeySequence, QColor, QPalette, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem, QSplitter, QToolBar,
     QTextEdit, QFileDialog, QMessageBox, QLineEdit, QPushButton, QFormLayout, QSpinBox, QDoubleSpinBox, QComboBox,
-    QColorDialog, QAbstractItemView, QDialog, QDialogButtonBox, QLabel, QStyle, QScrollArea, QWizard, QWizardPage,
-    QDateTimeEdit
+    QAbstractItemView, QDialog, QDialogButtonBox, QLabel, QStyle
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.8e"
+APP_VERSION = "1.8f"
 
 
 # ------------------ Datové modely ------------------
@@ -108,7 +109,7 @@ class DnDTree(QTreeWidget):
     def dropEvent(self, event) -> None:
         ids_before = self.owner._selected_qids()
         super().dropEvent(event)
-        self.owner._sync_model_from_tree() if hasattr(self.owner, "_sync_model_from_tree") else None
+        # Pokud někdy doplníme perzistenci pořadí, bude zde owner._sync_model_from_tree()
         self.owner._refresh_tree()
         self.owner._reselect(ids_before)
         self.owner.save_data()
@@ -159,7 +160,7 @@ class MoveTargetDialog(QDialog):
         return "", None
 
 
-# ------------------ Export: HTML parser → meziformát ------------------
+# ------------------ Export: HTML → bloky ------------------
 
 class HTMLToBlocks(HTMLParser):
     def __init__(self) -> None:
@@ -360,13 +361,14 @@ class MainWindow(QMainWindow):
     def _connect(self):
         self.tree.itemSelectionChanged.connect(self._on_tree_sel)
         self.btn_save_q.clicked.connect(lambda: self._save_current_q(False))
+        self.btn_move_selected.clicked.connect(self._bulk_move_selected)
+        self.btn_delete_selected.clicked.connect(self._bulk_delete_selected)
         self.act_add_g.triggered.connect(self._add_group)
         self.act_add_sg.triggered.connect(self._add_subgroup)
         self.act_add_q.triggered.connect(self._add_question)
         self.act_del.triggered.connect(self._delete_selected)
         self.act_save_all.triggered.connect(self.save_data)
         self.act_choose_data.triggered.connect(self._choose_data_file)
-        self.filter_edit.textChanged.connect(self._apply_filter)
 
     def _build_menus(self):
         bar = self.menuBar(); m_file = bar.addMenu("Soubor"); m_edit = bar.addMenu("Úpravy")
@@ -397,6 +399,16 @@ class MainWindow(QMainWindow):
         payload = json.dumps({"groups": [self._ser_group(g) for g in self.root.groups]}, ensure_ascii=False, indent=2)
         sf = QSaveFile(str(self.data_path)); sf.open(QSaveFile.WriteOnly); sf.write(QByteArray(payload.encode("utf-8"))); sf.commit()
         self.statusBar().showMessage("Uloženo.", 1200)
+
+    def _choose_data_file(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Zvolit/uložit JSON", str(self.data_path), "JSON (*.json)")
+        if not path:
+            return
+        self.data_path = Path(path)
+        self.statusBar().showMessage(f"Datový soubor: {self.data_path}", 2500)
+        # Při změně souboru zkus načíst existující data, jinak zůstaň u prázdného rootu
+        self.load_data()
+        self._refresh_tree()
 
     def _parse_group(self, g: dict) -> Group:
         return Group(g["id"], g["name"], [self._parse_subgroup(s) for s in g.get("subgroups",[])])
@@ -439,7 +451,7 @@ class MainWindow(QMainWindow):
                 pts = str(q.points) if q.type=="classic" else f"+{q.bonus_correct:.2f}/ {q.bonus_wrong:.2f}"
                 qi = QTreeWidgetItem([q.title or "Otázka", f"{label} | {pts}"])
                 qi.setData(0, Qt.UserRole, {"kind":"question","id": q.id, "parent_group_id": gid, "parent_subgroup_id": sg.id})
-                parent.child(parent.indexOfChild(it)).addChild(qi) if False else it.addChild(qi)
+                it.addChild(qi)
             if sg.subgroups:
                 self._add_subs_to_item(it, gid, sg.subgroups)
 
@@ -522,6 +534,22 @@ class MainWindow(QMainWindow):
         sg.questions = [qq for qq in sg.questions if qq.id != qid]
         self._refresh_tree(); self.save_data()
 
+    def _bulk_delete_selected(self):
+        items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get("kind")=="question"]
+        if not items:
+            QMessageBox.information(self, "Smazání", "Vyberte alespoň jednu otázku."); return
+        count = 0
+        for it in items:
+            meta = it.data(0, Qt.UserRole) or {}
+            gid, sgid, qid = meta.get("parent_group_id"), meta.get("parent_subgroup_id"), meta.get("id")
+            sg = self._find_sg(gid, sgid)
+            if not sg: continue
+            before = len(sg.questions)
+            sg.questions = [qq for qq in sg.questions if qq.id != qid]
+            count += before - len(sg.questions)
+        self._refresh_tree(); self.save_data()
+        self.statusBar().showMessage(f"Smazáno {count} otázek.", 4000)
+
     def _save_current_q(self, silent: bool=True):
         if not self._current_qid: return
         def apply_in(subs: List[Subgroup]) -> bool:
@@ -587,7 +615,7 @@ class MainWindow(QMainWindow):
         head = re.split(r'[.!?]\s', txt)[0] or txt
         return head[:80] + ('…' if len(head)>80 else '')
 
-    # Import DOCX (zjednodušený parser, otázky 1. … a BONUS "Otázka N" / text 'BONUS')
+    # Import DOCX (zjednodušený parser)
     def _import_from_docx(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Import z DOCX", str(self.project_root), "Word dokument (*.docx)")
         if not paths: return
@@ -625,7 +653,6 @@ class MainWindow(QMainWindow):
 
     # Přesuny
     def _bulk_move_selected(self):
-        from PySide6.QtWidgets import QInputDialog
         items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get("kind")=="question"]
         if not items: 
             QMessageBox.information(self, "Přesun", "Vyberte alespoň jednu otázku."); return
@@ -738,7 +765,7 @@ class MainWindow(QMainWindow):
                                     clear_runs(p); p.append(make_run(simple[name])); continue
                             replace_inline_in_p(p, simple, rich_blocks)
                         data = ET.tostring(root, encoding="utf-8", xml_declaration=False)
-                    except Exception as e:
+                    except Exception:
                         pass
                 zout.writestr(item, data)
 

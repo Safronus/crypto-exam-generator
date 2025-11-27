@@ -2,11 +2,9 @@
 
 PySide6 aplikace pro správu a export zkušebních otázek (Kryptologie). Jednosouborové GUI (`main.py`).
 
-## Novinky – verze 1.8e (2025-11-27)
-- Export DOCX **zachovává číslování** – upravují se jen *runs*, `w:pPr` (včetně `numPr`) zůstává.
-- Placeholdery se nahrazují i pokud jsou **rozsekané do více `w:t`**.
-- INLINE i BLOCK náhrady `<OtázkaX>/<BONUSX>`; `<BONUS3>` se detekuje korektně.
-- Výchozí cesty: šablona `data/Šablony/template_AK3KR.docx`, výstup `data/Vygenerované testy/Test_YYYYMMDD_HHMM.docx`.
+## Novinky – verze 1.8f (2025-11-27)
+- **HOTFIX**: doplněny chybějící metody `_choose_data_file` a `_bulk_delete_selected`, připojena tlačítka hromadných akcí.
+- Ostatní: v1.8e robustní export DOCX (zachování číslování, placeholdery přes více runů).
 
 ## Instalace (macOS)
 ```bash
@@ -20,7 +18,7 @@ python3 main.py
 ## Git
 ```bash
 git add main.py README.md
-git commit -m "fix(export): zachování číslování + robustní placeholdery (v1.8e)"
-git tag v1.8e
+git commit -m "fix(ui): doplněny chybějící metody a napojení tlačítek (v1.8f)"
+git tag v1.8f
 git push && git push --tags
 ```
