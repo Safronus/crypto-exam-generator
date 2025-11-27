@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Exam Generator (v1.7c)
+Crypto Exam Generator (v1.7d)
 
-- Autosave: jakákoliv změna otázky (text, formát, zarovnání, název, typ, body) se
-  automaticky ukládá do JSON (bez potřeby 'Uložit vše').
-- Tlačítko 'Uložit změny otázky' nyní také okamžitě trvale uloží.
+- Náhled formátování skryt (editor WYSIWYG postačuje).
+- Oprava: **Tučné** se aplikuje již při prvním kliku (opravená logika).
+- Zachováno: autosave (1.7c), BONUS body s 2 des. místy (1.7b), import DOCX, DnD, filtr, multiselect.
 
-Navazuje na v1.7b (BONUS dvě desetinná místa, UI úpravy, import DOCX).
 """
 from __future__ import annotations
 
@@ -65,7 +64,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.7c"
+APP_VERSION = "1.7d"
 
 # --------------------------- Datové typy ---------------------------
 
@@ -323,7 +322,7 @@ class MainWindow(QMainWindow):
         self.tree = DnDTree(self)
         left_layout.addWidget(self.tree, 1)
 
-        # Pravý panel: editor + náhled
+        # Pravý panel: editor (+ dříve náhled — nyní skrytý)
         self.detail_stack = QWidget()
         self.detail_layout = QVBoxLayout(self.detail_stack)
         self.detail_layout.setContentsMargins(6, 6, 6, 6)
@@ -401,13 +400,13 @@ class MainWindow(QMainWindow):
         self.text_edit = QTextEdit()
         self.text_edit.setAcceptRichText(True)
         self.text_edit.setPlaceholderText("Sem napište znění otázky…\nPodporováno: tučné, kurzíva, podtržení, barva, odrážky, zarovnání.")
-        self.text_edit.setMinimumHeight(260)
+        self.text_edit.setMinimumHeight(360)
 
-        # Náhled (read-only) — renderuje HTML přes QTextBrowser
+        # Dřívější náhled (QTextBrowser) — vytvoříme, ale hned skryjeme (kvůli minimálním změnám kódu)
         self.preview_label = QLabel("Náhled formátování:")
         self.preview = QTextBrowser()
         self.preview.setOpenExternalLinks(True)
-        self.preview.setMinimumHeight(180)
+        self.preview.setMinimumHeight(1)  # nebude vidět
 
         self.btn_save_question = QPushButton("Uložit změny otázky")
         self.btn_save_question.setDefault(True)
@@ -422,10 +421,15 @@ class MainWindow(QMainWindow):
         self.detail_layout.addWidget(self.editor_toolbar)
         self.detail_layout.addLayout(form)
         self.detail_layout.addWidget(self.text_edit, 1)
-        self.detail_layout.addWidget(self.preview_label)
-        self.detail_layout.addWidget(self.preview)
+        # Náhled do layoutu nezapojíme (ani label, ani widget)
+        # self.detail_layout.addWidget(self.preview_label)
+        # self.detail_layout.addWidget(self.preview)
         self.detail_layout.addWidget(self.btn_save_question)
         self.detail_layout.addWidget(self.rename_panel)
+        # pro jistotu skryjeme
+        self.preview_label.hide()
+        self.preview.hide()
+
         self._set_editor_enabled(False)
 
         splitter.addWidget(left_panel)
@@ -468,7 +472,8 @@ class MainWindow(QMainWindow):
         self.spin_bonus_correct.setEnabled(enabled and self.combo_type.currentIndex() == 1)
         self.spin_bonus_wrong.setEnabled(enabled and self.combo_type.currentIndex() == 1)
         self.text_edit.setEnabled(enabled)
-        self.preview.setEnabled(enabled)
+        # preview nepoužíváme
+        # self.preview.setEnabled(enabled)
         self.btn_save_question.setEnabled(enabled)
 
     def _connect_signals(self) -> None:
@@ -489,7 +494,7 @@ class MainWindow(QMainWindow):
         self.action_align_justify.triggered.connect(lambda: self._apply_alignment(Qt.AlignJustify))
 
         self.text_edit.cursorPositionChanged.connect(self._sync_toolbar_to_cursor)
-        self.text_edit.textChanged.connect(self._update_preview)
+        # náhled netřeba: self.text_edit.textChanged.connect(self._update_preview)
 
         # Autosave triggery (debounce 1.2 s)
         self.text_edit.textChanged.connect(self._autosave_schedule)
@@ -504,7 +509,7 @@ class MainWindow(QMainWindow):
         self.act_add_subgroup.triggered.connect(self._add_subgroup)
         self.act_add_question.triggered.connect(self._add_question)
         self.act_delete.triggered.connect(self._delete_selected)
-        self.act_save_all.triggered.connect(self.save_data)  # zůstává jako ruční uložit (duplicitní k autosave)
+        self.act_save_all.triggered.connect(self.save_data)
         self.act_choose_data.triggered.connect(self._choose_data_file)
 
         # Filtr + hromadné akce
@@ -903,7 +908,7 @@ class MainWindow(QMainWindow):
     def _clear_editor(self) -> None:
         self._current_question_id = None
         self.text_edit.clear()
-        self.preview.clear()
+        # preview nepotřebujeme
         self.spin_points.setValue(1)
         self.spin_bonus_correct.setValue(1.00)
         self.spin_bonus_wrong.setValue(0.00)
@@ -919,7 +924,7 @@ class MainWindow(QMainWindow):
         self.spin_bonus_wrong.setValue(float(q.bonus_wrong))
         self.text_edit.setHtml(q.text_html or "<p><br></p>")
         self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
-        self._update_preview()
+        # náhled netřeba
         self._set_editor_enabled(True)
         self.rename_panel.hide()
 
@@ -966,7 +971,6 @@ class MainWindow(QMainWindow):
     def _autosave_schedule(self) -> None:
         if not self._current_question_id:
             return
-        # restart debounce
         self._autosave_timer.stop()
         self._autosave_timer.start()
 
@@ -977,7 +981,6 @@ class MainWindow(QMainWindow):
         self.save_data()
 
     def _on_save_question_clicked(self) -> None:
-        # manuální okamžité uložení bez čekání na timer
         self._apply_editor_to_current_question(silent=True)
         self.save_data()
         self.statusBar().showMessage("Otázka uložena.", 1500)
@@ -1055,14 +1058,15 @@ class MainWindow(QMainWindow):
     def _toggle_format(self, which: str) -> None:
         fmt = QTextCharFormat()
         if which == "bold":
-            new_weight = QFont.Weight.Bold if not self.action_bold.isChecked() else QFont.Weight.Normal
+            # FIX: aplikuj Bold při 1. kliku (checked=True => Bold)
+            new_weight = QFont.Weight.Bold if self.action_bold.isChecked() else QFont.Weight.Normal
             fmt.setFontWeight(int(new_weight))
         elif which == "italic":
             fmt.setFontItalic(self.action_italic.isChecked())
         elif which == "underline":
             fmt.setFontUnderline(self.action_underline.isChecked())
         self._merge_format_on_selection(fmt)
-        self._update_preview()
+        # náhled netřeba
         self._autosave_schedule()
 
     def _choose_color(self) -> None:
@@ -1071,7 +1075,7 @@ class MainWindow(QMainWindow):
             fmt = QTextCharFormat()
             fmt.setForeground(color)
             self._merge_format_on_selection(fmt)
-            self._update_preview()
+            # náhled netřeba
             self._autosave_schedule()
 
     def _toggle_bullets(self) -> None:
@@ -1087,7 +1091,7 @@ class MainWindow(QMainWindow):
             fmt = QTextListFormat()
             fmt.setStyle(QTextListFormat.ListDisc)
             cursor.createList(fmt)
-        self._update_preview()
+        # náhled netřeba
         self._autosave_schedule()
 
     def _apply_alignment(self, align_flag: Qt.AlignmentFlag) -> None:
@@ -1113,7 +1117,7 @@ class MainWindow(QMainWindow):
             cursor.mergeBlockFormat(bf)
         self.text_edit.setTextCursor(cursor)
         self._sync_toolbar_to_cursor()
-        self._update_preview()
+        # náhled netřeba
         self._autosave_schedule()
 
     def _sync_toolbar_to_cursor(self) -> None:
@@ -1140,8 +1144,9 @@ class MainWindow(QMainWindow):
         self.spin_bonus_wrong.setEnabled(not is_classic)
         self._autosave_schedule()
 
+    # Náhled odstraněn
     def _update_preview(self) -> None:
-        self.preview.setHtml(self.text_edit.toHtml())
+        pass
 
     # -------------------- Výběr datového souboru --------------------
 
