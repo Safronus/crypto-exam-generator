@@ -600,103 +600,159 @@ class ExportWizard(QWizard):
         self.setWindowTitle("Export DOCX – Průvodce")
         self.setWizardStyle(QWizard.ModernStyle)
         self.owner = owner
-        self.resize(1100, 800)
+        self.resize(1600, 1200)
 
+        # IDs - Pro jistotu necháme, ale nextId odstraníme
+        self.ID_PAGE1 = 0
+        self.ID_PAGE2 = 1
+        self.ID_PAGE3 = 2
+
+        # Cesty
         self.template_path: Optional[Path] = None
         self.output_path: Optional[Path] = None
-        
-        # Placeholdery načtené ze šablony
-        self.placeholders_q: List[str] = [] 
-        self.placeholders_b: List[str] = [] 
-        self.has_datumcas = False
-        self.has_pozn = False
-        self.has_minmax = (False, False)
+        # Flag, zda uživatel změnil výstup ručně (abychom mu to nepřepisovali)
+        self.output_changed_manually = False
 
-        # Výběr uživatele {placeholder: question_id}
-        self.selection_map: Dict[str, str] = {} 
+        # Placeholdery
+        self.placeholders_q = []
+        self.placeholders_b = []
+        self.selection_map = {}
 
-        # Default paths
+        # Default dirs
         self.templates_dir = self.owner.project_root / "data" / "Šablony"
         self.output_dir = self.owner.project_root / "data" / "Vygenerované testy"
         self.templates_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         self.default_template = self.templates_dir / "template_AK3KR_předtermín.docx"
-        self.default_output = self.output_dir / f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
 
-        # --- BUILD PAGES ---
+        # --- BUILD ---
+        # Postavíme stránky (jen vytvoříme objekty)
         self._build_page1()
         self._build_page2()
         self._build_page3()
         
-        # Auto-load
+        # Registrace stránek (v tomto pořadí půjdou za sebou)
+        self.setPage(self.ID_PAGE1, self.page1)
+        self.setPage(self.ID_PAGE2, self.page2)
+        self.setPage(self.ID_PAGE3, self.page3)
+        
+        self.setStartId(self.ID_PAGE1)
+        
+        # Auto-load Template
         if self.default_template.exists():
             self.le_template.setText(str(self.default_template))
             self.template_path = self.default_template
             QTimer.singleShot(100, self._scan_placeholders)
         
-        self.le_output.setText(str(self.default_output))
-        self.output_path = self.default_output
+        # Auto-generate Output Name (poprvé)
+        self._update_default_output()
+
+    # !!! ODSTRANIT metodu nextId() úplně !!!
+    # QWizard automaticky půjde podle ID: 0 -> 1 -> 2, pokud initializePage neselže.
+
+    def _update_default_output(self):
+        if self.output_changed_manually:
+            return
+
+        # Získání hodnot
+        prefix = self.le_prefix.text().strip() or "Test"
+        # Datum z widgetu
+        dt = self.dt_edit.dateTime()
+        # Formát: YYYY-MM-DD_HHMM
+        date_str = dt.toString("yyyy-MM-dd_HHmm")
+        
+        filename = f"{prefix}_{date_str}.docx"
+        new_path = self.output_dir / filename
+        
+        # Nastavíme text bez vyvolání signálu textChanged (blokace signálů)
+        self.le_output.blockSignals(True)
+        self.le_output.setText(str(new_path))
+        self.le_output.blockSignals(False)
+        
+        self.output_path = new_path
+
+    def _on_output_text_changed(self, text):
+        # Pokud uživatel píše do pole, označíme jako manuálně změněné
+        self.output_changed_manually = True
+        self.output_path = Path(text)
 
     def _build_page1(self):
         self.page1 = QWizardPage()
         self.page1.setTitle("Krok 1: Výběr šablony a globální nastavení")
         l1 = QVBoxLayout(self.page1)
         
+        # GroupBox: Parametry (Přesunuto nahoru, protože ovlivňují název souboru)
+        gb_params = QGroupBox("Parametry testu")
+        form_params = QFormLayout()
+        
+        self.le_prefix = QLineEdit("MůjTest")
+        self.le_prefix.textChanged.connect(self._update_default_output) # Update při změně
+        form_params.addRow("Prefix verze:", self.le_prefix)
+        
+        self.dt_edit = QDateTimeEdit(QDateTime.currentDateTime())
+        self.dt_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
+        self.dt_edit.setCalendarPopup(True)
+        self.dt_edit.dateTimeChanged.connect(self._update_default_output) # Update při změně
+        form_params.addRow("Datum testu:", self.dt_edit)
+        
+        gb_params.setLayout(form_params)
+        l1.addWidget(gb_params)
+
         # GroupBox: Soubory
         gb_files = QGroupBox("Soubory")
         form_files = QFormLayout()
         self.le_template = QLineEdit()
+        self.le_template.textChanged.connect(self._on_templ_change)
         btn_t = QPushButton("Vybrat šablonu..."); btn_t.clicked.connect(self._choose_template)
         h_t = QHBoxLayout(); h_t.addWidget(self.le_template); h_t.addWidget(btn_t)
         form_files.addRow("Šablona:", h_t)
         
         self.le_output = QLineEdit()
+        self.le_output.textChanged.connect(self._on_output_text_changed) # Detekce manuální změny
         btn_o = QPushButton("Cíl exportu..."); btn_o.clicked.connect(self._choose_output)
         h_o = QHBoxLayout(); h_o.addWidget(self.le_output); h_o.addWidget(btn_o)
         form_files.addRow("Výstup:", h_o)
         gb_files.setLayout(form_files)
         l1.addWidget(gb_files)
         
-        # GroupBox: Parametry
-        gb_params = QGroupBox("Parametry testu")
-        form_params = QFormLayout()
-        self.le_prefix = QLineEdit("MůjTest")
-        form_params.addRow("Prefix verze:", self.le_prefix)
-        
-        self.dt_edit = QDateTimeEdit(QDateTime.currentDateTime())
-        self.dt_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
-        self.dt_edit.setCalendarPopup(True)
-        form_params.addRow("Datum testu:", self.dt_edit)
-        gb_params.setLayout(form_params)
-        l1.addWidget(gb_params)
-        
         self.lbl_scan_info = QLabel("Info: Čekám na načtení šablony...")
         self.lbl_scan_info.setStyleSheet("color: gray; font-style: italic;")
         l1.addWidget(self.lbl_scan_info)
         
-        self.le_template.textChanged.connect(self._on_templ_change)
-        self.le_output.textChanged.connect(lambda t: setattr(self, 'output_path', Path(t)))
-        self.addPage(self.page1)
+        # self.addPage(self.page1) - NEVOLAT, děláme v initu
 
     def _build_page2(self):
         self.page2 = QWizardPage()
         self.page2.setTitle("Krok 2: Přiřazení otázek do šablony")
-        l2 = QHBoxLayout(self.page2)
         
-        # Levý panel: Dostupné otázky (Tree)
+        # Hlavní layout stránky
+        main_layout = QVBoxLayout(self.page2)
+        
+        # 1. INFO PANEL (Kontext)
+        self.info_box_p2 = QGroupBox("Kontext exportu")
+        self.info_box_p2.setStyleSheet("background-color: #2d2d30; font-size: 11px; color: #cccccc;")
+        l_info = QFormLayout(self.info_box_p2)
+        self.lbl_templ_p2 = QLabel("-")
+        self.lbl_out_p2 = QLabel("-")
+        l_info.addRow("Vstupní šablona:", self.lbl_templ_p2)
+        l_info.addRow("Výstupní soubor:", self.lbl_out_p2)
+        main_layout.addWidget(self.info_box_p2)
+
+        # 2. Obsah (Splitter nebo Layout)
+        content_layout = QHBoxLayout()
+        
+        # Levý panel: Dostupné otázky
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("<b>Dostupné otázky:</b>"))
         self.tree_source = QTreeWidget()
-        self.tree_source.setHeaderLabels(["Struktura otázek"]) # Jen jeden sloupec
-        # self.tree_source.setColumnWidth(0, 300) # Není třeba u jednoho sloupce
+        self.tree_source.setHeaderLabels(["Struktura otázek"])
         left_layout.addWidget(self.tree_source)
-        l2.addLayout(left_layout, 1) # Ratio 1 (50%)
+        content_layout.addLayout(left_layout, 1)
         
         # Pravý panel: Sloty
         right_layout = QVBoxLayout()
         right_layout.addWidget(QLabel("<b>Sloty v šabloně:</b>"))
-        
         self.scroll_slots = QScrollArea()
         self.scroll_slots.setWidgetResizable(True)
         self.widget_slots = QWidget()
@@ -704,28 +760,36 @@ class ExportWizard(QWizard):
         self.layout_slots.setSpacing(6)
         self.layout_slots.addStretch()
         self.scroll_slots.setWidget(self.widget_slots)
-        
         right_layout.addWidget(self.scroll_slots)
-        l2.addLayout(right_layout, 1) # Ratio 1 (50%) - nebo dejte 4:6 podle libosti
+        content_layout.addLayout(right_layout, 1)
         
-        self.addPage(self.page2)
-        self.page2.initializePage = self._init_page2
-
-
+        main_layout.addLayout(content_layout)
+        
     def _build_page3(self):
         self.page3 = QWizardPage()
         self.page3.setTitle("Krok 3: Kontrola a Export")
-        l3 = QVBoxLayout(self.page3)
+        main_layout = QVBoxLayout(self.page3)
         
-        self.lbl_summary = QLabel()
-        self.lbl_summary.setWordWrap(True)
-        l3.addWidget(self.lbl_summary)
+        # Info Panel
+        self.info_box_p3 = QGroupBox("Kontext exportu")
+        # Tmavý styl pro groupbox
+        self.info_box_p3.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #555; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
+        l_info = QFormLayout(self.info_box_p3)
+        self.lbl_templ_p3 = QLabel("-")
+        self.lbl_out_p3 = QLabel("-")
+        l_info.addRow("Vstupní šablona:", self.lbl_templ_p3)
+        l_info.addRow("Výstupní soubor:", self.lbl_out_p3)
+        main_layout.addWidget(self.info_box_p3)
         
-        self.tbl_preview = QTableWidget()
-        self.tbl_preview.setColumnCount(2)
-        self.tbl_preview.setHorizontalHeaderLabels(["Položka", "Hodnota"])
-        self.tbl_preview.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        l3.addWidget(self.tbl_preview)
+        # Náhled HTML
+        lbl_prev = QLabel("<b>Náhled obsahu testu:</b>")
+        main_layout.addWidget(lbl_prev)
+        
+        self.preview_edit = QTextEdit()
+        self.preview_edit.setReadOnly(True)
+        # Styl pro Dark Theme (šedé pozadí, světlý text)
+        self.preview_edit.setStyleSheet("QTextEdit { background-color: #252526; color: #e0e0e0; border: 1px solid #3e3e42; }")
+        main_layout.addWidget(self.preview_edit)
         
         self.addPage(self.page3)
         self.page3.initializePage = self._init_page3
@@ -749,6 +813,10 @@ class ExportWizard(QWizard):
             self.lbl_scan_info.setText("Šablona neexistuje.")
 
     def _scan_placeholders(self):
+        if not self.template_path or not self.template_path.exists():
+            self.lbl_scan_info.setText("Šablona není vybrána.")
+            return
+
         try:
             doc = docx.Document(self.template_path)
             full_text = ""
@@ -759,6 +827,7 @@ class ExportWizard(QWizard):
                         for p in c.paragraphs: full_text += p.text + "\n"
             
             import re
+            # Hledáme <Placeholder> i {Placeholder}
             placeholders = re.findall(r'[<{]([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+)[>}]', full_text)
             placeholders = sorted(list(set(placeholders)))
             
@@ -773,75 +842,182 @@ class ExportWizard(QWizard):
             self.has_minmax = (any('MinBody' in x for x in placeholders), any('MaxBody' in x for x in placeholders))
             
             msg = f"Nalezeno: {len(self.placeholders_q)}x Otázka, {len(self.placeholders_b)}x BONUS."
+            if self.has_minmax[0]: msg += " (Min/Max body)."
             self.lbl_scan_info.setText(msg)
+            
+            # Pro jistotu resetujeme výběr v mapě, pokud zmizely placeholdery
+            # (ale raději zachováme to, co sedí)
             
         except Exception as e:
             self.lbl_scan_info.setText(f"Chyba čtení šablony: {e}")
 
+
+    def _show_context_menu(self, position):
+        # Zjistíme item
+        item = self.tree_source.itemAt(position)
+        if not item: return
+        qid = item.data(0, Qt.UserRole)
+        if not qid: return # Skupina, ne otázka
+        
+        q = self.owner._find_question_by_id(qid)
+        if not q: return
+
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+        
+        menu = QMenu()
+        menu_assign = menu.addMenu("Přiřadit k...")
+        
+        # Zjistíme volné sloty podle typu
+        free_slots = []
+        if q.type == 'classic':
+            for ph in self.placeholders_q:
+                if ph not in self.selection_map: # Je volný
+                    free_slots.append(ph)
+        else: # Bonus
+            for ph in self.placeholders_b:
+                if ph not in self.selection_map:
+                    free_slots.append(ph)
+        
+        if not free_slots:
+            a = menu_assign.addAction("(Žádné volné sloty)")
+            a.setEnabled(False)
+        else:
+            for slot in free_slots:
+                # Vytvoříme akci s uzávěrem (closure) pro slot
+                action = QAction(slot, self.tree_source)
+                # Lambda: pozor na variable capture in loop, použijeme default arg
+                action.triggered.connect(lambda checked=False, s=slot, q_id=qid: self._assign_from_context(s, q_id))
+                menu_assign.addAction(action)
+
+        menu.exec(self.tree_source.viewport().mapToGlobal(position))
+
+    def _assign_from_context(self, slot_name, qid):
+        # Logika přiřazení (stejná jako u tlačítka "Vybrat", ale obráceně)
+        self.selection_map[slot_name] = qid
+        
+        # Aktualizujeme UI slotu (najdeme widget v layoutu)
+        # To je trochu složitější, protože nemáme přímou referenci. 
+        # Musíme projít layout nebo si držet mapu widgetů.
+        # Nejjednodušší: Znovu inicializovat Page 2 (refresh), ale to sbalí strom.
+        # Lepší: Najít widget.
+        
+        # Projdeme layout slotů
+        for i in range(self.layout_slots.count()):
+            w = self.layout_slots.itemAt(i).widget()
+            if w and isinstance(w, QWidget):
+                # Najdeme label s názvem slotu
+                children = w.findChildren(QLabel)
+                if children and children[0].text() == f"{slot_name}:":
+                    # To je on!
+                    # Label hodnoty je druhý label (index 1, index 0 je název)
+                    # Ale layout má pořadí: LblName, LblVal, BtnSel, BtnClr... ne, 
+                    # Layout: LblName, LblVal, BtnSel, BtnClr.
+                    # findChildren nemusí zachovat pořadí layoutu.
+                    
+                    # Bezpečnější: w.layout().itemAt(1).widget() je LblVal
+                    lbl_val = w.layout().itemAt(1).widget()
+                    btn_clr = w.layout().itemAt(3).widget()
+                    
+                    q = self.owner._find_question_by_id(qid)
+                    lbl_val.setText(q.title)
+                    lbl_val.setStyleSheet("color: white; font-weight: bold;")
+                    btn_clr.setEnabled(True)
+                    break
+        
+        # Skryjeme item ve stromu
+        it = QTreeWidgetItemIterator(self.tree_source)
+        while it.value():
+            if it.value().data(0, Qt.UserRole) == qid:
+                it.value().setHidden(True)
+                break
+            it += 1
+
     # --- Logic Krok 2 ---
     def _init_page2(self):
-        self.tree_source.clear()
-        while self.layout_slots.count():
-            item = self.layout_slots.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        self.layout_slots.addStretch()
-        
-        # Helper pro rekurzi
-        def add_subgroup_recursive(parent_item, subgroup_list):
-            for sg in subgroup_list:
-                sg_item = QTreeWidgetItem([sg.name])
-                sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
-                parent_item.addChild(sg_item)
-                
-                # Otázky
-                for q in sg.questions:
-                    # Formátování názvu: "Název (Typ, X b)"
-                    info = f"({q.points} b)" if q.type == 'classic' else f"(Bonus: {q.bonus_correct})"
-                    label = f"{q.title} {info}"
-                    
-                    if q.id in self.selection_map.values():
-                        label += " [VYBRÁNO]"
-                    
-                    q_item = QTreeWidgetItem([label])
-                    q_item.setData(0, Qt.UserRole, q.id)
-                    
-                    # Ikonka otázky
-                    q_item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
-                    
-                    if q.id in self.selection_map.values():
-                        q_item.setHidden(True)
-                    
-                    sg_item.addChild(q_item)
-                
-                # Vnořené
-                if sg.subgroups:
-                    add_subgroup_recursive(sg_item, sg.subgroups)
+        print("DEBUG: Vstupuji do Krok 2 (_init_page2)")
+        try:
+            # Aktualizace info panelu
+            t_name = self.template_path.name if self.template_path else "Nevybráno"
+            o_name = self.output_path.name if self.output_path else "Nevybráno"
+            self.lbl_templ_p2.setText(t_name)
+            self.lbl_out_p2.setText(o_name)
 
-        # Load Tree
-        groups = self.owner.root.groups
-        for g in groups:
-            g_item = QTreeWidgetItem([g.name])
-            g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
-            f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
+            # Pokud placeholdery nejsou načtené, zkusíme znovu
+            if not self.placeholders_q and not self.placeholders_b:
+                print("DEBUG: Placeholdery prázdné, spouštím scan...")
+                self._scan_placeholders()
+
+            # 1. Vyčistit strom otázek
+            self.tree_source.clear()
             
-            self.tree_source.addTopLevelItem(g_item)
-            add_subgroup_recursive(g_item, g.subgroups)
+            # 2. Vyčistit layout slotů
+            while self.layout_slots.count():
+                item = self.layout_slots.takeAt(0)
+                if item.widget(): 
+                    item.widget().deleteLater()
+            self.layout_slots.addStretch()
             
-        # EXPAND ALL po naplnění
-        self.tree_source.expandAll()
+            # 3. Nastavit kontextové menu
+            self.tree_source.setContextMenuPolicy(Qt.CustomContextMenu)
+            try: self.tree_source.customContextMenuRequested.disconnect() 
+            except: pass
+            self.tree_source.customContextMenuRequested.connect(self._show_context_menu)
+            
+            # 4. Helper - rekurzivní strom
+            def add_subgroup_recursive(parent_item, subgroup_list):
+                for sg in subgroup_list:
+                    sg_item = QTreeWidgetItem([sg.name])
+                    sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                    parent_item.addChild(sg_item)
+                    
+                    for q in sg.questions:
+                        info = f"({q.points} b)" if q.type == 'classic' else f"(Bonus: {q.bonus_correct})"
+                        label = f"{q.title} {info}"
+                        if q.id in self.selection_map.values(): label += " [VYBRÁNO]"
+                        
+                        q_item = QTreeWidgetItem([label])
+                        q_item.setData(0, Qt.UserRole, q.id)
+                        q_item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
+                        
+                        if q.id in self.selection_map.values(): q_item.setHidden(True)
+                        sg_item.addChild(q_item)
+                    
+                    if sg.subgroups:
+                        add_subgroup_recursive(sg_item, sg.subgroups)
 
-        # Load Slots (zbytek beze změny)
-        if self.placeholders_q:
-            lbl = QLabel("--- KLASICKÉ OTÁZKY ---"); lbl.setStyleSheet("font-weight:bold; color:#4da6ff; margin-top:5px;")
-            self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
-            for ph in self.placeholders_q:
-                self._add_slot_widget(ph, 'classic')
+            # 5. Naplnění stromu
+            groups = self.owner.root.groups
+            for g in groups:
+                g_item = QTreeWidgetItem([g.name])
+                g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
+                
+                self.tree_source.addTopLevelItem(g_item)
+                add_subgroup_recursive(g_item, g.subgroups)
+                
+            self.tree_source.expandAll()
 
-        if self.placeholders_b:
-            lbl = QLabel("--- BONUSOVÉ OTÁZKY ---"); lbl.setStyleSheet("font-weight:bold; color:#ffcc00; margin-top:10px;")
-            self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
-            for ph in self.placeholders_b:
-                self._add_slot_widget(ph, 'bonus')
+            # 6. Sloty
+            if self.placeholders_q:
+                lbl = QLabel("--- KLASICKÉ OTÁZKY ---")
+                lbl.setStyleSheet("font-weight:bold; color:#4da6ff; margin-top:5px;")
+                self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
+                for ph in self.placeholders_q:
+                    self._add_slot_widget(ph, 'classic')
+
+            if self.placeholders_b:
+                lbl = QLabel("--- BONUSOVÉ OTÁZKY ---")
+                lbl.setStyleSheet("font-weight:bold; color:#ffcc00; margin-top:10px;")
+                self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
+                for ph in self.placeholders_b:
+                    self._add_slot_widget(ph, 'bonus')
+                    
+        except Exception as e:
+            print(f"CRITICAL ERROR in _init_page2: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Chyba", f"Chyba při inicializaci kroku 2:\n{e}")
 
     
     def _add_slot_widget(self, placeholder_name, allowed_type):
@@ -928,42 +1104,94 @@ class ExportWizard(QWizard):
 
     # --- Logic Krok 3 ---
     def _init_page3(self):
-        self.tbl_preview.setRowCount(0)
-        total_points = 0.0
-        min_loss = 0.0
-        
-        # Tabulka
-        row = 0
-        for ph in self.placeholders_q + self.placeholders_b:
-            qid = self.selection_map.get(ph)
-            self.tbl_preview.insertRow(row)
-            self.tbl_preview.setItem(row, 0, QTableWidgetItem(ph))
+        print("DEBUG: Vstupuji do Krok 3 (_init_page3)")
+        try:
+            t_name = self.template_path.name if self.template_path else "Nevybráno"
+            o_name = self.output_path.name if self.output_path else "Nevybráno"
+            self.lbl_templ_p3.setText(t_name)
+            self.lbl_out_p3.setText(o_name)
+
+            total_points = 0.0
+            min_loss = 0.0
             
-            if qid:
-                q = self.owner._find_question_by_id(qid)
-                if q.type == 'classic':
-                    total_points += float(q.points)
+            # Barvy
+            bg_color = "#252526"; text_color = "#e0e0e0"; border_color = "#555555"
+            sec_q_bg = "#2d3845"; sec_b_bg = "#453d2d"; sec_s_bg = "#2d452d"
+            
+            html = f"""
+            <html>
+            <body style='font-family: Arial, sans-serif; background-color: {bg_color}; color: {text_color};'>
+            <h2 style='color: #61dafb; border-bottom: 2px solid #61dafb;'>Souhrn testu</h2>
+            <table width='100%' style='margin-bottom: 20px; color: {text_color};'>
+                <tr>
+                    <td><b>Verze:</b> {self.le_prefix.text()} {datetime.now().strftime('%Y-%m-%d')}...</td>
+                    <td align='right'><b>Datum:</b> {self.dt_edit.dateTime().toString("dd.MM.yyyy HH:mm")}</td>
+                </tr>
+            </table>
+            """
+
+            # Klasické
+            html += f"<h3 style='background-color: {sec_q_bg}; padding: 5px; border-left: 4px solid #4da6ff;'>1. Klasické otázky</h3>"
+            html += f"<table width='100%' border='0' cellspacing='0' cellpadding='5' style='color: {text_color};'>"
+            for ph in self.placeholders_q:
+                qid = self.selection_map.get(ph)
+                if qid:
+                    q = self.owner._find_question_by_id(qid)
+                    if q:
+                        total_points += float(q.points)
+                        title_clean = re.sub(r'<[^>]+>', '', q.title)
+                        html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right'>({q.points} b)</td></tr>"
                 else:
-                    total_points += float(q.bonus_correct)
-                    min_loss += float(q.bonus_wrong)
-                self.tbl_preview.setItem(row, 1, QTableWidgetItem(q.title))
-            else:
-                 self.tbl_preview.setItem(row, 1, QTableWidgetItem("---"))
-            row += 1
+                    html += f"<tr><td width='100' style='color:#ff5555;'>{ph}:</td><td colspan='2' style='color:#ff5555;'>--- NEVYPLNĚNO ---</td></tr>"
+            html += "</table>"
+
+            # Bonusy
+            html += f"<h3 style='background-color: {sec_b_bg}; padding: 5px; border-left: 4px solid #ffcc00;'>2. Bonusové otázky</h3>"
+            html += f"<table width='100%' border='0' cellspacing='0' cellpadding='5' style='color: {text_color};'>"
+            for ph in self.placeholders_b:
+                qid = self.selection_map.get(ph)
+                if qid:
+                    q = self.owner._find_question_by_id(qid)
+                    if q:
+                        total_points += float(q.bonus_correct)
+                        min_loss += float(q.bonus_wrong)
+                        title_clean = re.sub(r'<[^>]+>', '', q.title)
+                        html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right' style='color:#81c784;'>+{q.bonus_correct} / <span style='color:#e57373;'>{q.bonus_wrong}</span></td></tr>"
+                else:
+                    html += f"<tr><td width='100' style='color:#ff5555;'>{ph}:</td><td colspan='2' style='color:#ff5555;'>--- NEVYPLNĚNO ---</td></tr>"
+            html += "</table>"
+
+            # Klasifikace
+            html += f"<h3 style='background-color: {sec_s_bg}; padding: 5px; border-left: 4px solid #66bb6a;'>3. Klasifikace</h3>"
+            html += f"""
+            <p><b>Max. bodů:</b> {total_points:.2f} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Min. bodů (penalizace):</b> {min_loss:.2f}</p>
+            <table width='60%' border='1' cellspacing='0' cellpadding='5' style='border-collapse: collapse; border: 1px solid {border_color}; color: {text_color};'>
+                <tr style='background-color: #333;'><th>Známka</th><th>Interval</th></tr>
+                <tr><td align='center' style='color:#81c784'><b>A</b></td><td>&lt; 9.2 ; <b>{total_points:.2f}</b> &gt;</td></tr>
+                <tr><td align='center' style='color:#a5d6a7'><b>B</b></td><td>&lt; 8.4 ; 9.2 )</td></tr>
+                <tr><td align='center' style='color:#c8e6c9'><b>C</b></td><td>&lt; 7.6 ; 8.4 )</td></tr>
+                <tr><td align='center' style='color:#fff59d'><b>D</b></td><td>&lt; 6.8 ; 7.6 )</td></tr>
+                <tr><td align='center' style='color:#ffcc80'><b>E</b></td><td>&lt; 6.0 ; 6.8 )</td></tr>
+                <tr><td align='center' style='color:#ef5350'><b>F</b></td><td>&lt; <b>{min_loss:.2f}</b> ; 6.0 )</td></tr>
+            </table>
+            """
+            html += "</body></html>"
+            self.preview_edit.setHtml(html)
             
-        # Stupnice
-        scale_text = f"""
-        MaxBody: {total_points:.2f}
-        MinBody: {min_loss:.2f}
-        
-        A: <9.2; {total_points:.2f}>
-        B: <8.4; 9.2)
-        C: <7.6; 8.4)
-        D: <6.8; 7.6)
-        E: <6.0; 6.8)
-        F: <{min_loss:.2f}; 6.0)
-        """
-        self.lbl_summary.setText(scale_text)
+        except Exception as e:
+            print(f"CRITICAL ERROR in _init_page3: {e}")
+            import traceback
+            traceback.print_exc()
+            self.preview_edit.setText(f"Chyba při generování náhledu: {e}")
+
+
+    def _add_row_3col(self, c1, c2, c3):
+        r = self.tbl_preview.rowCount()
+        self.tbl_preview.insertRow(r)
+        self.tbl_preview.setItem(r, 0, QTableWidgetItem(str(c1)))
+        self.tbl_preview.setItem(r, 1, QTableWidgetItem(str(c2)))
+        self.tbl_preview.setItem(r, 2, QTableWidgetItem(str(c3)))
+
 
     def accept(self) -> None:
         if not self.template_path or not self.output_path: return
