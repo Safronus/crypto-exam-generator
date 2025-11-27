@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Exam Generator (v1.7b)
+Crypto Exam Generator (v1.7c)
 
-- BONUS body: dvě desetinná místa (float v modelu, QDoubleSpinBox v UI, formátování v seznamu).
-- Zachováno: vizuální odlišení BONUS otázek, tučné skupiny, zarovnání textu, náhled, DnD, import DOCX.
+- Autosave: jakákoliv změna otázky (text, formát, zarovnání, název, typ, body) se
+  automaticky ukládá do JSON (bez potřeby 'Uložit vše').
+- Tlačítko 'Uložit změny otázky' nyní také okamžitě trvale uloží.
 
-Autor: (doplní uživatel)
-Licence: MIT (nebo dle potřeby)
+Navazuje na v1.7b (BONUS dvě desetinná místa, UI úpravy, import DOCX).
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray
+from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -65,7 +65,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.7b"
+APP_VERSION = "1.7c"
 
 # --------------------------- Datové typy ---------------------------
 
@@ -282,6 +282,12 @@ class MainWindow(QMainWindow):
         self._current_question_id: Optional[str] = None
         self._current_node_kind: Optional[str] = None  # "group"|"subgroup"|"question"
 
+        # Autosave timer (debounce) — 1.2 s po poslední změně
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(1200)
+        self._autosave_timer.timeout.connect(self._autosave_current_question)
+
         self._build_ui()
         self._connect_signals()
         self._build_menus()
@@ -485,12 +491,20 @@ class MainWindow(QMainWindow):
         self.text_edit.cursorPositionChanged.connect(self._sync_toolbar_to_cursor)
         self.text_edit.textChanged.connect(self._update_preview)
 
+        # Autosave triggery (debounce 1.2 s)
+        self.text_edit.textChanged.connect(self._autosave_schedule)
+        self.title_edit.textChanged.connect(self._autosave_schedule)
+        self.combo_type.currentIndexChanged.connect(self._autosave_schedule)
+        self.spin_points.valueChanged.connect(self._autosave_schedule)
+        self.spin_bonus_correct.valueChanged.connect(self._autosave_schedule)
+        self.spin_bonus_wrong.valueChanged.connect(self._autosave_schedule)
+
         # Toolbar actions
         self.act_add_group.triggered.connect(self._add_group)
         self.act_add_subgroup.triggered.connect(self._add_subgroup)
         self.act_add_question.triggered.connect(self._add_question)
         self.act_delete.triggered.connect(self._delete_selected)
-        self.act_save_all.triggered.connect(self.save_data)
+        self.act_save_all.triggered.connect(self.save_data)  # zůstává jako ruční uložit (duplicitní k autosave)
         self.act_choose_data.triggered.connect(self._choose_data_file)
 
         # Filtr + hromadné akce
@@ -555,7 +569,7 @@ class MainWindow(QMainWindow):
             payload = json.dumps(data, ensure_ascii=False, indent=2)
             sf.write(QByteArray(payload.encode("utf-8")))
             sf.commit()
-            self.statusBar().showMessage(f"Uloženo: {self.data_path}", 3000)
+            self.statusBar().showMessage(f"Uloženo: {self.data_path}", 1500)
         except Exception as e:
             QMessageBox.critical(self, "Uložení selhalo", f"Chyba při ukládání do {self.data_path}:\n{e}")
 
@@ -571,7 +585,6 @@ class MainWindow(QMainWindow):
 
     def _parse_question(self, q: dict) -> Question:
         title = q.get("title") or self._derive_title_from_html(q.get("text_html") or "<p></p>", prefix=("BONUS: " if q.get("type") == "bonus" else ""))
-        # Bezpečně načíst jako float (kvůli starším JSONům klidně int → float)
         bc_default = 1.0 if q.get("type") == "bonus" else 0.0
         bw_default = 0.0
         try:
@@ -932,14 +945,13 @@ class MainWindow(QMainWindow):
                         sg.questions[i] = q
                         label = "Klasická" if q.type == "classic" else "BONUS"
                         pts = q.points if q.type == "classic" else self._bonus_points_label(q)
-                        # aktualizace stromu (titulek, podtitulek, styl)
                         self._update_selected_question_item_title(q.title)
                         self._update_selected_question_item_subtitle(f"{label} | {pts}")
                         items = self.tree.selectedItems()
                         if items:
                             self._apply_question_item_visuals(items[0], q.type)
                         if not silent:
-                            self.statusBar().showMessage("Změny otázky byly uloženy (lokálně).", 3000)
+                            self.statusBar().showMessage("Změny otázky uloženy (lokálně).", 1200)
                         return True
                 if apply_in(sg.subgroups):
                     return True
@@ -949,8 +961,26 @@ class MainWindow(QMainWindow):
             if apply_in(g.subgroups):
                 break
 
+    # ---- Autosave ----
+
+    def _autosave_schedule(self) -> None:
+        if not self._current_question_id:
+            return
+        # restart debounce
+        self._autosave_timer.stop()
+        self._autosave_timer.start()
+
+    def _autosave_current_question(self) -> None:
+        if not self._current_question_id:
+            return
+        self._apply_editor_to_current_question(silent=True)
+        self.save_data()
+
     def _on_save_question_clicked(self) -> None:
-        self._apply_editor_to_current_question(silent=False)
+        # manuální okamžité uložení bez čekání na timer
+        self._apply_editor_to_current_question(silent=True)
+        self.save_data()
+        self.statusBar().showMessage("Otázka uložena.", 1500)
 
     def _update_selected_question_item_title(self, text: str) -> None:
         items = self.tree.selectedItems()
@@ -1033,6 +1063,7 @@ class MainWindow(QMainWindow):
             fmt.setFontUnderline(self.action_underline.isChecked())
         self._merge_format_on_selection(fmt)
         self._update_preview()
+        self._autosave_schedule()
 
     def _choose_color(self) -> None:
         color = QColorDialog.getColor(parent=self, title="Vyberte barvu textu")
@@ -1041,6 +1072,7 @@ class MainWindow(QMainWindow):
             fmt.setForeground(color)
             self._merge_format_on_selection(fmt)
             self._update_preview()
+            self._autosave_schedule()
 
     def _toggle_bullets(self) -> None:
         cursor = self.text_edit.textCursor()
@@ -1056,6 +1088,7 @@ class MainWindow(QMainWindow):
             fmt.setStyle(QTextListFormat.ListDisc)
             cursor.createList(fmt)
         self._update_preview()
+        self._autosave_schedule()
 
     def _apply_alignment(self, align_flag: Qt.AlignmentFlag) -> None:
         cursor = self.text_edit.textCursor()
@@ -1081,6 +1114,7 @@ class MainWindow(QMainWindow):
         self.text_edit.setTextCursor(cursor)
         self._sync_toolbar_to_cursor()
         self._update_preview()
+        self._autosave_schedule()
 
     def _sync_toolbar_to_cursor(self) -> None:
         fmt = self.text_edit.currentCharFormat()
@@ -1104,6 +1138,7 @@ class MainWindow(QMainWindow):
         self.spin_points.setEnabled(is_classic)
         self.spin_bonus_correct.setEnabled(not is_classic)
         self.spin_bonus_wrong.setEnabled(not is_classic)
+        self._autosave_schedule()
 
     def _update_preview(self) -> None:
         self.preview.setHtml(self.text_edit.toHtml())

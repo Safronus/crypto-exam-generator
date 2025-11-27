@@ -6,10 +6,14 @@ Aplikace v **PySide6** pro správu zkušebních otázek (Kryptologie). Skupiny a
 
 ---
 
-## Novinky ve verzi 1.7b
+## Novinky ve verzi 1.7c
 
-- **BONUS body na 2 desetinná místa**: editor používá **QDoubleSpinBox** (krok 0.01), model ukládá **float**, ve stromu se zobrazuje `+X.XX/ Y.YY`.
-- Zachováno: vizuální odlišení BONUS otázek, tučné skupiny, zarovnání textu, náhled formátování, DnD, import DOCX.
+- **Autosave všech změn:** jakýkoliv zásah do otázky (text, formát, zarovnání, název, typ, body) se do **JSON ukládá automaticky** (s jemným zpožděním ~1.2 s). Není nutné používat **Uložit vše**.
+- **Uložit změny otázky**: okamžité trvalé uložení dané otázky.
+
+### Poznámky k výkonu
+- Autosave používá **debounce** (časovač 1.2 s), aby se nepsalo na disk při každém úhozu.
+- Při akcích DnD / mazání / přejmenování skupin se ukládá okamžitě jako dříve.
 
 ---
 
@@ -27,12 +31,11 @@ python3 main.py
 
 ## Verze
 
-- **Aktuální verze:** `1.7b` (release: 2025-11-27)
+- **Aktuální verze:** `1.7c` (release: 2025-11-27)
 - Changelog (výběr):
+  - `1.7c` – autosave všech změn otázky (debounce 1.2 s).
   - `1.7b` – BONUS body s přesností na dvě desetinná místa.
   - `1.7a` – vizuální odlišení BONUS vs. klasická + tučné skupiny.
-  - `1.7` – zarovnání textu + ikony ve stromu.
-  - `1.6a` – náhled formátování, fix přesunu a hromadného mazání.
 
 ---
 
@@ -40,7 +43,7 @@ python3 main.py
 
 ```bash
 git add main.py README.md
-git commit -m "feat(bonus): dvě desetinná místa bodů; float v modelu; QDoubleSpinBox (v1.7b)"
-git tag v1.7b
+git commit -m "feat(save): autosave všech změn otázky + okamžité uložení tlačítkem (v1.7c)"
+git tag v1.7c
 git push && git push --tags
 ```
