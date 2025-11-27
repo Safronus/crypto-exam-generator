@@ -43,7 +43,7 @@ from PySide6.QtGui import (
     QColor,
     QPalette,
     QFont,
-    QIcon,
+    QIcon
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -74,6 +74,12 @@ from PySide6.QtWidgets import (
     QWizard,
     QWizardPage,
     QDateTimeEdit,
+    # Nové importy pro v4.0 UI
+    QGroupBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QTreeWidgetItemIterator
 )
 
 APP_NAME = "Crypto Exam Generator"
@@ -591,288 +597,401 @@ def make_w_paragraph(align: str, runs: List[dict], prefix: str="") -> ET.Element
 class ExportWizard(QWizard):
     def __init__(self, owner: "MainWindow") -> None:
         super().__init__(owner)
-        self.setWindowTitle("Export DOCX – průvodce")
+        self.setWindowTitle("Export DOCX – Průvodce")
         self.setWizardStyle(QWizard.ModernStyle)
         self.owner = owner
-        
-        # Zvětšené okno pro lepší UX
-        self.resize(900, 750)
+        self.resize(1100, 800)
 
         self.template_path: Optional[Path] = None
         self.output_path: Optional[Path] = None
-        self.placeholders_q: List[str] = []
-        self.placeholders_b: List[str] = []
+        
+        # Placeholdery načtené ze šablony
+        self.placeholders_q: List[str] = [] 
+        self.placeholders_b: List[str] = [] 
         self.has_datumcas = False
         self.has_pozn = False
         self.has_minmax = (False, False)
 
-        # Default cesty
+        # Výběr uživatele {placeholder: question_id}
+        self.selection_map: Dict[str, str] = {} 
+
+        # Default paths
         self.templates_dir = self.owner.project_root / "data" / "Šablony"
         self.output_dir = self.owner.project_root / "data" / "Vygenerované testy"
-        
-        # Vytvoření složek
         self.templates_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Default soubory
         self.default_template = self.templates_dir / "template_AK3KR_předtermín.docx"
         self.default_output = self.output_dir / f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
 
-        self._build_pages()
+        # --- BUILD PAGES ---
+        self._build_page1()
+        self._build_page2()
+        self._build_page3()
         
-        # Auto-load logiky
+        # Auto-load
         if self.default_template.exists():
             self.le_template.setText(str(self.default_template))
             self.template_path = self.default_template
-            # Spustíme sken s mírným zpožděním, aby se stihl inicializovat UI
             QTimer.singleShot(100, self._scan_placeholders)
         
         self.le_output.setText(str(self.default_output))
         self.output_path = self.default_output
 
-
-    def _build_pages(self):
-        self.page1 = QWizardPage(); self.page1.setTitle("Krok 1/3 – Šablona a parametry")
-        l = QVBoxLayout(self.page1)
-
-        form = QFormLayout()
-        self.le_template = QLineEdit(); 
-        self.le_template.setText(str(self.default_template))  # ← PŘIDEJTE
-        self.btn_template = QPushButton("Vybrat…")
-        h1 = QHBoxLayout(); h1.addWidget(self.le_template, 1); h1.addWidget(self.btn_template)
-        w1 = QWidget(); w1.setLayout(h1); form.addRow("Šablona DOCX:", w1)
-
-        self.le_output = QLineEdit(); 
-        self.le_output.setText(str(self.default_output))  # ← PŘIDEJTE
-        self.btn_output = QPushButton("Uložit jako…")
-        h2 = QHBoxLayout(); h2.addWidget(self.le_output, 1); h2.addWidget(self.btn_output)
-        w2 = QWidget(); w2.setLayout(h2); form.addRow("Výstupní soubor:", w2)
-
-        self.le_prefix = QLineEdit("MůjText"); form.addRow("Prefix pro <PoznamkaVerze>:", self.le_prefix)
-        self.dt_edit = QDateTimeEdit(QDateTime.currentDateTime()); self.dt_edit.setDisplayFormat("dd.MM.yyyy HH:mm"); self.dt_edit.setCalendarPopup(True)
-        form.addRow("Datum a čas (<DatumČas>):", self.dt_edit)
-
-        l.addLayout(form)
-        self.lbl_info = QLabel("(Po výběru šablony se vyhodnotí placeholdery.)"); l.addWidget(self.lbl_info)
-
-        self.btn_template.clicked.connect(self._choose_template)
-        self.btn_output.clicked.connect(self._choose_output)
-
+    def _build_page1(self):
+        self.page1 = QWizardPage()
+        self.page1.setTitle("Krok 1: Výběr šablony a globální nastavení")
+        l1 = QVBoxLayout(self.page1)
+        
+        # GroupBox: Soubory
+        gb_files = QGroupBox("Soubory")
+        form_files = QFormLayout()
+        self.le_template = QLineEdit()
+        btn_t = QPushButton("Vybrat šablonu..."); btn_t.clicked.connect(self._choose_template)
+        h_t = QHBoxLayout(); h_t.addWidget(self.le_template); h_t.addWidget(btn_t)
+        form_files.addRow("Šablona:", h_t)
+        
+        self.le_output = QLineEdit()
+        btn_o = QPushButton("Cíl exportu..."); btn_o.clicked.connect(self._choose_output)
+        h_o = QHBoxLayout(); h_o.addWidget(self.le_output); h_o.addWidget(btn_o)
+        form_files.addRow("Výstup:", h_o)
+        gb_files.setLayout(form_files)
+        l1.addWidget(gb_files)
+        
+        # GroupBox: Parametry
+        gb_params = QGroupBox("Parametry testu")
+        form_params = QFormLayout()
+        self.le_prefix = QLineEdit("MůjTest")
+        form_params.addRow("Prefix verze:", self.le_prefix)
+        
+        self.dt_edit = QDateTimeEdit(QDateTime.currentDateTime())
+        self.dt_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
+        self.dt_edit.setCalendarPopup(True)
+        form_params.addRow("Datum testu:", self.dt_edit)
+        gb_params.setLayout(form_params)
+        l1.addWidget(gb_params)
+        
+        self.lbl_scan_info = QLabel("Info: Čekám na načtení šablony...")
+        self.lbl_scan_info.setStyleSheet("color: gray; font-style: italic;")
+        l1.addWidget(self.lbl_scan_info)
+        
+        self.le_template.textChanged.connect(self._on_templ_change)
+        self.le_output.textChanged.connect(lambda t: setattr(self, 'output_path', Path(t)))
         self.addPage(self.page1)
 
-        self.page2 = QWizardPage(); self.page2.setTitle("Krok 2/3 – Výběr otázek")
-        l2 = QVBoxLayout(self.page2)
-        self.area = QScrollArea(); self.area.setWidgetResizable(True)
-        self.inner = QWidget(); self.form2 = QFormLayout(self.inner)
-        self.area.setWidget(self.inner); l2.addWidget(self.area)
-        self.lbl_hint = QLabel("Vyberte otázky pro <OtázkaX> (klasické) a <BONUSY> (bonusové).")
-        l2.addWidget(self.lbl_hint)
-        self.addPage(self.page2)
-
-        self.page3 = QWizardPage(); self.page3.setTitle("Krok 3/3 – Souhrn a export")
-        l3 = QFormLayout(self.page3)
-        self.lbl_counts = QLabel("-"); self.lbl_minmax = QLabel("-")
-        l3.addRow("Souhrn:", self.lbl_counts); l3.addRow("Body:", self.lbl_minmax)
-        self.addPage(self.page3)
-
-        self.currentIdChanged.connect(self._on_page_changed)
+    def _build_page2(self):
+        self.page2 = QWizardPage()
+        self.page2.setTitle("Krok 2: Přiřazení otázek do šablony")
+        l2 = QHBoxLayout(self.page2)
         
-    def _on_template_text_changed(self, text):
+        # Levý panel: Dostupné otázky (Tree)
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(QLabel("<b>Dostupné otázky v databázi:</b>"))
+        self.tree_source = QTreeWidget()
+        self.tree_source.setHeaderLabels(["Název otázky", "Typ", "Body"])
+        self.tree_source.setColumnWidth(0, 280)
+        left_layout.addWidget(self.tree_source)
+        l2.addLayout(left_layout, 4) # Ratio 4
+        
+        # Pravý panel: Sloty
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(QLabel("<b>Sloty v šabloně:</b>"))
+        
+        self.scroll_slots = QScrollArea()
+        self.scroll_slots.setWidgetResizable(True)
+        self.widget_slots = QWidget()
+        self.layout_slots = QVBoxLayout(self.widget_slots)
+        self.layout_slots.setSpacing(6)
+        self.layout_slots.addStretch()
+        self.scroll_slots.setWidget(self.widget_slots)
+        
+        right_layout.addWidget(self.scroll_slots)
+        l2.addLayout(right_layout, 6) # Ratio 6
+        
+        self.addPage(self.page2)
+        self.page2.initializePage = self._init_page2
+
+    def _build_page3(self):
+        self.page3 = QWizardPage()
+        self.page3.setTitle("Krok 3: Kontrola a Export")
+        l3 = QVBoxLayout(self.page3)
+        
+        self.lbl_summary = QLabel()
+        self.lbl_summary.setWordWrap(True)
+        l3.addWidget(self.lbl_summary)
+        
+        self.tbl_preview = QTableWidget()
+        self.tbl_preview.setColumnCount(2)
+        self.tbl_preview.setHorizontalHeaderLabels(["Položka", "Hodnota"])
+        self.tbl_preview.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        l3.addWidget(self.tbl_preview)
+        
+        self.addPage(self.page3)
+        self.page3.initializePage = self._init_page3
+
+    # --- Logic Krok 1 ---
+    def _choose_template(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Šablona", str(self.templates_dir), "*.docx")
+        if path: self.le_template.setText(path)
+
+    def _choose_output(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Výstup", str(self.default_output), "*.docx")
+        if path: self.le_output.setText(path)
+
+    def _on_templ_change(self, text):
         path = Path(text)
-        if path.exists() and path.suffix.lower() == '.docx':
+        if path.exists() and path.suffix == '.docx':
             self.template_path = path
-            # Skenujeme jen při existujícím souboru
             self._scan_placeholders()
         else:
             self.template_path = None
-            # Reset informací
-            self.lbl_info.setText("Šablona nenalezena nebo neplatná.")
-            self.placeholders_q = []
-            self.placeholders_b = []
-
-    def _on_output_text_changed(self, text):
-        self.output_path = Path(text)
-
-    def _choose_template(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, 
-            "Vybrat šablonu DOCX", 
-            str(self.templates_dir),  # ← ZMĚNIT NA DEFAULT DIR
-            "Word dokument (*.docx)"
-        )
-        if not path:
-            return
-        self.le_template.setText(path); self.template_path = Path(path); self._scan_placeholders()
-
-    def _choose_output(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, 
-            "Uložit výstupní DOCX", 
-            str(self.default_output),  # ← ZMĚNIT NA DEFAULT PATH
-            "Word dokument (*.docx)"
-        )
-        if path:
-            self.le_output.setText(path); self.output_path = Path(path)
-
+            self.lbl_scan_info.setText("Šablona neexistuje.")
 
     def _scan_placeholders(self):
         try:
-            uniq = []
-            seen = set()
-            # NS map je potřeba pro findall
-            ns = {'w': "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+            doc = docx.Document(self.template_path)
+            full_text = ""
+            for p in doc.paragraphs: full_text += p.text + "\n"
+            for t in doc.tables:
+                for r in t.rows:
+                    for c in r.cells:
+                        for p in c.paragraphs: full_text += p.text + "\n"
             
-            with zipfile.ZipFile(self.template_path, "r") as z:
-                # Skenujeme document, headers i footers
-                xml_files = [
-                    n for n in z.namelist() 
-                    if n.startswith("word/") and n.endswith(".xml") 
-                    and ("document" in n or "header" in n or "footer" in n)
-                ]
-                
-                full_text_combined = ""
-                for fname in xml_files:
-                    xml_content = z.read(fname)
-                    try:
-                        tree = ET.ElementTree(ET.fromstring(xml_content))
-                        root = tree.getroot()
-                        # Extrakce textu ze všech odstavců
-                        for p in root.findall(".//w:p", ns):
-                            # Spojíme texty všech runů v odstavci do jednoho řetězce
-                            p_text = "".join([t.text or "" for t in p.findall(".//w:t", ns)])
-                            full_text_combined += p_text + "\n"
-                    except Exception:
-                        continue
-
-            # Regex hledá <Cokoliv>
-            matches = re.findall(r"<([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+[0-9]*)>", full_text_combined)
+            import re
+            placeholders = re.findall(r'[<{]([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+)[>}]', full_text)
+            placeholders = sorted(list(set(placeholders)))
             
-            for m in matches:
-                if m not in seen:
-                    uniq.append(m); seen.add(m)
-
+            self.placeholders_q = [p for p in placeholders if re.match(r'^Otázka\d+$', p)]
+            self.placeholders_q.sort(key=lambda x: int(re.findall(r'\d+', x)[0]))
+            
+            self.placeholders_b = [p for p in placeholders if re.match(r'^BONUS\d+$', p)]
+            self.placeholders_b.sort(key=lambda x: int(re.findall(r'\d+', x)[0]))
+            
+            self.has_datumcas = any(x in placeholders for x in ['DatumČas', 'DatumCas', 'DATUMCAS'])
+            self.has_pozn = any(x in placeholders for x in ['PoznamkaVerze', 'POZNAMKAVERZE'])
+            self.has_minmax = (any('MinBody' in x for x in placeholders), any('MaxBody' in x for x in placeholders))
+            
+            msg = f"Nalezeno: {len(self.placeholders_q)}x Otázka, {len(self.placeholders_b)}x BONUS."
+            self.lbl_scan_info.setText(msg)
+            
         except Exception as e:
-            QMessageBox.warning(self, "Šablona", f"Nelze číst šablonu:\n{e}"); return
+            self.lbl_scan_info.setText(f"Chyba čtení šablony: {e}")
 
-        self.placeholders_q = sorted([p for p in uniq if re.match(r"^Otázka\d+$", p)], key=lambda x: int(re.findall(r"\d+", x)[0]))
-        self.placeholders_b = sorted([p for p in uniq if re.match(r"^BONUS\d+$", p)], key=lambda x: int(re.findall(r"\d+", x)[0]))
-        self.has_datumcas = "DatumČas" in uniq
-        self.has_pozn = "PoznamkaVerze" in uniq
-        self.has_minmax = ("MinBody" in uniq, "MaxBody" in uniq)
+    # --- Logic Krok 2 ---
+    def _init_page2(self):
+        self.tree_source.clear()
+        while self.layout_slots.count():
+            item = self.layout_slots.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self.layout_slots.addStretch()
+        
+        # Load Tree
+        groups = self.owner.root.groups
+        for g in groups:
+            g_item = QTreeWidgetItem([g.name, "", ""])
+            g_item.setExpanded(True)
+            self.tree_source.addTopLevelItem(g_item)
+            for sg in g.subgroups:
+                sg_item = QTreeWidgetItem([sg.name, "", ""])
+                sg_item.setExpanded(True)
+                g_item.addChild(sg_item)
+                for q in sg.questions:
+                    label = q.title
+                    # Pokud už je vybrána, označíme ji
+                    if q.id in self.selection_map.values():
+                        label += " (VYBRÁNO)"
+                    
+                    q_item = QTreeWidgetItem([label, q.type, str(q.points) if q.type=='classic' else f"B:{q.bonus_correct}"])
+                    q_item.setData(0, Qt.UserRole, q.id)
+                    
+                    # Pokud je vybrána, skryjeme ji (aby nešla vybrat znovu)
+                    if q.id in self.selection_map.values():
+                        q_item.setHidden(True)
+                    
+                    sg_item.addChild(q_item)
 
-        self._rebuild_page2()
-        self.lbl_info.setText(f"Nalezeno {len(self.placeholders_q)}× Otázka, {len(self.placeholders_b)}× BONUS; "
-                              f"{'DatumČas ' if self.has_datumcas else ''}{'PoznamkaVerze ' if self.has_pozn else ''}"
-                              f"{'MinBody ' if self.has_minmax[0] else ''}{'MaxBody ' if self.has_minmax[1] else ''}")
+        # Load Slots
+        if self.placeholders_q:
+            lbl = QLabel("--- KLASICKÉ OTÁZKY ---"); lbl.setStyleSheet("font-weight:bold; color:#4da6ff; margin-top:5px;")
+            self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
+            for ph in self.placeholders_q:
+                self._add_slot_widget(ph, 'classic')
 
+        if self.placeholders_b:
+            lbl = QLabel("--- BONUSOVÉ OTÁZKY ---"); lbl.setStyleSheet("font-weight:bold; color:#ffcc00; margin-top:10px;")
+            self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
+            for ph in self.placeholders_b:
+                self._add_slot_widget(ph, 'bonus')
+    
+    def _add_slot_widget(self, placeholder_name, allowed_type):
+        w = QWidget()
+        l = QHBoxLayout(w)
+        l.setContentsMargins(0,2,0,2)
+        
+        lbl_ph = QLabel(f"{placeholder_name}:")
+        lbl_ph.setFixedWidth(80)
+        
+        btn_sel = QPushButton("Vybrat...")
+        btn_sel.setFixedWidth(80)
+        
+        # Zjistíme, zda už je něco vybráno (z paměti)
+        current_qid = self.selection_map.get(placeholder_name)
+        current_title = "(nevybráno)"
+        if current_qid:
+            q = self.owner._find_question_by_id(current_qid)
+            if q: current_title = q.title
 
-    def _rebuild_page2(self):
-        while self.form2.rowCount():
-            self.form2.removeRow(0)
+        lbl_val = QLabel(current_title)
+        lbl_val.setStyleSheet("color: gray; font-style: italic;" if not current_qid else "color: white; font-weight: bold;")
+        
+        btn_clr = QPushButton("X")
+        btn_clr.setFixedWidth(30)
+        btn_clr.setEnabled(bool(current_qid))
+        
+        l.addWidget(lbl_ph)
+        l.addWidget(lbl_val, 1) # Stretch
+        l.addWidget(btn_sel)
+        l.addWidget(btn_clr)
+        
+        def select_current():
+            sel = self.tree_source.selectedItems()
+            if not sel:
+                QMessageBox.information(self, "Info", "Nejprve označte otázku v levém seznamu.")
+                return
+            item = sel[0]
+            qid = item.data(0, Qt.UserRole)
+            if not qid: return
+            
+            q = self.owner._find_question_by_id(qid)
+            if not q: return
+            
+            if q.type != allowed_type:
+                QMessageBox.warning(self, "Typ nesedí", f"Do slotu {placeholder_name} nelze vložit otázku typu {q.type}.")
+                return
+            
+            # Pokud už tam něco bylo, vrátíme to do stromu
+            old_qid = self.selection_map.get(placeholder_name)
+            if old_qid:
+                self._show_tree_item(old_qid)
+            
+            self.selection_map[placeholder_name] = qid
+            lbl_val.setText(q.title)
+            lbl_val.setStyleSheet("color: white; font-weight: bold;")
+            btn_clr.setEnabled(True)
+            
+            item.setHidden(True)
 
-        self.cmb_q: Dict[str, QComboBox] = {}
-        self.cmb_b: Dict[str, QComboBox] = {}
+        def clear_current():
+            old_qid = self.selection_map.get(placeholder_name)
+            if old_qid:
+                del self.selection_map[placeholder_name]
+                self._show_tree_item(old_qid)
+                
+            lbl_val.setText("(nevybráno)")
+            lbl_val.setStyleSheet("color: gray; font-style: italic;")
+            btn_clr.setEnabled(False)
 
-        classics = self.owner._all_questions_by_type("classic")
-        bonuses  = self.owner._all_questions_by_type("bonus")
+        btn_sel.clicked.connect(select_current)
+        btn_clr.clicked.connect(clear_current)
+        self.layout_slots.insertWidget(self.layout_slots.count()-1, w)
 
-        for name in self.placeholders_q:
-            cb = QComboBox(); cb.addItem("-- nevybráno --", "")
-            for q in classics:
-                cb.addItem(q.title or "Otázka", q.id)
-            self.form2.addRow(name + ":", cb); self.cmb_q[name] = cb
-            cb.currentIndexChanged.connect(self._update_summary)
+    def _show_tree_item(self, qid):
+        # Najít item v tree a odkrýt ho
+        it = QTreeWidgetItemIterator(self.tree_source)
+        while it.value():
+            item = it.value()
+            if item.data(0, Qt.UserRole) == qid:
+                item.setHidden(False)
+                break
+            it += 1
 
-        for name in self.placeholders_b:
-            cb = QComboBox(); cb.addItem("-- nevybráno --", "")
-            for q in bonuses:
-                cb.addItem(f"{q.title or 'BONUS'} (+{q.bonus_correct:.2f}/ {q.bonus_wrong:.2f})", q.id)
-            self.form2.addRow(name + ":", cb); self.cmb_b[name] = cb
-            cb.currentIndexChanged.connect(self._update_summary)
-
-    def _on_page_changed(self, idx: int):
-        if idx == 2:
-            self._update_summary()
-
-    def _update_summary(self):
-        classics_sel, bonuses_sel = [], []
-        for cb in getattr(self, 'cmb_q', {}).values():
-            qid = cb.currentData()
+    # --- Logic Krok 3 ---
+    def _init_page3(self):
+        self.tbl_preview.setRowCount(0)
+        total_points = 0.0
+        min_loss = 0.0
+        
+        # Tabulka
+        row = 0
+        for ph in self.placeholders_q + self.placeholders_b:
+            qid = self.selection_map.get(ph)
+            self.tbl_preview.insertRow(row)
+            self.tbl_preview.setItem(row, 0, QTableWidgetItem(ph))
+            
             if qid:
                 q = self.owner._find_question_by_id(qid)
-                if q: classics_sel.append(q)
-        for cb in getattr(self, 'cmb_b', {}).values():
-            qid = cb.currentData()
-            if qid:
-                q = self.owner._find_question_by_id(qid)
-                if q: bonuses_sel.append(q)
-        min_body = sum(float(q.bonus_wrong) for q in bonuses_sel)
-        max_body = sum(int(q.points) for q in classics_sel) + sum(float(q.bonus_correct) for q in bonuses_sel)
-        self.lbl_counts.setText(f"Klasických: {len(classics_sel)} / {len(self.placeholders_q)}, BONUS: {len(bonuses_sel)} / {len(self.placeholders_b)}")
-        self.lbl_minmax.setText(f"MinBody = {min_body:.2f} | MaxBody = {max_body:.2f}")
+                if q.type == 'classic':
+                    total_points += float(q.points)
+                else:
+                    total_points += float(q.bonus_correct)
+                    min_loss += float(q.bonus_wrong)
+                self.tbl_preview.setItem(row, 1, QTableWidgetItem(q.title))
+            else:
+                 self.tbl_preview.setItem(row, 1, QTableWidgetItem("---"))
+            row += 1
+            
+        # Stupnice
+        scale_text = f"""
+        MaxBody: {total_points:.2f}
+        MinBody: {min_loss:.2f}
+        
+        A: <9.2; {total_points:.2f}>
+        B: <8.4; 9.2)
+        C: <7.6; 8.4)
+        D: <6.8; 7.6)
+        E: <6.0; 6.8)
+        F: <{min_loss:.2f}; 6.0)
+        """
+        self.lbl_summary.setText(scale_text)
 
     def accept(self) -> None:
-        if not self.template_path or not self.output_path:
-            QMessageBox.warning(self, "Export", "Vyberte šablonu i výstupní soubor."); return
+        if not self.template_path or not self.output_path: return
 
+        # Build Replacements
         repl_plain: Dict[str, str] = {}
-
-        if self.has_datumcas:
-            # Přesnost 10 minut
-            dt = round_dt_to_10m(self.dt_edit.dateTime())
-            # Formát: DenVTýdnu DD.MM.YYYY HH:MM (např. čtvrtek 27.11.2025 15:00)
-            repl_plain["DatumČas"] = f"{cz_day_of_week(dt.toPython())} {dt.toString('dd.MM.yyyy HH:mm')}"
         
-        if self.has_pozn:
-            # <PoznamkaVerze>: "MůjText" + YYYY-MM-DD_UUID
-            prefix = (self.le_prefix.text().strip() or "MůjText")
-            today = datetime.now().strftime("%Y-%m-%d")
-            unique_id = str(_uuid.uuid4()) # Plné UUID
-            repl_plain["PoznamkaVerze"] = f"{prefix} {today}_{unique_id}"
-
-        classics_sel: Dict[str, Question] = {}
-        bonuses_sel: Dict[str, Question] = {}
-
-        # Validace a sběr klasických otázek
-        for name, cb in self.cmb_q.items():
-            qid = cb.currentData()
-            if not qid: QMessageBox.warning(self, "Export", f"Vyberte otázku pro {name}."); return
+        # Datum
+        dt = round_dt_to_10m(self.dt_edit.dateTime())
+        repl_plain["DatumČas"] = f"{cz_day_of_week(dt.toPython())} {dt.toString('dd.MM.yyyy HH:mm')}"
+        repl_plain["DatumCas"] = repl_plain["DatumČas"] # alias
+        repl_plain["DATUMCAS"] = repl_plain["DatumČas"]
+        
+        # Pozn
+        prefix = self.le_prefix.text()
+        today = datetime.now().strftime("%Y-%m-%d")
+        repl_plain["PoznamkaVerze"] = f"{prefix} {today}_{str(_uuid.uuid4())[:8]}"
+        repl_plain["POZNAMKAVERZE"] = repl_plain["PoznamkaVerze"]
+        
+        # Body
+        # Spočítáme znovu
+        total_points = 0.0
+        min_loss = 0.0
+        for qid in self.selection_map.values():
             q = self.owner._find_question_by_id(qid)
-            if not q or q.type != "classic": QMessageBox.warning(self, "Export", f"{name} musí být klasická."); return
-            classics_sel[name] = q
+            if q.type == 'classic': total_points += float(q.points)
+            else:
+                total_points += float(q.bonus_correct)
+                min_loss += float(q.bonus_wrong)
+        
+        repl_plain["MaxBody"] = f"{total_points:.2f}"
+        repl_plain["MAXBODY"] = f"{total_points:.2f}"
+        repl_plain["MinBody"] = f"{min_loss:.2f}"
+        repl_plain["MINBODY"] = f"{min_loss:.2f}"
 
-        # Validace a sběr BONUS otázek
-        for name, cb in self.cmb_b.items():
-            qid = cb.currentData()
-            if not qid: QMessageBox.warning(self, "Export", f"Vyberte otázku pro {name}."); return
-            q = self.owner._find_question_by_id(qid)
-            if not q or q.type != "bonus": QMessageBox.warning(self, "Export", f"{name} musí být BONUS."); return
-            bonuses_sel[name] = q
-
-        if self.has_minmax[0]:
-            # <MinBody>: součet bodů za špatné odpovědi u BONUS otázek
-            min_body = sum(float(q.bonus_wrong) for q in bonuses_sel.values())
-            repl_plain["MinBody"] = f"{min_body:.2f}"
-            
-        if self.has_minmax[1]:
-            # <MaxBody>: maximální bodový zisk (klasické + bonusové správně)
-            max_body = sum(int(q.points) for q in classics_sel.values()) + sum(float(q.bonus_correct) for q in bonuses_sel.values())
-            repl_plain["MaxBody"] = f"{max_body:.2f}"
-
+        # Rich Map
         rich_map: Dict[str, str] = {}
-        for k, q in classics_sel.items():
-            rich_map[k] = q.text_html or "<p></p>"
-        for k, q in bonuses_sel.items():
-            rich_map[k] = q.text_html or "<p></p>"
+        for ph, qid in self.selection_map.items():
+            q = self.owner._find_question_by_id(qid)
+            if q:
+                rich_map[ph] = q.text_html
 
         try:
             self.owner._generate_docx_from_template(self.template_path, self.output_path, repl_plain, rich_map)
         except Exception as e:
-            QMessageBox.critical(self, "Export", f"Chyba při exportu:\n{e}"); return
+            QMessageBox.critical(self, "Export", f"Chyba:\n{e}"); return
 
-        QMessageBox.information(self, "Export", f"Hotovo:\n{self.output_path}")
+        QMessageBox.information(self, "Export", f"Uloženo:\n{self.output_path}")
         super().accept()
-
 
 
 # --------------------------- Hlavní okno (UI + logika) ---------------------------
@@ -2199,27 +2318,36 @@ class MainWindow(QMainWindow):
                         # Rozparsujeme HTML na runy
                         paras = parse_html_to_paragraphs(val)
                         
-                        # Vložíme runy. Odstavce ignorujeme (vše na jeden řádek)
+                        # Vložíme runy.
                         for p_idx, p_data in enumerate(paras):
-                            # Pokud to není první "odstavec" z HTML, vložíme mezeru
-                            if p_idx > 0: p.add_run(" ")
+                            # Pokud to není první "odstavec" z HTML, vložíme zalomení řádku (Soft Break)
+                            if p_idx > 0:
+                                run_break = p.add_run()
+                                run_break.add_break()
                             
                             for r_data in p_data['runs']:
-                                run = p.add_run(r_data['text'])
-                                
-                                # Aplikujeme styl z HTML
-                                if r_data.get('b'): run.bold = True
-                                if r_data.get('i'): run.italic = True
-                                if r_data.get('u'): run.underline = True
-                                if r_data.get('color'):
-                                    try:
-                                        rgb = r_data['color']
-                                        run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
-                                    except: pass
-                                
-                                # Aplikujeme base font (pokud HTML neurčuje jinak - ale HTML font name nemáme)
-                                if base_font_name: run.font.name = base_font_name
-                                if base_font_size: run.font.size = base_font_size
+                                text_content = r_data['text']
+                                # I uvnitř runu může být \n (z <br>)
+                                parts = text_content.split('\n')
+                                for idx_part, part in enumerate(parts):
+                                    if part:
+                                        run = p.add_run(part)
+                                        if r_data.get('b'): run.bold = True
+                                        if r_data.get('i'): run.italic = True
+                                        if r_data.get('u'): run.underline = True
+                                        if r_data.get('color'):
+                                            try:
+                                                rgb = r_data['color']
+                                                run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
+                                            except: pass
+                                        
+                                        # Base style
+                                        if base_font_name: run.font.name = base_font_name
+                                        if base_font_size: run.font.size = base_font_size
+                                    
+                                    if idx_part < len(parts) - 1:
+                                        p.add_run().add_break()
+
 
 
         # 1. Body
