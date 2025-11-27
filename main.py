@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-'''
-Crypto Exam Generator (v1.1)
-Jednosouborová PySide6 aplikace pro správu zkušebních otázek
-s podporou skupin a podskupin, typů otázek (klasická/BONUS),
-bohatého formátování textu (tučné, kurzíva, podtržení, barvy, odrážky),
-ukládání do JSON (mimo git – doporučené do ./data/)
-a importu otázek z DOCX (Word).
+"""
+Crypto Exam Generator (v1.2)
+- Hierarchie podskupin libovolné hloubky (jako složky)
+- Drag & drop přesouvání a řazení podskupin i otázek v levém stromu
+- Import z DOCX, editor formátování, JSON úložiště
 
 Platforma: macOS (podporováno i jinde), výchozí dark theme (Fusion).
 Autor: (doplní uživatel)
 Licence: MIT nebo dle potřeby
-'''
+"""
 
 from __future__ import annotations
 
@@ -22,18 +20,17 @@ import re
 import html
 import zipfile
 from xml.etree import ElementTree as ET
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QSize, QItemSelection, QItemSelectionModel, QSaveFile, QByteArray
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QTextCharFormat, QTextCursor, QTextListFormat, QColor, QPalette
+from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray
+from PySide6.QtGui import QAction, QKeySequence, QTextCharFormat, QTextCursor, QTextListFormat, QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QWidget,
-    QHBoxLayout,
     QVBoxLayout,
     QTreeWidget,
     QTreeWidgetItem,
@@ -42,18 +39,18 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QFileDialog,
     QMessageBox,
-    QLabel,
     QLineEdit,
     QPushButton,
     QFormLayout,
     QSpinBox,
     QComboBox,
     QColorDialog,
+    QAbstractItemView,
 )
 
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"  # minor: nested subgroups + drag&drop
 
 # --------------------------- Datové typy ---------------------------
 
@@ -62,9 +59,9 @@ class Question:
     id: str
     type: str  # "classic" | "bonus"
     text_html: str
-    points: int = 1  # pouze pro classic
-    bonus_correct: int = 2  # pouze pro bonus
-    bonus_wrong: int = 0    # pouze pro bonus (může být záporné)
+    points: int = 1          # pouze pro classic
+    bonus_correct: int = 1   # pouze pro bonus
+    bonus_wrong: int = 0     # pouze pro bonus (může být záporné)
     created_at: str = ""     # ISO
 
     @staticmethod
@@ -76,8 +73,8 @@ class Question:
                 type="bonus",
                 text_html="<p><br></p>",
                 points=0,
-                bonus_correct=1,   # default import bonus correct
-                bonus_wrong=0,     # default import bonus wrong
+                bonus_correct=1,
+                bonus_wrong=0,
                 created_at=now,
             )
         return Question(
@@ -95,7 +92,8 @@ class Question:
 class Subgroup:
     id: str
     name: str
-    questions: List[Question]
+    subgroups: List["Subgroup"] = field(default_factory=list)
+    questions: List[Question] = field(default_factory=list)
 
 
 @dataclass
@@ -113,7 +111,7 @@ class RootData:
 # --------------------------- Utility: Dark theme ---------------------------
 
 def apply_dark_theme(app: QApplication) -> None:
-    '''Nastaví Fusion dark theme s jemnými barvami, vhodné pro macOS/Retina.'''
+    """Nastaví Fusion dark theme s jemnými barvami, vhodné pro macOS/Retina."""
     app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     QApplication.setStyle("Fusion")
@@ -133,10 +131,36 @@ def apply_dark_theme(app: QApplication) -> None:
     app.setPalette(palette)
 
 
+# --------------------------- DnD Tree ---------------------------
+
+class DnDTree(QTreeWidget):
+    """QTreeWidget s podporou drag&drop, po přesunu synchronizuje datový model."""
+
+    def __init__(self, owner: "MainWindow") -> None:
+        super().__init__()
+        self.owner = owner
+        self.setHeaderLabels(["Název", "Typ / body"])
+        self.setColumnWidth(0, 280)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+
+    def dropEvent(self, event) -> None:
+        super().dropEvent(event)
+        # Po vizuálním přesunu stromu přegenerujeme datový model z aktuální struktury
+        self.owner._sync_model_from_tree()
+        self.owner.save_data()
+        self.owner.statusBar().showMessage("Přesun dokončen (uloženo).", 3000)
+
+
 # --------------------------- Hlavní okno ---------------------------
 
 class MainWindow(QMainWindow):
-    '''Hlavní okno aplikace.'''
+    """Hlavní okno aplikace."""
 
     def __init__(self, data_path: Optional[Path] = None) -> None:
         super().__init__()
@@ -155,7 +179,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
-        self._build_menus()   # v1.1 menu
+        self._build_menus()
         self.load_data()
         self._refresh_tree()
 
@@ -167,10 +191,7 @@ class MainWindow(QMainWindow):
         splitter.setHandleWidth(8)
 
         # Levý strom: skupiny/podskupiny/otázky
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Název", "Typ / body"])
-        self.tree.setColumnWidth(0, 280)
-        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree = DnDTree(self)
 
         # Pravý panel: editor/props
         self.detail_stack = QWidget()
@@ -316,7 +337,7 @@ class MainWindow(QMainWindow):
         self.act_save_all.triggered.connect(self.save_data)
         self.act_choose_data.triggered.connect(self._choose_data_file)
 
-    # -------------------- Menu (v1.1) --------------------
+    # -------------------- Menu (import/přesun) --------------------
 
     def _build_menus(self) -> None:
         bar = self.menuBar()
@@ -344,13 +365,7 @@ class MainWindow(QMainWindow):
                     raw = json.load(f)
                 groups: List[Group] = []
                 for g in raw.get("groups", []):
-                    subgroups: List[Subgroup] = []
-                    for sg in g.get("subgroups", []):
-                        questions: List[Question] = []
-                        for q in sg.get("questions", []):
-                            questions.append(Question(**q))
-                        subgroups.append(Subgroup(id=sg["id"], name=sg["name"], questions=questions))
-                    groups.append(Group(id=g["id"], name=g["name"], subgroups=subgroups))
+                    groups.append(self._parse_group(g))
                 self.root = RootData(groups=groups)
             except Exception as e:
                 QMessageBox.warning(self, "Načtení selhalo", f"Soubor {self.data_path} nelze načíst: {e}\nVytvořen prázdný projekt.")
@@ -359,22 +374,13 @@ class MainWindow(QMainWindow):
             self.root = self.default_root_obj()
 
     def save_data(self) -> None:
-        # Před uložením ještě promítnout případné rozpracované změny otázky
+        # promítnout rozpracované změny otázky
         self._apply_editor_to_current_question(silent=True)
 
         self.data_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"groups": []}
-        for g in self.root.groups:
-            gdict = {"id": g.id, "name": g.name, "subgroups": []}
-            for sg in g.subgroups:
-                sgdict = {"id": sg.id, "name": sg.name, "questions": []}
-                for q in sg.questions:
-                    sgdict["questions"].append(asdict(q))
-                gdict["subgroups"].append(sgdict)
-            data["groups"].append(gdict)
+        data = {"groups": [self._serialize_group(g) for g in self.root.groups]}
 
         try:
-            # Bezpečné uložení (atomicky)
             sf = QSaveFile(str(self.data_path))
             sf.open(QSaveFile.WriteOnly)
             payload = json.dumps(data, ensure_ascii=False, indent=2)
@@ -384,6 +390,36 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Uložení selhalo", f"Chyba při ukládání do {self.data_path}:\n{e}")
 
+    # ---- JSON parse/serialize helpers (rekurzivně) ----
+
+    def _parse_group(self, g: dict) -> Group:
+        subgroups = [self._parse_subgroup(sg) for sg in g.get("subgroups", [])]
+        return Group(id=g["id"], name=g["name"], subgroups=subgroups)
+
+    def _parse_subgroup(self, sg: dict) -> Subgroup:
+        # kompatibilita se starou strukturou (bez "subgroups")
+        subgroups_raw = sg.get("subgroups", [])
+        subgroups = [self._parse_subgroup(s) for s in subgroups_raw]
+        questions = []
+        for q in sg.get("questions", []):
+            questions.append(Question(**q))
+        return Subgroup(id=sg["id"], name=sg["name"], subgroups=subgroups, questions=questions)
+
+    def _serialize_group(self, g: Group) -> dict:
+        return {
+            "id": g.id,
+            "name": g.name,
+            "subgroups": [self._serialize_subgroup(sg) for sg in g.subgroups],
+        }
+
+    def _serialize_subgroup(self, sg: Subgroup) -> dict:
+        return {
+            "id": sg.id,
+            "name": sg.name,
+            "subgroups": [self._serialize_subgroup(s) for s in sg.subgroups],
+            "questions": [asdict(q) for q in sg.questions],
+        }
+
     # -------------------- Tree helpery --------------------
 
     def _refresh_tree(self) -> None:
@@ -392,18 +428,27 @@ class MainWindow(QMainWindow):
             g_item = QTreeWidgetItem([g.name, "Skupina"])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
             self.tree.addTopLevelItem(g_item)
-            for sg in g.subgroups:
-                sg_item = QTreeWidgetItem([sg.name, "Podskupina"])
-                sg_item.setData(0, Qt.UserRole, {"kind": "subgroup", "id": sg.id, "parent_group_id": g.id})
-                g_item.addChild(sg_item)
-                for q in sg.questions:
-                    label = "Klasická" if q.type == "classic" else "BONUS"
-                    pts = q.points if q.type == "classic" else f"+{q.bonus_correct}/ {q.bonus_wrong}"
-                    q_item = QTreeWidgetItem(["Otázka", f"{label} | {pts}"])
-                    q_item.setData(0, Qt.UserRole, {"kind": "question", "id": q.id, "parent_subgroup_id": sg.id, "parent_group_id": g.id})
-                    sg_item.addChild(q_item)
-            g_item.setExpanded(True)
+            self._add_subgroups_to_item(g_item, g.id, g.subgroups)
+        self.tree.expandAll()
         self.tree.resizeColumnToContents(0)
+
+    def _add_subgroups_to_item(self, parent_item: QTreeWidgetItem, group_id: str, subgroups: List[Subgroup]) -> None:
+        for sg in subgroups:
+            sg_item = QTreeWidgetItem([sg.name, "Podskupina"])
+            parent_meta = parent_item.data(0, Qt.UserRole) or {}
+            parent_sub_id = parent_meta.get("id") if parent_meta.get("kind") == "subgroup" else None
+            sg_item.setData(0, Qt.UserRole, {"kind": "subgroup", "id": sg.id, "parent_group_id": group_id, "parent_subgroup_id": parent_sub_id})
+            parent_item.addChild(sg_item)
+            # questions
+            for q in sg.questions:
+                label = "Klasická" if q.type == "classic" else "BONUS"
+                pts = q.points if q.type == "classic" else f"+{q.bonus_correct}/ {q.bonus_wrong}"
+                q_item = QTreeWidgetItem(["Otázka", f"{label} | {pts}"])
+                q_item.setData(0, Qt.UserRole, {"kind": "question", "id": q.id, "parent_group_id": group_id, "parent_subgroup_id": sg.id})
+                sg_item.addChild(q_item)
+            # nested subgroups
+            if sg.subgroups:
+                self._add_subgroups_to_item(sg_item, group_id, sg.subgroups)
 
     def _selected_node(self) -> Tuple[Optional[str], Optional[dict]]:
         items = self.tree.selectedItems()
@@ -414,6 +459,68 @@ class MainWindow(QMainWindow):
         if not meta:
             return None, None
         return meta.get("kind"), meta
+
+    def _sync_model_from_tree(self) -> None:
+        """Zreplikuje datový model podle aktuální struktury stromu (po DnD)."""
+        # Připravíme mapy id -> objekt
+        group_map = {g.id: g for g in self.root.groups}
+        subgroup_map: dict[str, Subgroup] = {}
+        question_map: dict[str, Question] = {}
+        def scan_subgroups(lst: List[Subgroup]):
+            for sg in lst:
+                subgroup_map[sg.id] = sg
+                for q in sg.questions:
+                    question_map[q.id] = q
+                scan_subgroups(sg.subgroups)
+        for g in self.root.groups:
+            scan_subgroups(g.subgroups)
+
+        new_groups: List[Group] = []
+
+        def build_from_item(item: QTreeWidgetItem, container) -> None:
+            # container je buď Group nebo Subgroup (append do jeho lists)
+            child_count = item.childCount()
+            for i in range(child_count):
+                ch = item.child(i)
+                meta = ch.data(0, Qt.UserRole) or {}
+                kind = meta.get("kind")
+                if kind == "subgroup":
+                    old = subgroup_map.get(meta["id"])
+                    if not old:
+                        continue
+                    new_sg = Subgroup(id=old.id, name=ch.text(0), subgroups=[], questions=[])
+                    # přidej
+                    container.subgroups.append(new_sg)
+                    # dive
+                    build_from_item(ch, new_sg)
+                elif kind == "question":
+                    q = question_map.get(meta["id"])
+                    if not q:
+                        continue
+                    if isinstance(container, Group):
+                        # otázka bez podskupiny -> vytvoř Default
+                        if not container.subgroups:
+                            container.subgroups.append(Subgroup(id=str(uuid.uuid4()), name="Default", subgroups=[], questions=[]))
+                        container.subgroups[0].questions.append(q)
+                    else:
+                        container.questions.append(q)
+                elif kind == "group":
+                    pass  # ignoruj
+
+        # top-level (groups)
+        for i in range(self.tree.topLevelItemCount()):
+            gi = self.tree.topLevelItem(i)
+            meta = gi.data(0, Qt.UserRole) or {}
+            if meta.get("kind") != "group":
+                continue
+            old_g = group_map.get(meta["id"])
+            if not old_g:
+                old_g = Group(id=meta["id"], name=gi.text(0), subgroups=[])
+            new_g = Group(id=old_g.id, name=gi.text(0), subgroups=[])
+            build_from_item(gi, new_g)
+            new_groups.append(new_g)
+
+        self.root.groups = new_groups
 
     # -------------------- Akce: přidání/mazání/přejmenování --------------------
 
@@ -430,18 +537,25 @@ class MainWindow(QMainWindow):
     def _add_subgroup(self) -> None:
         kind, meta = self._selected_node()
         if kind not in ("group", "subgroup"):
-            QMessageBox.information(self, "Výběr", "Vyberte skupinu (nebo její podskupinu) pro přidání podskupiny.")
+            QMessageBox.information(self, "Výběr", "Vyberte skupinu (nebo podskupinu) pro přidání podskupiny.")
             return
         from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "Nová podskupina", "Název podskupiny:")
         if not ok or not name.strip():
             return
-        group_id = meta["id"] if kind == "group" else meta["parent_group_id"]
-        g = self._find_group(group_id)
-        if not g:
-            return
-        sg = Subgroup(id=str(uuid.uuid4()), name=name.strip(), questions=[])
-        g.subgroups.append(sg)
+
+        # Urči nadřazený kontejner
+        if kind == "group":
+            g = self._find_group(meta["id"])
+            if not g:
+                return
+            g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name=name.strip(), subgroups=[], questions=[]))
+        else:
+            parent_sg = self._find_subgroup(meta["parent_group_id"], meta["id"])
+            if not parent_sg:
+                return
+            parent_sg.subgroups.append(Subgroup(id=str(uuid.uuid4()), name=name.strip(), subgroups=[], questions=[]))
+
         self._refresh_tree()
         self.save_data()
 
@@ -450,31 +564,28 @@ class MainWindow(QMainWindow):
         if kind not in ("group", "subgroup"):
             QMessageBox.information(self, "Výběr", "Vyberte skupinu nebo podskupinu, do které chcete přidat otázku.")
             return
-        subgroup_id: Optional[str] = None
-        group_id: str
+
+        target_sg: Optional[Subgroup] = None
         if kind == "group":
-            group_id = meta["id"]
-            g = self._find_group(group_id)
+            g = self._find_group(meta["id"])
             if not g:
                 return
             if not g.subgroups:
-                sg = Subgroup(id=str(uuid.uuid4()), name="Default", questions=[])
+                sg = Subgroup(id=str(uuid.uuid4()), name="Default", subgroups=[], questions=[])
                 g.subgroups.append(sg)
-                subgroup_id = sg.id
+                target_sg = sg
             else:
-                subgroup_id = g.subgroups[0].id
+                target_sg = g.subgroups[0]
         else:
-            subgroup_id = meta["id"]
-            group_id = meta["parent_group_id"]
-
-        sg = self._find_subgroup(group_id, subgroup_id)
-        if not sg:
+            target_sg = self._find_subgroup(meta["parent_group_id"], meta["id"])
+        if not target_sg:
             return
 
         q = Question.new_default("classic")
-        sg.questions.append(q)
+        target_sg.questions.append(q)
         self._refresh_tree()
         self._select_question(q.id)
+        self.save_data()
 
     def _delete_selected(self) -> None:
         kind, meta = self._selected_node()
@@ -494,13 +605,19 @@ class MainWindow(QMainWindow):
         elif kind == "subgroup":
             gid = meta["parent_group_id"]
             sgid = meta["id"]
-            if QMessageBox.question(self, "Smazat podskupinu", "Smazat podskupinu včetně otázek?") == QMessageBox.Yes:
-                g = self._find_group(gid)
-                if g:
-                    g.subgroups = [s for s in g.subgroups if s.id != sgid]
-                    self._refresh_tree()
-                    self._clear_editor()
-                    self.save_data()
+            if QMessageBox.question(self, "Smazat podskupinu", "Smazat podskupinu včetně podřízených podskupin a otázek?") == QMessageBox.Yes:
+                parent_sgid = meta.get("parent_subgroup_id")
+                if parent_sgid:
+                    parent = self._find_subgroup(gid, parent_sgid)
+                    if parent:
+                        parent.subgroups = [s for s in parent.subgroups if s.id != sgid]
+                else:
+                    g = self._find_group(gid)
+                    if g:
+                        g.subgroups = [s for s in g.subgroups if s.id != sgid]
+                self._refresh_tree()
+                self._clear_editor()
+                self.save_data()
         elif kind == "group":
             gid = meta["id"]
             if QMessageBox.question(self, "Smazat skupinu", "Smazat celou skupinu včetně podskupin a otázek?") == QMessageBox.Yes:
@@ -521,7 +638,6 @@ class MainWindow(QMainWindow):
             if g:
                 g.name = new_name
         else:
-            g = self._find_group(meta["parent_group_id"])
             sg = self._find_subgroup(meta["parent_group_id"], meta["id"])
             if sg:
                 sg.name = new_name
@@ -576,8 +692,8 @@ class MainWindow(QMainWindow):
     def _apply_editor_to_current_question(self, silent: bool = False) -> None:
         if not self._current_question_id:
             return
-        for g in self.root.groups:
-            for sg in g.subgroups:
+        def apply_in(sgs: List[Subgroup]) -> bool:
+            for sg in sgs:
                 for i, q in enumerate(sg.questions):
                     if q.id == self._current_question_id:
                         q.type = "classic" if self.combo_type.currentIndex() == 0 else "bonus"
@@ -596,7 +712,13 @@ class MainWindow(QMainWindow):
                         self._update_selected_question_item_subtitle(f"{label} | {pts}")
                         if not silent:
                             self.statusBar().showMessage("Změny otázky byly uloženy (lokálně).", 3000)
-                        return
+                        return True
+                if apply_in(sg.subgroups):
+                    return True
+            return False
+        for g in self.root.groups:
+            if apply_in(g.subgroups):
+                break
 
     def _on_save_question_clicked(self) -> None:
         self._apply_editor_to_current_question(silent=False)
@@ -606,7 +728,7 @@ class MainWindow(QMainWindow):
         if items:
             items[0].setText(1, text)
 
-    # -------------------- Vyhledávače v datech --------------------
+    # -------------------- Vyhledávače v datech (rekurzivně) --------------------
 
     def _find_group(self, gid: str) -> Optional[Group]:
         for g in self.root.groups:
@@ -618,10 +740,15 @@ class MainWindow(QMainWindow):
         g = self._find_group(gid)
         if not g:
             return None
-        for sg in g.subgroups:
-            if sg.id == sgid:
-                return sg
-        return None
+        def rec(lst: List[Subgroup]) -> Optional[Subgroup]:
+            for sg in lst:
+                if sg.id == sgid:
+                    return sg
+                found = rec(sg.subgroups)
+                if found:
+                    return found
+            return None
+        return rec(g.subgroups)
 
     def _find_question(self, gid: str, sgid: str, qid: str) -> Optional[Question]:
         sg = self._find_subgroup(gid, sgid)
@@ -714,7 +841,7 @@ class MainWindow(QMainWindow):
             self.load_data()
             self._refresh_tree()
 
-    # -------------------- Import z DOCX (v1.1) --------------------
+    # -------------------- Import z DOCX --------------------
 
     def _import_from_docx(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Vyberte .docx soubory", str(self.project_root), "Word dokumenty (*.docx)")
@@ -737,6 +864,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Import selhal", f"{p}\n{e}")
         if imported:
             self._refresh_tree()
+            self.save_data()
             self.statusBar().showMessage(f"Importováno {imported} otázek do skupiny 'Neroztříděné'.", 5000)
         else:
             QMessageBox.information(self, "Import", "Nebyla nalezena žádná otázka.")
@@ -761,7 +889,7 @@ class MainWindow(QMainWindow):
             g = Group(id=str(uuid.uuid4()), name=name, subgroups=[])
             self.root.groups.append(g)
         if not g.subgroups:
-            g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name="Default", questions=[]))
+            g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name="Default", subgroups=[], questions=[]))
         return g.id, g.subgroups[0].id
 
     def _parse_questions_from_text(self, text: str) -> list[Question]:
@@ -815,7 +943,7 @@ class MainWindow(QMainWindow):
             out.append(q)
         return out
 
-    # -------------------- Přesun otázky (v1.1) --------------------
+    # -------------------- Přesun otázky (menu – zachováno) --------------------
 
     def _move_question(self) -> None:
         kind, meta = self._selected_node()
@@ -833,15 +961,25 @@ class MainWindow(QMainWindow):
         g = next((g for g in self.root.groups if g.name == g_name), None)
         if not g:
             return
-        if not g.subgroups:
-            g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name="Default", questions=[]))
-        sg_names = [sg.name for sg in g.subgroups]
+        # výběr cílové podskupiny (z celé hierarchie)
+        def flatten_subgroups(lst: List[Subgroup], acc: List[Subgroup]):
+            for s in lst:
+                acc.append(s)
+                flatten_subgroups(s.subgroups, acc)
+        all_sg: List[Subgroup] = []
+        flatten_subgroups(g.subgroups, all_sg)
+        if not all_sg:
+            g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name="Default", subgroups=[], questions=[]))
+            all_sg = [g.subgroups[0]]
+        sg_names = [sg.name for sg in all_sg]
         sg_name, ok = QInputDialog.getItem(self, "Přesun otázky", "Cílová podskupina:", sg_names, 0, False)
         if not ok or not sg_name:
             return
-        target_sg = next((s for s in g.subgroups if s.name == sg_name), None)
+        target_sg = next((s for s in all_sg if s.name == sg_name), None)
         if not target_sg:
             return
+
+        # Najdi zdroj
         src_gid = meta["parent_group_id"]
         src_sgid = meta["parent_subgroup_id"]
         qid = meta["id"]
@@ -849,9 +987,11 @@ class MainWindow(QMainWindow):
         q = self._find_question(src_gid, src_sgid, qid)
         if not (src_sg and q):
             return
+        # Odeber ze zdroje + přidej do cíle
         src_sg.questions = [qq for qq in src_sg.questions if qq.id != qid]
         target_sg.questions.append(q)
         self._refresh_tree()
+        self.save_data()
         self.statusBar().showMessage(f"Otázka přesunuta do {g_name} / {sg_name}.", 4000)
 
 
