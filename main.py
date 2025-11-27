@@ -1341,7 +1341,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, 'Přesun', 'Vyberte ve stromu alespoň jednu otázku.')
             return
         # výběr cíle (skupina -> podskupina)
-                dlg = MoveTargetDialog(self)
+        dlg = MoveTargetDialog(self)
         if dlg.exec() != QDialog.Accepted:
             return
         g_id, sg_id = dlg.selected_target()
