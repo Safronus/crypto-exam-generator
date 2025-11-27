@@ -1326,7 +1326,7 @@ class MainWindow(QMainWindow):
     def __init__(self, data_path: Optional[Path] = None) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(1200, 880)
+        self.resize(1800, 900)
 
         self.project_root = Path.cwd()
         default_data_dir = self.project_root / "data"
@@ -1354,11 +1354,15 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self.load_data()
         self._refresh_tree()
+        
+        # ZMĚNA: Strom 60%, Editor 40% (cca 840px : 560px)
+        # Nyní, když je self.splitter správně nastaven v _build_ui, můžeme přímo nastavit velikosti.
+        self.splitter.setSizes([940, 860])
 
     def _build_ui(self) -> None:
-        splitter = QSplitter()
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(8)
+        self.splitter = QSplitter()
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(8)
 
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
@@ -1415,8 +1419,8 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.addAction(self.action_align_right)
         self.editor_toolbar.addAction(self.action_align_justify)
 
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignLeft)
+        self.form_layout = QFormLayout()
+        self.form_layout.setLabelAlignment(Qt.AlignLeft)
 
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("Krátký název otázky…")
@@ -1426,11 +1430,11 @@ class MainWindow(QMainWindow):
         self.spin_bonus_correct = QDoubleSpinBox(); self.spin_bonus_correct.setDecimals(2); self.spin_bonus_correct.setSingleStep(0.01); self.spin_bonus_correct.setRange(-999.99, 999.99); self.spin_bonus_correct.setValue(1.00)
         self.spin_bonus_wrong = QDoubleSpinBox(); self.spin_bonus_wrong.setDecimals(2); self.spin_bonus_wrong.setSingleStep(0.01); self.spin_bonus_wrong.setRange(-999.99, 999.99); self.spin_bonus_wrong.setValue(0.00)
 
-        form.addRow("Název otázky:", self.title_edit)
-        form.addRow("Typ otázky:", self.combo_type)
-        form.addRow("Body (klasická):", self.spin_points)
-        form.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
-        form.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
+        self.form_layout.addRow("Název otázky:", self.title_edit)
+        self.form_layout.addRow("Typ otázky:", self.combo_type)
+        self.form_layout.addRow("Body (klasická):", self.spin_points)
+        self.form_layout.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
+        self.form_layout.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
 
         self.text_edit = QTextEdit()
         self.text_edit.setAcceptRichText(True)
@@ -1447,16 +1451,16 @@ class MainWindow(QMainWindow):
         rename_layout.addRow(self.btn_rename)
 
         self.detail_layout.addWidget(self.editor_toolbar)
-        self.detail_layout.addLayout(form)
+        self.detail_layout.addLayout(self.form_layout)
         self.detail_layout.addWidget(self.text_edit, 1)
         self.detail_layout.addWidget(self.btn_save_question)
         self.detail_layout.addWidget(self.rename_panel)
         self._set_editor_enabled(False)
 
-        splitter.addWidget(left_panel)
-        splitter.addWidget(self.detail_stack)
-        splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+        self.splitter.addWidget(left_panel)
+        self.splitter.addWidget(self.detail_stack)
+        self.splitter.setStretchFactor(1, 1)
+        self.setCentralWidget(self.splitter)
 
         tb = self.addToolBar("Hlavní")
         tb.setIconSize(QSize(18, 18))
@@ -1464,24 +1468,19 @@ class MainWindow(QMainWindow):
         self.act_add_subgroup = QAction("Přidat podskupinu", self)
         self.act_add_question = QAction("Přidat otázku", self)
         self.act_delete = QAction("Smazat", self)
-        self.act_save_all = QAction("Uložit vše", self)
-        self.act_choose_data = QAction("Zvolit soubor s daty…", self)
 
         self.act_add_group.setShortcut("Ctrl+G")
         self.act_add_subgroup.setShortcut("Ctrl+Shift+G")
         self.act_add_question.setShortcut(QKeySequence.New)
         self.act_delete.setShortcut(QKeySequence.Delete)
-        self.act_save_all.setShortcut(QKeySequence.Save)
 
         tb.addAction(self.act_add_group)
         tb.addAction(self.act_add_subgroup)
         tb.addAction(self.act_add_question)
+
+
         tb.addSeparator()
         tb.addAction(self.act_delete)
-        tb.addSeparator()
-        tb.addAction(self.act_save_all)
-        tb.addSeparator()
-        tb.addAction(self.act_choose_data)
 
         self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
 
@@ -1524,8 +1523,6 @@ class MainWindow(QMainWindow):
         self.act_add_subgroup.triggered.connect(self._add_subgroup)
         self.act_add_question.triggered.connect(self._add_question)
         self.act_delete.triggered.connect(self._delete_selected)
-        self.act_save_all.triggered.connect(self.save_data)
-        self.act_choose_data.triggered.connect(self._choose_data_file)
 
         self.filter_edit.textChanged.connect(self._apply_filter)
         self.btn_move_selected.clicked.connect(self._bulk_move_selected)
@@ -1923,7 +1920,10 @@ class MainWindow(QMainWindow):
         self.text_edit.setHtml(q.text_html or "<p><br></p>")
         self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
         self._set_editor_enabled(True)
-        self.rename_panel.hide()
+        
+        # Synchronizace viditelnosti polí podle načteného typu
+        self._on_type_changed_ui()
+
 
     def _apply_editor_to_current_question(self, silent: bool = False) -> None:
         if not self._current_question_id:
@@ -2113,10 +2113,25 @@ class MainWindow(QMainWindow):
 
     def _on_type_changed_ui(self) -> None:
         is_classic = self.combo_type.currentIndex() == 0
-        self.spin_points.setEnabled(is_classic)
-        self.spin_bonus_correct.setEnabled(not is_classic)
-        self.spin_bonus_wrong.setEnabled(not is_classic)
+
+        # Skrytí/zobrazení polí a jejich popisků
+        self.spin_points.setVisible(is_classic)
+        lbl_points = self.form_layout.labelForField(self.spin_points)
+        if lbl_points: 
+            lbl_points.setVisible(is_classic)
+
+        self.spin_bonus_correct.setVisible(not is_classic)
+        lbl_bonus_correct = self.form_layout.labelForField(self.spin_bonus_correct)
+        if lbl_bonus_correct: 
+            lbl_bonus_correct.setVisible(not is_classic)
+
+        self.spin_bonus_wrong.setVisible(not is_classic)
+        lbl_bonus_wrong = self.form_layout.labelForField(self.spin_bonus_wrong)
+        if lbl_bonus_wrong: 
+            lbl_bonus_wrong.setVisible(not is_classic)
+
         self._autosave_schedule()
+
 
     # -------------------- Výběr datového souboru --------------------
 
