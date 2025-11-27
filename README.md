@@ -1,26 +1,11 @@
-# Crypto Exam Generator
+# Crypto Exam Generator – Patch exportu DOCX (pro 1.8d)
 
-PySide6 aplikace pro správu a export zkušebních otázek (Kryptologie). Jednosouborové GUI (`main.py`).
+Co je opraveno (jen export DOCX, nic dalšího):
+- placeholdery se detekují ve **všech** `word/*.xml` (včetně header/footer) a nahradí se **1:1**
+- `<OtázkaX>` a `<BONUSX>` se vkládají **do stejného odstavce** – číslování zůstane (více odstavců otázky → `w:br`)
+- inline tokeny jako `<PoznamkaVerze>`, `<DatumČas>`, `<MinBody>`, `<MaxBody>` se nahradí i když jsou Wordem rozsekané do více `w:t`
+- výchozí cesty šablony/výstupu zachovány
 
-## Verze 1.8e-b (2025-11-27)
-- Oprava SyntaxError (`nebo` -> `or`) v `_add_subgroup`.
-- Odstraněna rekurze voláním `save_data()` z `_save_current_q` (nyní se ukládá jen z tlačítka a dalších akcí).
-- "Uložit změny otázky" ukládá okamžitě na disk.
-- Obnoven drag & drop (`DnDTree`) beze změny chování.
+Soubor ke stažení a nahrazení:
+- [Download main_patched.py](sandbox:/mnt/data/main_patched.py) → u sebe přepište `main.py`
 
-## Instalace (macOS)
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install PySide6
-python3 main.py
-```
-
-## Git
-```bash
-git add main.py README.md
-git commit -m "fix: SyntaxError (nebo->or), zamezení rekurzi a návrat DnD (v1.8e-b)"
-git tag v1.8e-b
-git push && git push --tags
-```
