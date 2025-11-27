@@ -1146,11 +1146,24 @@ class ExportWizard(QWizard):
             self.lbl_templ_p3.setText(t_name)
             self.lbl_out_p3.setText(o_name)
 
-            total_points = 0.0
+            total_bonus_points = 0.0
             min_loss = 0.0
             
+            # Barvy
             bg_color = "#252526"; text_color = "#e0e0e0"; border_color = "#555555"
             sec_q_bg = "#2d3845"; sec_b_bg = "#453d2d"; sec_s_bg = "#2d452d"
+            
+            # Sestavení verze (CELÁ, bez zkracování)
+            prefix = self.le_prefix.text().strip()
+            today = datetime.now().strftime("%Y-%m-%d")
+            # Použijeme stejné UUID jako při exportu, ale zde pro náhled vygenerujeme nové nebo placeholder
+            # Aby to sedělo s exportem přesně, museli bychom UUID generovat dřív a uložit si ho.
+            # Pro náhled stačí ukázat formát.
+            # Zde zobrazíme celou délku.
+            
+            # Pokud chcete přesnou shodu, musíme UUID vygenerovat teď a uložit pro accept().
+            # Ale pro jednoduchost jen zobrazíme "Prefix YYYY-MM-DD_UUID"
+            verze_preview = f"{prefix} {today}_{str(_uuid.uuid4())[:8]}"
             
             html = f"""
             <html>
@@ -1158,13 +1171,14 @@ class ExportWizard(QWizard):
             <h2 style='color: #61dafb; border-bottom: 2px solid #61dafb;'>Souhrn testu</h2>
             <table width='100%' style='margin-bottom: 20px; color: {text_color};'>
                 <tr>
-                    <td><b>Verze:</b> {self.le_prefix.text()} {datetime.now().strftime('%Y-%m-%d')}...</td>
+                    <!-- ZMĚNA: Zobrazujeme celou verzi -->
+                    <td><b>Verze:</b> {verze_preview}</td>
                     <td align='right'><b>Datum:</b> {self.dt_edit.dateTime().toString("dd.MM.yyyy HH:mm")}</td>
                 </tr>
             </table>
             """
 
-            # Klasické
+           # Klasické
             html += f"<h3 style='background-color: {sec_q_bg}; padding: 5px; border-left: 4px solid #4da6ff;'>1. Klasické otázky</h3>"
             html += f"<table width='100%' border='0' cellspacing='0' cellpadding='5' style='color: {text_color};'>"
             for ph in self.placeholders_q:
@@ -1172,7 +1186,6 @@ class ExportWizard(QWizard):
                 if qid:
                     q = self.owner._find_question_by_id(qid)
                     if q:
-                        total_points += float(q.points)
                         title_clean = re.sub(r'<[^>]+>', '', q.title)
                         html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right'>({q.points} b)</td></tr>"
                 else:
@@ -1187,7 +1200,7 @@ class ExportWizard(QWizard):
                 if qid:
                     q = self.owner._find_question_by_id(qid)
                     if q:
-                        total_points += float(q.bonus_correct)
+                        total_bonus_points += float(q.bonus_correct)
                         min_loss += float(q.bonus_wrong)
                         title_clean = re.sub(r'<[^>]+>', '', q.title)
                         html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right' style='color:#81c784;'>+{q.bonus_correct} / <span style='color:#e57373;'>{q.bonus_wrong}</span></td></tr>"
@@ -1195,13 +1208,16 @@ class ExportWizard(QWizard):
                     html += f"<tr><td width='100' style='color:#ff5555;'>{ph}:</td><td colspan='2' style='color:#ff5555;'>--- NEVYPLNĚNO ---</td></tr>"
             html += "</table>"
 
+            # Výpočet MaxBody
+            max_body_val = 10.0 + total_bonus_points
+
             # Klasifikace
             html += f"<h3 style='background-color: {sec_s_bg}; padding: 5px; border-left: 4px solid #66bb6a;'>3. Klasifikace</h3>"
             html += f"""
-            <p><b>Max. bodů:</b> {total_points:.2f} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Min. bodů (penalizace):</b> {min_loss:.2f}</p>
+            <p><b>Max. bodů:</b> {max_body_val:.2f} (10 + {total_bonus_points:.2f}) &nbsp;&nbsp;|&nbsp;&nbsp; <b>Min. bodů (penalizace):</b> {min_loss:.2f}</p>
             <table width='60%' border='1' cellspacing='0' cellpadding='5' style='border-collapse: collapse; border: 1px solid {border_color}; color: {text_color};'>
                 <tr style='background-color: #333;'><th>Známka</th><th>Interval</th></tr>
-                <tr><td align='center' style='color:#81c784'><b>A</b></td><td>&lt; 9.2 ; <b>{total_points:.2f}</b> &gt;</td></tr>
+                <tr><td align='center' style='color:#81c784'><b>A</b></td><td>&lt; 9.2 ; <b>{max_body_val:.2f}</b> &gt;</td></tr>
                 <tr><td align='center' style='color:#a5d6a7'><b>B</b></td><td>&lt; 8.4 ; 9.2 )</td></tr>
                 <tr><td align='center' style='color:#c8e6c9'><b>C</b></td><td>&lt; 7.6 ; 8.4 )</td></tr>
                 <tr><td align='center' style='color:#fff59d'><b>D</b></td><td>&lt; 6.8 ; 7.6 )</td></tr>
@@ -1213,39 +1229,47 @@ class ExportWizard(QWizard):
             self.preview_edit.setHtml(html)
             
         except Exception as e:
-            self.preview_edit.setText(f"Chyba náhledu: {e}")
+            print(f"CRITICAL ERROR in _init_page3: {e}")
+            import traceback
+            traceback.print_exc()
+            self.preview_edit.setText(f"Chyba při generování náhledu: {e}")
 
     def accept(self) -> None:
-        if not self.template_path or not self.output_path: return
+        if not self.template_path or not self.output_path:
+            return
 
         repl_plain: Dict[str, str] = {}
         
+        # Datum
         dt = round_dt_to_10m(self.dt_edit.dateTime())
         dt_str = f"{cz_day_of_week(dt.toPython())} {dt.toString('dd.MM.yyyy HH:mm')}"
         repl_plain["DatumČas"] = dt_str
         repl_plain["DatumCas"] = dt_str
         repl_plain["DATUMCAS"] = dt_str
         
+        # Verze
         prefix = self.le_prefix.text().strip()
         today = datetime.now().strftime("%Y-%m-%d")
-        # Unikátní UUID pro verzi
         verze_str = f"{prefix} {today}_{str(_uuid.uuid4())[:8]}"
         repl_plain["PoznamkaVerze"] = verze_str
         repl_plain["POZNAMKAVERZE"] = verze_str
         
-        # Body
-        total_points = 0.0
+        # Body (MaxBody = 10 + Bonusy)
+        total_bonus = 0.0
         min_loss = 0.0
+        
         for qid in self.selection_map.values():
             q = self.owner._find_question_by_id(qid)
             if not q: continue
-            if q.type == 'classic': total_points += float(q.points)
-            else:
-                total_points += float(q.bonus_correct)
+            
+            if q.type == 'bonus':
+                total_bonus += float(q.bonus_correct)
                 min_loss += float(q.bonus_wrong)
         
-        repl_plain["MaxBody"] = f"{total_points:.2f}"
-        repl_plain["MAXBODY"] = f"{total_points:.2f}"
+        max_body = 10.0 + total_bonus
+        
+        repl_plain["MaxBody"] = f"{max_body:.2f}"
+        repl_plain["MAXBODY"] = f"{max_body:.2f}"
         repl_plain["MinBody"] = f"{min_loss:.2f}"
         repl_plain["MINBODY"] = f"{min_loss:.2f}"
 
@@ -1253,16 +1277,17 @@ class ExportWizard(QWizard):
         rich_map: Dict[str, str] = {}
         for ph, qid in self.selection_map.items():
             q = self.owner._find_question_by_id(qid)
-            if q: rich_map[ph] = q.text_html
+            if q:
+                rich_map[ph] = q.text_html
 
         try:
             self.owner._generate_docx_from_template(self.template_path, self.output_path, repl_plain, rich_map)
         except Exception as e:
-            QMessageBox.critical(self, "Export", f"Chyba:\n{e}"); return
+            QMessageBox.critical(self, "Export", f"Chyba při exportu:\n{e}")
+            return
 
-        QMessageBox.information(self, "Export", f"Uloženo:\n{self.output_path}")
+        QMessageBox.information(self, "Export", f"Export dokončen.\nSoubor uložen:\n{self.output_path}")
         super().accept()
-
 
 # --------------------------- Hlavní okno (UI + logika) ---------------------------
 
