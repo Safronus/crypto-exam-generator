@@ -712,7 +712,7 @@ class ExportWizard(QWizard):
         
         main_layout = QVBoxLayout(self.page2)
         
-        # Info Panel
+        # 1. Info Panel
         self.info_box_p2 = QGroupBox("Kontext exportu")
         self.info_box_p2.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #555; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         l_info = QFormLayout(self.info_box_p2)
@@ -722,7 +722,8 @@ class ExportWizard(QWizard):
         l_info.addRow("Výstupní soubor:", self.lbl_out_p2)
         main_layout.addWidget(self.info_box_p2)
 
-        content_layout = QHBoxLayout()
+        # 2. Hlavní obsah (Dva sloupce: Strom | Sloty)
+        columns_layout = QHBoxLayout()
         
         # Levý panel: Strom
         left_layout = QVBoxLayout()
@@ -730,7 +731,7 @@ class ExportWizard(QWizard):
         self.tree_source = QTreeWidget()
         self.tree_source.setHeaderLabels(["Struktura otázek"])
         left_layout.addWidget(self.tree_source)
-        content_layout.addLayout(left_layout, 1)
+        columns_layout.addLayout(left_layout, 4) # Ratio 4
         
         # Pravý panel: Sloty
         right_layout = QVBoxLayout()
@@ -743,9 +744,31 @@ class ExportWizard(QWizard):
         self.layout_slots.addStretch()
         self.scroll_slots.setWidget(self.widget_slots)
         right_layout.addWidget(self.scroll_slots)
-        content_layout.addLayout(right_layout, 1)
+        columns_layout.addLayout(right_layout, 6) # Ratio 6
         
-        main_layout.addLayout(content_layout)
+        main_layout.addLayout(columns_layout, 3) # Stretch factor 3 pro sloupce
+
+        # 3. Náhled (Dole, přes celou šířku)
+        preview_box = QGroupBox("Náhled vybrané otázky")
+        preview_layout = QVBoxLayout(preview_box)
+        preview_layout.setContentsMargins(5,5,5,5)
+        
+        self.text_preview_q = QTextEdit()
+        self.text_preview_q.setReadOnly(True)
+        self.text_preview_q.setMaximumHeight(120) # Pevná výška
+        # Větší písmo, čistý vzhled
+        self.text_preview_q.setStyleSheet("""
+            QTextEdit { 
+                background-color: #2e2e2e; 
+                color: #ffffff; 
+                font-size: 14px; 
+                border: 1px solid #555;
+                padding: 5px;
+            }
+        """)
+        preview_layout.addWidget(self.text_preview_q)
+        
+        main_layout.addWidget(preview_box, 1) # Stretch factor 1 pro náhled
 
     def _build_page3_content(self):
         self.page3.setTitle("Krok 3: Kontrola a Export")
@@ -848,6 +871,49 @@ class ExportWizard(QWizard):
             self.lbl_scan_info.setText(f"Chyba čtení šablony: {e}")
 
     # --- Page Initializers ---
+    
+    def _on_tree_selection(self):
+        sel = self.tree_source.selectedItems()
+        if not sel:
+            self.text_preview_q.clear()
+            return
+            
+        item = sel[0]
+        qid = item.data(0, Qt.UserRole)
+        
+        if not qid:
+            self.text_preview_q.setText("--- (Vyberte konkrétní otázku pro náhled) ---")
+            return
+            
+        q = self.owner._find_question_by_id(qid)
+        if q:
+            import re
+            import html
+            
+            html_content = q.text_html or ""
+            
+            # 1. Odstranění <style>...</style> a <head>...</head> i s obsahem
+            # Flag re.DOTALL zajistí, že . matchuje i newlines
+            clean = re.sub(r'<style.*?>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+            clean = re.sub(r'<head.*?>.*?</head>', '', clean, flags=re.DOTALL | re.IGNORECASE)
+            
+            # 2. Odstranění všech ostatních tagů <...>
+            clean = re.sub(r'<[^>]+>', ' ', clean)
+            
+            # 3. Decode entities (&nbsp;, &lt;...)
+            clean = html.unescape(clean)
+            
+            # 4. Squeeze whitespace (více mezer/tabulátorů na jednu mezeru, ale zachovat newlines pokud chceme, 
+            # nebo vše na jeden řádek. Pro náhled je asi lepší zachovat základní odstavce, 
+            # ale QTextEdit plain text to zvládne)
+            
+            # Zkusíme odstranit vícenásobné prázdné řádky
+            lines = [line.strip() for line in clean.splitlines() if line.strip()]
+            final_text = "\n".join(lines)
+            
+            self.text_preview_q.setText(final_text)
+        else:
+            self.text_preview_q.clear()
 
     def _init_page2(self):
         try:
@@ -875,6 +941,11 @@ class ExportWizard(QWizard):
             try: self.tree_source.customContextMenuRequested.disconnect() 
             except: pass
             self.tree_source.customContextMenuRequested.connect(self._show_context_menu)
+            
+            # PROPOJENÍ SIGNÁLU PRO NÁHLED
+            try: self.tree_source.itemSelectionChanged.disconnect()
+            except: pass
+            self.tree_source.itemSelectionChanged.connect(self._on_tree_selection)
             
             # 4. Populate Tree (Recursive)
             def add_subgroup_recursive(parent_item, subgroup_list):
