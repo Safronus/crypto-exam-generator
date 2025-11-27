@@ -6,11 +6,10 @@ Aplikace v **PySide6** pro správu zkušebních otázek (Kryptologie). Skupiny a
 
 ---
 
-## Novinky ve verzi 1.7
+## Novinky ve verzi 1.7a
 
-- **Zarovnání**: přidána tlačítka **Vlevo / Na střed / Vpravo / Do bloku**. Funguje i na **vybranou část textu** (zarovná všechny odstavce v rozsahu výběru).
-- **Vizuální odlišení ve stromu**: skupiny, podskupiny a otázky mají různé **standardní ikony** (systémové, macOS-friendly).
-- Zachováno: náhled formátování, názvy otázek, DnD refresh, stromový přesun, import DOCX s odrážkami.
+- **Vizuální odlišení typů otázek**: ve stromu jsou **BONUS** otázky zvýrazněny barvou a tučným písmem; klasické zůstávají standardní.
+- **Skupiny** jsou nyní **tučně**, aby se jasně odlišily od podskupin.
 
 ---
 
@@ -28,13 +27,12 @@ python3 main.py
 
 ## Verze
 
-- **Aktuální verze:** `1.7` (release: 2025-11-27)
+- **Aktuální verze:** `1.7a` (release: 2025-11-27)
 - Changelog (výběr):
+  - `1.7a` – vizuální odlišení BONUS otázek + tučné skupiny.
   - `1.7` – zarovnání textu + ikony ve stromu.
   - `1.6a` – náhled formátování, fix přesunu a hromadného mazání.
   - `1.6` – názvy otázek (title) včetně importních defaultů.
-  - `1.5b` – Qt6-safe formát, DnD refresh, stromový přesun.
-  - `1.4` – zachování odrážek, ignorace A–F, oprava NameError.
 
 ---
 
@@ -42,7 +40,7 @@ python3 main.py
 
 ```bash
 git add main.py README.md
-git commit -m "feat(editor): zarovnání textu; feat(ui): ikony ve stromu (v1.7)"
-git tag v1.7
+git commit -m "feat(ui): vizuální odlišení BONUS vs klasická + tučné skupiny (v1.7a)"
+git tag v1.7a
 git push && git push --tags
 ```

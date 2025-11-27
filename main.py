@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Exam Generator (v1.7)
+Crypto Exam Generator (v1.7a)
 
-- Formátování: zarovnání odstavců (vlevo / střed / vpravo / do bloku) — i pro vybranou část textu.
-- Strom: vizuální odlišení typů (skupina/podskupina/otázka) pomocí standardních ikon.
-- Zachováno: názvy otázek, náhled formátování, DnD refresh, stromový dialog přesunu, DOCX import s odrážkami.
+- Strom: vizuální odlišení **klasická** vs **BONUS** otázka (barva + tučné u BONUS).
+- Strom: **Skupiny** jsou tučně (snazší rozlišení od podskupin).
+- Zachováno: zarovnání, náhled formátování, názvy otázek, DnD refresh, stromový dialog přesunu, DOCX import s odrážkami.
 
 Autor: (doplní uživatel)
 Licence: MIT (nebo dle potřeby)
@@ -65,7 +65,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.7"
+APP_VERSION = "1.7a"
 
 # --------------------------- Datové typy ---------------------------
 
@@ -204,6 +204,9 @@ class MoveTargetDialog(QDialog):
             g_item = QTreeWidgetItem([g.name, "Skupina"])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
             g_item.setIcon(0, owner.style().standardIcon(QStyle.SP_DirIcon))
+            f = g_item.font(0)
+            f.setBold(True)
+            g_item.setFont(0, f)
             self.tree.addTopLevelItem(g_item)
             self._add_subs(owner, g_item, g.id, g.subgroups)
 
@@ -588,12 +591,31 @@ class MainWindow(QMainWindow):
 
     # -------------------- Tree helpery --------------------
 
+    def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str) -> None:
+        """Nastaví ikonu/barvu podle typu otázky."""
+        item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
+        if q_type == "bonus":
+            # Zlatá barva + tučný název
+            item.setForeground(0, self.palette().brush(QPalette.Highlight))
+            f = item.font(0)
+            f.setBold(True)
+            item.setFont(0, f)
+        else:
+            # Reset na výchozí barvu a běžné písmo
+            item.setForeground(0, self.palette().brush(QPalette.Text))
+            f = item.font(0)
+            f.setBold(False)
+            item.setFont(0, f)
+
     def _refresh_tree(self) -> None:
         self.tree.clear()
         for g in self.root.groups:
             g_item = QTreeWidgetItem([g.name, "Skupina"])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
             g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+            f = g_item.font(0)
+            f.setBold(True)
+            g_item.setFont(0, f)
             self.tree.addTopLevelItem(g_item)
             self._add_subgroups_to_item(g_item, g.id, g.subgroups)
         self.tree.expandAll()
@@ -612,7 +634,7 @@ class MainWindow(QMainWindow):
                 pts = q.points if q.type == "classic" else f"+{q.bonus_correct}/ {q.bonus_wrong}"
                 q_item = QTreeWidgetItem([q.title or "Otázka", f"{label} | {pts}"])
                 q_item.setData(0, Qt.UserRole, {"kind": "question", "id": q.id, "parent_group_id": group_id, "parent_subgroup_id": sg.id})
-                q_item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
+                self._apply_question_item_visuals(q_item, q.type)
                 sg_item.addChild(q_item)
             if sg.subgroups:
                 self._add_subgroups_to_item(sg_item, group_id, sg.subgroups)
@@ -895,8 +917,12 @@ class MainWindow(QMainWindow):
                         sg.questions[i] = q
                         label = "Klasická" if q.type == "classic" else "BONUS"
                         pts = q.points if q.type == "classic" else f"+{q.bonus_correct}/ {q.bonus_wrong}"
+                        # aktualizace stromu (titulek, podtitulek, styl)
                         self._update_selected_question_item_title(q.title)
                         self._update_selected_question_item_subtitle(f"{label} | {pts}")
+                        items = self.tree.selectedItems()
+                        if items:
+                            self._apply_question_item_visuals(items[0], q.type)
                         if not silent:
                             self.statusBar().showMessage("Změny otázky byly uloženy (lokálně).", 3000)
                         return True
@@ -1021,7 +1047,6 @@ class MainWindow(QMainWindow):
         bf = QTextBlockFormat()
         bf.setAlignment(align_flag)
         if cursor.hasSelection():
-            # Aplikovat na všechny bloky v rozsahu
             start = cursor.selectionStart()
             end = cursor.selectionEnd()
             cursor.beginEditBlock()
@@ -1053,7 +1078,6 @@ class MainWindow(QMainWindow):
         in_list = self.text_edit.textCursor().block().textList() is not None
         self.action_bullets.setChecked(in_list)
 
-        # Alignment buttons
         align = self.text_edit.textCursor().blockFormat().alignment()
         self.action_align_left.setChecked(bool(align & Qt.AlignLeft))
         self.action_align_center.setChecked(bool(align & Qt.AlignHCenter))
