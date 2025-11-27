@@ -80,7 +80,7 @@ python3 main.py
 
 ## Verze
 
-- **Aktuální verze:** `1.4a` (release: 2025-11-27)
+- **Aktuální verze:** `1.5` (release: 2025-11-27)
 - Changelog:
   - `1.2` – Hierarchické podskupiny + drag & drop (autosave po přesunu).
   - `1.1a` – Autosave prázdných skupin/podskupin po přidání/rename/mazání.
@@ -128,3 +128,12 @@ Zvol dle potřeby (např. MIT).
 ## Novinky ve verzi 1.4a
 
 - **Import DOCX (kompatibilita):** odstraněny staré duplikáty extractorů; parser nyní akceptuje i starý formát `list[tuple]`, takže chyba `tuple has no attribute get` je vyřešena.
+
+
+---
+
+## Novinky ve verzi 1.5
+
+- **Drag & Drop fix:** po přesunu otázky se strom **znovu vykreslí** a otázka se **znovu vybere**, takže se hned ukáže její obsah v editoru.
+- **Výběr cíle (strom):** při **Přesunout vybrané…** i **Přesunout otázku…** se otevře **strom skupin/podskupin** pro výběr cíle.
+- **Qt6 kompatibilita:** používá se `QFont.Weight.Bold/Normal` místo `Qt.Bold/Normal` (odstraňuje pády v _sync_toolbar_to_cursor).

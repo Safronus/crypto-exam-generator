@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray
-from PySide6.QtGui import QAction, QKeySequence, QTextCharFormat, QTextCursor, QTextListFormat, QColor, QPalette
+from PySide6.QtGui import QAction, QKeySequence, QTextCharFormat, QTextCursor, QTextListFormat, QColor, QPalette, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -47,11 +47,14 @@ from PySide6.QtWidgets import (
     QComboBox,
     QColorDialog,
     QAbstractItemView,
+    QDialog,
+    QDialogButtonBox,
+    QLabel,
 )
 
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.4a"  # minor: nested subgroups + drag&drop
+APP_VERSION = "1.5"  # minor: nested subgroups + drag&drop
 
 # --------------------------- Datové typy ---------------------------
 
@@ -153,11 +156,68 @@ class DnDTree(QTreeWidget):
         self.setDragDropMode(QAbstractItemView.InternalMove)
 
     def dropEvent(self, event) -> None:
+        ids_before = self.owner._selected_question_ids()
         super().dropEvent(event)
         # Po vizuálním přesunu stromu přegenerujeme datový model z aktuální struktury
         self.owner._sync_model_from_tree()
+        # Rebuild items to refresh meta parent ids
+        self.owner._refresh_tree()
+        self.owner._reselect_questions(ids_before)
         self.owner.save_data()
         self.owner.statusBar().showMessage("Přesun dokončen (uloženo).", 3000)
+
+
+
+class MoveTargetDialog(QDialog):
+    """Dialog pro výběr cílové skupiny/podskupiny pomocí stromu."""
+    def __init__(self, owner: "MainWindow") -> None:
+        super().__init__(owner)
+        self.setWindowTitle("Vyberte cílovou skupinu/podskupinu")
+        self.resize(480, 520)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.info = QLabel("Vyberte podskupinu (nebo skupinu – vytvoří se Default).")
+        layout.addWidget(self.info)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Název", "Typ"])
+        layout.addWidget(self.tree, 1)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+
+        # Naplnit strom
+        for g in owner.root.groups:
+            g_item = QTreeWidgetItem([g.name, "Skupina"])
+            g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
+            self.tree.addTopLevelItem(g_item)
+            self._add_subs(g_item, g.id, g.subgroups)
+
+        self.tree.expandAll()
+
+    def _add_subs(self, parent_item: QTreeWidgetItem, gid: str, subs: list[Subgroup]) -> None:
+        for sg in subs:
+            it = QTreeWidgetItem([sg.name, "Podskupina"])
+            it.setData(0, Qt.UserRole, {"kind": "subgroup", "id": sg.id, "parent_group_id": gid})
+            parent_item.addChild(it)
+            if sg.subgroups:
+                self._add_subs(it, gid, sg.subgroups)
+
+    def selected_target(self) -> tuple[str, str]:
+        """Vrátí (group_id, subgroup_id). Pokud je vybrána skupina bez podskupin, subgroup_id může být None."""
+        items = self.tree.selectedItems()
+        if not items:
+            return "", ""
+        meta = items[0].data(0, Qt.UserRole) or {}
+        if meta.get("kind") == "subgroup":
+            return meta.get("parent_group_id"), meta.get("id")
+        elif meta.get("kind") == "group":
+            return meta.get("id"), None
+        return "", ""
 
 
 # --------------------------- Hlavní okno ---------------------------
@@ -165,6 +225,35 @@ class DnDTree(QTreeWidget):
 class MainWindow(QMainWindow):
     """Hlavní okno aplikace."""
 
+
+    def _selected_question_ids(self) -> list[str]:
+        ids: list[str] = []
+        for it in self.tree.selectedItems():
+            meta = it.data(0, Qt.UserRole) or {}
+            if meta.get("kind") == "question":
+                ids.append(meta.get("id"))
+        return ids
+
+    def _reselect_questions(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        wanted = set(ids)
+        def walk(item):
+            meta = item.data(0, Qt.UserRole) or {}
+            if meta.get("kind") == "question" and meta.get("id") in wanted:
+                self.tree.setItemSelected(item, True)
+            for i in range(item.childCount()):
+                walk(item.child(i))
+        # clear selection
+        self.tree.clearSelection()
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
+        # focus first
+        items = self.tree.selectedItems()
+        if items:
+            self.tree.setCurrentItem(items[0])
+            # také načti editor
+            self._on_tree_selection_changed()
     def __init__(self, data_path: Optional[Path] = None) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -300,7 +389,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left_panel)
         splitter.addWidget(self.detail_stack)
         splitter.setStretchFactor(1, 1)
-self.setCentralWidget(splitter)
+        self.setCentralWidget(splitter)
 
         # Hlavní toolbar: přidání/mazání/uložení
         tb = self.addToolBar("Hlavní")
@@ -880,7 +969,7 @@ self.setCentralWidget(splitter)
     def _toggle_format(self, which: str) -> None:
         fmt = QTextCharFormat()
         if which == "bold":
-            fmt.setFontWeight(Qt.Bold if not self.action_bold.isChecked() else Qt.Normal)
+            fmt.setFontWeight(QFont.Weight.Bold if not self.action_bold.isChecked() else QFont.Weight.Normal)
         elif which == "italic":
             fmt.setFontItalic(self.action_italic.isChecked())
         elif which == "underline":
@@ -910,7 +999,7 @@ self.setCentralWidget(splitter)
 
     def _sync_toolbar_to_cursor(self) -> None:
         fmt = self.text_edit.currentCharFormat()
-        self.action_bold.setChecked(fmt.fontWeight() == Qt.Bold)
+        self.action_bold.setChecked(fmt.fontWeight() == QFont.Weight.Bold)
         self.action_italic.setChecked(fmt.fontItalic())
         self.action_underline.setChecked(fmt.fontUnderline())
         in_list = self.text_edit.textCursor().block().textList() is not None
@@ -1252,30 +1341,20 @@ self.setCentralWidget(splitter)
             QMessageBox.information(self, 'Přesun', 'Vyberte ve stromu alespoň jednu otázku.')
             return
         # výběr cíle (skupina -> podskupina)
-        from PySide6.QtWidgets import QInputDialog
-        group_names = [g.name for g in self.root.groups]
-        g_name, ok = QInputDialog.getItem(self, 'Přesun vybraných', 'Cílová skupina:', group_names, 0, False)
-        if not ok or not g_name:
+                dlg = MoveTargetDialog(self)
+        if dlg.exec() != QDialog.Accepted:
             return
-        g = next((g for g in self.root.groups if g.name == g_name), None)
+        g_id, sg_id = dlg.selected_target()
+        if not g_id:
+            return
+        g = self._find_group(g_id)
         if not g:
             return
-        def flatten(lst, acc):
-            for s in lst:
-                acc.append(s)
-                flatten(s.subgroups, acc)
-        all_sg = []
-        flatten(g.subgroups, all_sg)
-        if not all_sg:
-            g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name='Default', subgroups=[], questions=[]))
-            all_sg = [g.subgroups[0]]
-        sg_names = [sg.name for sg in all_sg]
-        sg_name, ok = QInputDialog.getItem(self, 'Přesun vybraných', 'Cílová podskupina:', sg_names, 0, False)
-        if not ok or not sg_name:
-            return
-        target_sg = next((s for s in all_sg if s.name == sg_name), None)
+        target_sg = self._find_subgroup(g_id, sg_id) if sg_id else None
         if not target_sg:
-            return
+            if not g.subgroups:
+                g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name='Default', subgroups=[], questions=[]))
+            target_sg = g.subgroups[0]
         # přesun
         moved = 0
         for it in items:
