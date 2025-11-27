@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Exam Generator (v1.7a)
+Crypto Exam Generator (v1.7b)
 
-- Strom: vizuální odlišení **klasická** vs **BONUS** otázka (barva + tučné u BONUS).
-- Strom: **Skupiny** jsou tučně (snazší rozlišení od podskupin).
-- Zachováno: zarovnání, náhled formátování, názvy otázek, DnD refresh, stromový dialog přesunu, DOCX import s odrážkami.
+- BONUS body: dvě desetinná místa (float v modelu, QDoubleSpinBox v UI, formátování v seznamu).
+- Zachováno: vizuální odlišení BONUS otázek, tučné skupiny, zarovnání textu, náhled, DnD, import DOCX.
 
 Autor: (doplní uživatel)
 Licence: MIT (nebo dle potřeby)
@@ -55,6 +54,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFormLayout,
     QSpinBox,
+    QDoubleSpinBox,
     QComboBox,
     QColorDialog,
     QAbstractItemView,
@@ -65,7 +65,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.7a"
+APP_VERSION = "1.7b"
 
 # --------------------------- Datové typy ---------------------------
 
@@ -75,10 +75,10 @@ class Question:
     type: str  # "classic" | "bonus"
     text_html: str
     title: str = ""
-    points: int = 1          # jen pro classic
-    bonus_correct: int = 0   # jen pro bonus
-    bonus_wrong: int = 0     # jen pro bonus (může být záporné)
-    created_at: str = ""     # ISO
+    points: int = 1            # jen pro classic
+    bonus_correct: float = 0.0 # jen pro bonus
+    bonus_wrong: float = 0.0   # jen pro bonus (může být záporné)
+    created_at: str = ""       # ISO
 
     @staticmethod
     def new_default(qtype: str = "classic") -> "Question":
@@ -90,8 +90,8 @@ class Question:
                 text_html="<p><br></p>",
                 title="BONUS otázka",
                 points=0,
-                bonus_correct=1,
-                bonus_wrong=0,
+                bonus_correct=1.0,
+                bonus_wrong=0.0,
                 created_at=now,
             )
         return Question(
@@ -100,8 +100,8 @@ class Question:
             text_html="<p><br></p>",
             title="Otázka",
             points=1,
-            bonus_correct=0,
-            bonus_wrong=0,
+            bonus_correct=0.0,
+            bonus_wrong=0.0,
             created_at=now,
         )
 
@@ -374,13 +374,17 @@ class MainWindow(QMainWindow):
         self.spin_points.setRange(-999, 999)
         self.spin_points.setValue(1)
 
-        self.spin_bonus_correct = QSpinBox()
-        self.spin_bonus_correct.setRange(-999, 999)
-        self.spin_bonus_correct.setValue(1)
+        self.spin_bonus_correct = QDoubleSpinBox()
+        self.spin_bonus_correct.setDecimals(2)
+        self.spin_bonus_correct.setSingleStep(0.01)
+        self.spin_bonus_correct.setRange(-999.99, 999.99)
+        self.spin_bonus_correct.setValue(1.00)
 
-        self.spin_bonus_wrong = QSpinBox()
-        self.spin_bonus_wrong.setRange(-999, 999)
-        self.spin_bonus_wrong.setValue(0)
+        self.spin_bonus_wrong = QDoubleSpinBox()
+        self.spin_bonus_wrong.setDecimals(2)
+        self.spin_bonus_wrong.setSingleStep(0.01)
+        self.spin_bonus_wrong.setRange(-999.99, 999.99)
+        self.spin_bonus_wrong.setValue(0.00)
 
         form.addRow("Název otázky:", self.title_edit)
         form.addRow("Typ otázky:", self.combo_type)
@@ -567,14 +571,25 @@ class MainWindow(QMainWindow):
 
     def _parse_question(self, q: dict) -> Question:
         title = q.get("title") or self._derive_title_from_html(q.get("text_html") or "<p></p>", prefix=("BONUS: " if q.get("type") == "bonus" else ""))
+        # Bezpečně načíst jako float (kvůli starším JSONům klidně int → float)
+        bc_default = 1.0 if q.get("type") == "bonus" else 0.0
+        bw_default = 0.0
+        try:
+            bc = round(float(q.get("bonus_correct", bc_default)), 2)
+        except Exception:
+            bc = round(float(bc_default), 2)
+        try:
+            bw = round(float(q.get("bonus_wrong", bw_default)), 2)
+        except Exception:
+            bw = round(float(bw_default), 2)
         return Question(
             id=q.get("id", ""),
             type=q.get("type", "classic"),
             text_html=q.get("text_html", "<p><br></p>"),
             title=title,
             points=int(q.get("points", 1)),
-            bonus_correct=int(q.get("bonus_correct", 1 if q.get("type") == "bonus" else 0)),
-            bonus_wrong=int(q.get("bonus_wrong", 0)),
+            bonus_correct=bc,
+            bonus_wrong=bw,
             created_at=q.get("created_at", ""),
         )
 
@@ -591,17 +606,17 @@ class MainWindow(QMainWindow):
 
     # -------------------- Tree helpery --------------------
 
+    def _bonus_points_label(self, q: Question) -> str:
+        return f"+{q.bonus_correct:.2f}/ {q.bonus_wrong:.2f}"
+
     def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str) -> None:
-        """Nastaví ikonu/barvu podle typu otázky."""
         item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
         if q_type == "bonus":
-            # Zlatá barva + tučný název
             item.setForeground(0, self.palette().brush(QPalette.Highlight))
             f = item.font(0)
             f.setBold(True)
             item.setFont(0, f)
         else:
-            # Reset na výchozí barvu a běžné písmo
             item.setForeground(0, self.palette().brush(QPalette.Text))
             f = item.font(0)
             f.setBold(False)
@@ -631,7 +646,7 @@ class MainWindow(QMainWindow):
             parent_item.addChild(sg_item)
             for q in sg.questions:
                 label = "Klasická" if q.type == "classic" else "BONUS"
-                pts = q.points if q.type == "classic" else f"+{q.bonus_correct}/ {q.bonus_wrong}"
+                pts = q.points if q.type == "classic" else self._bonus_points_label(q)
                 q_item = QTreeWidgetItem([q.title or "Otázka", f"{label} | {pts}"])
                 q_item.setData(0, Qt.UserRole, {"kind": "question", "id": q.id, "parent_group_id": group_id, "parent_subgroup_id": sg.id})
                 self._apply_question_item_visuals(q_item, q.type)
@@ -877,8 +892,8 @@ class MainWindow(QMainWindow):
         self.text_edit.clear()
         self.preview.clear()
         self.spin_points.setValue(1)
-        self.spin_bonus_correct.setValue(1)
-        self.spin_bonus_wrong.setValue(0)
+        self.spin_bonus_correct.setValue(1.00)
+        self.spin_bonus_wrong.setValue(0.00)
         self.combo_type.setCurrentIndex(0)
         self.title_edit.clear()
         self._set_editor_enabled(False)
@@ -887,8 +902,8 @@ class MainWindow(QMainWindow):
         self._current_question_id = q.id
         self.combo_type.setCurrentIndex(0 if q.type == "classic" else 1)
         self.spin_points.setValue(int(q.points))
-        self.spin_bonus_correct.setValue(int(q.bonus_correct))
-        self.spin_bonus_wrong.setValue(int(q.bonus_wrong))
+        self.spin_bonus_correct.setValue(float(q.bonus_correct))
+        self.spin_bonus_wrong.setValue(float(q.bonus_wrong))
         self.text_edit.setHtml(q.text_html or "<p><br></p>")
         self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
         self._update_preview()
@@ -908,15 +923,15 @@ class MainWindow(QMainWindow):
                         q.title = (self.title_edit.text().strip() or self._derive_title_from_html(q.text_html, prefix=("BONUS: " if q.type == "bonus" else "")))
                         if q.type == "classic":
                             q.points = int(self.spin_points.value())
-                            q.bonus_correct = 0
-                            q.bonus_wrong = 0
+                            q.bonus_correct = 0.0
+                            q.bonus_wrong = 0.0
                         else:
                             q.points = 0
-                            q.bonus_correct = int(self.spin_bonus_correct.value())
-                            q.bonus_wrong = int(self.spin_bonus_wrong.value())
+                            q.bonus_correct = round(float(self.spin_bonus_correct.value()), 2)
+                            q.bonus_wrong = round(float(self.spin_bonus_wrong.value()), 2)
                         sg.questions[i] = q
                         label = "Klasická" if q.type == "classic" else "BONUS"
-                        pts = q.points if q.type == "classic" else f"+{q.bonus_correct}/ {q.bonus_wrong}"
+                        pts = q.points if q.type == "classic" else self._bonus_points_label(q)
                         # aktualizace stromu (titulek, podtitulek, styl)
                         self._update_selected_question_item_title(q.title)
                         self._update_selected_question_item_subtitle(f"{label} | {pts}")
@@ -1333,7 +1348,7 @@ class MainWindow(QMainWindow):
                 q = Question.new_default("bonus")
                 q.text_html = block_html
                 q.title = self._derive_title_from_html(block_html, prefix="BONUS: ")
-                q.bonus_correct, q.bonus_wrong = 1, 0
+                q.bonus_correct, q.bonus_wrong = 1.0, 0.0
                 out.append(q)
                 i = j
                 continue

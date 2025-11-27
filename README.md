@@ -6,10 +6,10 @@ Aplikace v **PySide6** pro správu zkušebních otázek (Kryptologie). Skupiny a
 
 ---
 
-## Novinky ve verzi 1.7a
+## Novinky ve verzi 1.7b
 
-- **Vizuální odlišení typů otázek**: ve stromu jsou **BONUS** otázky zvýrazněny barvou a tučným písmem; klasické zůstávají standardní.
-- **Skupiny** jsou nyní **tučně**, aby se jasně odlišily od podskupin.
+- **BONUS body na 2 desetinná místa**: editor používá **QDoubleSpinBox** (krok 0.01), model ukládá **float**, ve stromu se zobrazuje `+X.XX/ Y.YY`.
+- Zachováno: vizuální odlišení BONUS otázek, tučné skupiny, zarovnání textu, náhled formátování, DnD, import DOCX.
 
 ---
 
@@ -27,12 +27,12 @@ python3 main.py
 
 ## Verze
 
-- **Aktuální verze:** `1.7a` (release: 2025-11-27)
+- **Aktuální verze:** `1.7b` (release: 2025-11-27)
 - Changelog (výběr):
-  - `1.7a` – vizuální odlišení BONUS otázek + tučné skupiny.
+  - `1.7b` – BONUS body s přesností na dvě desetinná místa.
+  - `1.7a` – vizuální odlišení BONUS vs. klasická + tučné skupiny.
   - `1.7` – zarovnání textu + ikony ve stromu.
   - `1.6a` – náhled formátování, fix přesunu a hromadného mazání.
-  - `1.6` – názvy otázek (title) včetně importních defaultů.
 
 ---
 
@@ -40,7 +40,7 @@ python3 main.py
 
 ```bash
 git add main.py README.md
-git commit -m "feat(ui): vizuální odlišení BONUS vs klasická + tučné skupiny (v1.7a)"
-git tag v1.7a
+git commit -m "feat(bonus): dvě desetinná místa bodů; float v modelu; QDoubleSpinBox (v1.7b)"
+git tag v1.7b
 git push && git push --tags
 ```
