@@ -1,34 +1,27 @@
 # Crypto Exam Generator
 
-Jednoduchá macOS-friendly aplikace v **PySide6** pro správu zkušebních otázek z předmětu *Kryptologie*.
-Podporuje **skupiny a podskupiny** (nově libovolná **hierarchie**), dva typy otázek (**klasická** a **BONUS**) a **bohaté formátování** textu.
-Data se ukládají do **JSON** a jsou ve výchozím nastavení mimo git (`/data` je v `.gitignore`).
+Aplikace v **PySide6** pro správu zkušebních otázek (Kryptologie). Skupiny a **libovolně hluboké podskupiny**, dva typy otázek (**klasická** / **BONUS**), **rich-text editor**, **multiselect**, **filtr**, import **DOCX** (Word).
 
-> Cíl: minimum souborů – celý GUI kód je v jediném souboru `main.py`.
+> Minimalisticky: **jeden soubor** `main.py` (GUI + logika).
 
 ---
 
-## Novinky ve verzi 1.2
+## Novinky ve verzi 1.5b
 
-- **Hierarchické podskupiny**: podskupina může obsahovat další podskupiny (strom jako složky).
-- **Drag & drop**: v levém stromu lze **přesouvat a řadit** podskupiny i otázky. Změny se ihned ukládají.
-- Zachováno: import z **DOCX**, editor formátování, JSON úložiště.
+- **Opravy chyb s odsazením** (IndentationError) — celý soubor byl zrekonstruován tak, aby měl konzistentní odsazení.
+- **Qt6 kompatibilita**: používá se `QFont.Weight.Bold/Normal`.
+- **Drag & drop**: po přesunu se strom **znovu vykreslí** a přesunuté otázky se **znovu vyberou**, takže se **okamžitě** zobrazí jejich obsah.
+- **Přesun vybraných / otázky**: dialog **stromu** pro výběr cíle (skupina/podskupina).
+- **Import DOCX**: využití `word/numbering.xml`, ignorace škály **A→F**, zachování odrážek/číslování v HTML (`<ul>`, `<ol type="a">`, `<ol>`).
 
 ---
 
 ## Import z DOCX
 
-### Kde najdu import?
-- **macOS**: menu **Soubor → Import z DOCX…** je v horní systémové liště (vedle názvu aplikace).
-- Navíc je v okně aplikace **tlačítko v toolbaru „Import“**.
-- Klávesová zkratka: **Ctrl+I** (na macOS `⌘I` pokud máš mapování Cmd).
-
-
-
-- V menu **Soubor → Import z DOCX…** vyber .docx testy (např. export z Wordu).
-- Aplikace automaticky najde otázky:
-  - **Klasické** – číslované (např. „1. …“); bodování v textu je **ignorováno** a nastaví se **1 bod**.
-  - **BONUS** – bloky obsahující „**Otázka <číslo>**“ nebo slovo **BONUS**.
+- **Soubor → Import z DOCX…** (také tlačítko **Import** v toolbaru, zkratka **Ctrl/⌘+I**).
+- Klasické otázky: každý **číslovaný odstavec** (úroveň 0) se importuje jako **samostatná otázka** s **1 bodem**.
+- BONUS otázky: bloky `Otázka <číslo>` nebo text obsahující `BONUS`.
+- **A→F stupnice** a administrativní texty se ignorují.
 - Importované otázky se uloží do skupiny **„Neroztříděné“** (vytvoří se automaticky).
 
 ---
@@ -45,47 +38,15 @@ python3 main.py
 
 ---
 
-## Struktura dat (JSON)
-
-```json
-{
-  "groups": [
-    {
-      "id": "uuid",
-      "name": "Název skupiny",
-      "subgroups": [
-        {
-          "id": "uuid",
-          "name": "Název podskupiny",
-          "subgroups": [ ... ],   // libovolná hloubka
-          "questions": [
-            {
-              "id": "uuid",
-              "type": "classic",
-              "text_html": "<p>...</p>",
-              "points": 1,
-              "bonus_correct": 0,
-              "bonus_wrong": 0,
-              "created_at": "YYYY-MM-DDTHH:MM:SS"
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-```
-
----
-
 ## Verze
 
-- **Aktuální verze:** `1.5` (release: 2025-11-27)
+- **Aktuální verze:** `1.6` (release: 2025-11-27)
 - Changelog:
-  - `1.2` – Hierarchické podskupiny + drag & drop (autosave po přesunu).
-  - `1.1a` – Autosave prázdných skupin/podskupin po přidání/rename/mazání.
-  - `1.1` – Import z DOCX, přesun otázek mezi skupinami.
-  - `1.0` – První verze: GUI, skupiny/podskupiny, typy otázek, editor formátování, JSON úložiště.
+  - `1.5b` – rekonstrukce bez IndentationError, Qt6-safe formát, dnd refresh + reselection, stromový přesun.
+  - `1.5` – dnd refresh, stromový přesun, Qt6 fix.
+  - `1.4a` – tuple/dict kompatibilita při importu.
+  - `1.4` – zachování odrážek, ignorace A–F, oprava NameError.
+  - `1.3` – multiselect, filtr, opravy importu 1..10.
 
 ---
 
@@ -93,47 +54,17 @@ python3 main.py
 
 ```bash
 git add main.py README.md
-git commit -m "feat: hierarchické podskupiny a drag&drop (v1.2)"
-git tag v1.2
+git commit -m "fix!: rebuild to v1.5b (indentation, Qt6-safe, dnd refresh, tree move)"
+git tag v1.5b
 git push && git push --tags
 ```
 
-## Licence
-
-Zvol dle potřeby (např. MIT).
 
 
 ---
 
-## Novinky ve verzi 1.3
+## Novinky ve verzi 1.6
 
-- **Import DOCX (oprava):** korektní rozdělení očíslovaných otázek **1..10** na samostatné položky; 
-  ignoruje se klasifikační škála „**A -> <...> bodů**“ a podobné instrukce.
-- **Multiselect + hromadné akce:** nad stromem je **filtr** (název/obsah) a tlačítka **Přesunout vybrané…** a **Smazat vybrané**.
-- **Filtr:** hledá v názvech skupin/podskupin i v textu otázek (HTML se převádí na čistý text).
-
-
----
-
-## Novinky ve verzi 1.4
-
-- **Import DOCX (fix):** opravena chyba `name 'text' is not defined` a spolehlivější detekce **1..10** podle wordového číslování (`w:numPr`).  
-- **Ignorace škály A–F:** řádky typu `A -> <...> bodů` až `F -> ...` se vynechají.  
-- **Zachování odrážek/číslování:** následné odstavce s odrážkami nebo číslovanými položkami se převádějí do HTML seznamů (`<ul>`, `<ol type="a">`, `<ol>`).  
-- **Výsledek:** Každá očíslovaná otázka je **samostatná položka**, BONUS otázky zachovány.
-
-
----
-
-## Novinky ve verzi 1.4a
-
-- **Import DOCX (kompatibilita):** odstraněny staré duplikáty extractorů; parser nyní akceptuje i starý formát `list[tuple]`, takže chyba `tuple has no attribute get` je vyřešena.
-
-
----
-
-## Novinky ve verzi 1.5
-
-- **Drag & Drop fix:** po přesunu otázky se strom **znovu vykreslí** a otázka se **znovu vybere**, takže se hned ukáže její obsah v editoru.
-- **Výběr cíle (strom):** při **Přesunout vybrané…** i **Přesunout otázku…** se otevře **strom skupin/podskupin** pro výběr cíle.
-- **Qt6 kompatibilita:** používá se `QFont.Weight.Bold/Normal` místo `Qt.Bold/Normal` (odstraňuje pády v _sync_toolbar_to_cursor).
+- **Název otázky**: každá otázka má editovatelný **název** (pole „Název otázky“ nad editorem). Název se zobrazuje i ve stromu.
+- **Import DOCX**: nově se automaticky doplní **výchozí název** z prvního řádku/věty textu (pro BONUS s prefixem „BONUS:“). Název jde kdykoliv přepsat.
+- **Kompatibilita**: starší JSON bez `title` se při načtení doplní (odvozením z textu).
