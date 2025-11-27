@@ -80,7 +80,7 @@ python3 main.py
 
 ## Verze
 
-- **Aktuální verze:** `1.4` (release: 2025-11-27)
+- **Aktuální verze:** `1.4a` (release: 2025-11-27)
 - Changelog:
   - `1.2` – Hierarchické podskupiny + drag & drop (autosave po přesunu).
   - `1.1a` – Autosave prázdných skupin/podskupin po přidání/rename/mazání.
@@ -121,3 +121,10 @@ Zvol dle potřeby (např. MIT).
 - **Ignorace škály A–F:** řádky typu `A -> <...> bodů` až `F -> ...` se vynechají.  
 - **Zachování odrážek/číslování:** následné odstavce s odrážkami nebo číslovanými položkami se převádějí do HTML seznamů (`<ul>`, `<ol type="a">`, `<ol>`).  
 - **Výsledek:** Každá očíslovaná otázka je **samostatná položka**, BONUS otázky zachovány.
+
+
+---
+
+## Novinky ve verzi 1.4a
+
+- **Import DOCX (kompatibilita):** odstraněny staré duplikáty extractorů; parser nyní akceptuje i starý formát `list[tuple]`, takže chyba `tuple has no attribute get` je vyřešena.

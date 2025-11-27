@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.4"  # minor: nested subgroups + drag&drop
+APP_VERSION = "1.4a"  # minor: nested subgroups + drag&drop
 
 # --------------------------- Datové typy ---------------------------
 
@@ -1056,27 +1056,6 @@ self.setCentralWidget(splitter)
 
     
 
-    def _extract_paragraphs_from_docx(self, path: Path) -> list[tuple[str, bool]]:
-        """Vrátí seznam (text, is_numbered) pro jednotlivé odstavce v DOCX.
-        is_numbered je True, pokud odstavec obsahuje w:numPr (číslovaný seznam ve Wordu).
-        """
-        with zipfile.ZipFile(path, 'r') as z:
-            with z.open('word/document.xml') as f:
-                xml_bytes = f.read()
-        root = ET.fromstring(xml_bytes)
-        ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-        out: list[tuple[str, bool]] = []
-        for p in root.findall('.//w:p', ns):
-            ppr = p.find('w:pPr', ns)
-            is_num = False
-            if ppr is not None and ppr.find('w:numPr', ns) is not None:
-                is_num = True
-            texts = [t.text or '' for t in p.findall('.//w:t', ns)]
-            txt = ''.join(texts).strip()
-            out.append((txt, is_num))
-        return out
-
-
     def _ensure_unassigned_group(self) -> tuple[str, str]:
         name = "Neroztříděné"
         g = next((g for g in self.root.groups if g.name == name), None)
@@ -1089,6 +1068,12 @@ self.setCentralWidget(splitter)
 
     
     def _parse_questions_from_paragraphs(self, paragraphs: list[dict]) -> list[Question]:
+        # v1.4a: tolerance k staršímu formátu (list[tuple[str,bool]])
+        if paragraphs and isinstance(paragraphs[0], tuple):
+            paragraphs = [
+                {'text': t[0], 'is_numbered': bool(t[1]), 'num_fmt': None, 'ilvl': None}
+                for t in paragraphs
+            ]
         """
         Každý číslovaný odstavec na úrovni 0 (hlavní seznam) je 1 KLASICKÁ otázka.
         BONUS: odstavec začínající "Otázka <číslo>" nebo obsahující "BONUS".
