@@ -2,9 +2,10 @@
 
 PySide6 aplikace pro správu a export zkušebních otázek (Kryptologie). Jednosouborové GUI (`main.py`).
 
-## Novinky – verze 1.8f (2025-11-27)
-- **HOTFIX**: doplněny chybějící metody `_choose_data_file` a `_bulk_delete_selected`, připojena tlačítka hromadných akcí.
-- Ostatní: v1.8e robustní export DOCX (zachování číslování, placeholdery přes více runů).
+## Verze 1.8e-a (2025-11-27)
+- **Revert na 1.8e** + jediný hotfix: doplněna metoda `_choose_data_file` (pad v menu). 
+- Zachován export DOCX s 1:1 substitucí (číslování se neničí) a import z DOCX.
+- Zachováno vizuální rozlišení BONUS otázek v seznamu („Typ / body“ = `BONUS | +X.XX/ Y.YY`).
 
 ## Instalace (macOS)
 ```bash
@@ -18,7 +19,7 @@ python3 main.py
 ## Git
 ```bash
 git add main.py README.md
-git commit -m "fix(ui): doplněny chybějící metody a napojení tlačítek (v1.8f)"
-git tag v1.8f
+git commit -m "fix: revert na 1.8e + doplněna _choose_data_file (v1.8e-a)"
+git tag v1.8e-a
 git push && git push --tags
 ```

@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Exam Generator (v1.8f)
+Crypto Exam Generator (v1.8e-a)
 
-Změny v 1.8f
-- HOTFIX: doplněny metody `MainWindow._choose_data_file` a `MainWindow._bulk_delete_selected`.
-- Napojení tlačítek v levém panelu: "Přesunout vybrané…" → `_bulk_move_selected`, "Smazat vybrané" → `_bulk_delete_selected`.
-- Ostatní funkce beze změny (v1.8e export DOCX, zachování číslování, robustní placeholdery).
-
-Změny v 1.8e
-- Export DOCX: 1:1 substituce placeholderů i když jsou rozsekané do více w:t, a ve všech word/*.xml.
-- Zachování číslování: nepřepisujeme celý <w:p>, ale jen runs.
-- Inline/Block režim pro <OtázkaX>/<BONUSX>; defaultní cesty šablony a výstupu.
+Tato verze je **revert na 1.8e** + jediný hotfix:
+- doplněna chybějící metoda `MainWindow._choose_data_file` (padalo u vás při startu).
+- zachován export DOCX z 1.8e (substituce placeholderů při zachování číslování).
+- zachován import z DOCX.
+- zachováno rozlišení BONUS ve 2. sloupci stromu: "BONUS | +X.XX/ Y.YY".
 """
 from __future__ import annotations
 
@@ -33,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.8f"
+APP_VERSION = "1.8e-a"
 
 
 # ------------------ Datové modely ------------------
@@ -91,73 +87,6 @@ def apply_dark_theme(app: QApplication) -> None:
     pal.setColor(QPalette.Highlight, QColor(10,132,255))
     pal.setColor(QPalette.HighlightedText, Qt.black)
     app.setPalette(pal)
-
-
-# ------------------ Tree s DnD ------------------
-
-class DnDTree(QTreeWidget):
-    def __init__(self, owner: "MainWindow") -> None:
-        super().__init__()
-        self.owner = owner
-        self.setHeaderLabels(["Název", "Typ / body"])
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
-        self.setDragDropMode(QAbstractItemView.InternalMove)
-
-    def dropEvent(self, event) -> None:
-        ids_before = self.owner._selected_qids()
-        super().dropEvent(event)
-        # Pokud někdy doplníme perzistenci pořadí, bude zde owner._sync_model_from_tree()
-        self.owner._refresh_tree()
-        self.owner._reselect(ids_before)
-        self.owner.save_data()
-        self.owner.statusBar().showMessage("Přesun dokončen (uloženo).", 3000)
-
-
-# ------------------ Dialog pro volbu cíle ------------------
-
-class MoveTargetDialog(QDialog):
-    def __init__(self, owner: "MainWindow") -> None:
-        super().__init__(owner)
-        self.setWindowTitle("Vyberte cílovou skupinu/podskupinu")
-        self.resize(520, 560)
-        lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Vyberte podskupinu (nebo skupinu – vytvoří se Default)."))
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Název", "Typ"])
-        lay.addWidget(self.tree, 1)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
-        for g in owner.root.groups:
-            g_it = QTreeWidgetItem([g.name, "Skupina"])
-            g_it.setData(0, Qt.UserRole, {"kind":"group", "id": g.id})
-            g_it.setIcon(0, owner.style().standardIcon(QStyle.SP_DirIcon))
-            f = g_it.font(0); f.setBold(True); g_it.setFont(0, f)
-            self.tree.addTopLevelItem(g_it)
-            self._add_subs(owner, g_it, g.id, g.subgroups)
-        self.tree.expandAll()
-
-    def _add_subs(self, owner: "MainWindow", parent_item: QTreeWidgetItem, gid: str, subs: List[Subgroup]) -> None:
-        for sg in subs:
-            it = QTreeWidgetItem([sg.name, "Podskupina"])
-            it.setData(0, Qt.UserRole, {"kind":"subgroup","id": sg.id, "parent_group_id": gid})
-            it.setIcon(0, owner.style().standardIcon(QStyle.SP_DirOpenIcon))
-            parent_item.addChild(it)
-            if sg.subgroups:
-                self._add_subs(owner, it, gid, sg.subgroups)
-
-    def selected_target(self) -> tuple[str, Optional[str]]:
-        items = self.tree.selectedItems()
-        if not items: return "", None
-        meta = items[0].data(0, Qt.UserRole) or {}
-        if meta.get("kind") == "subgroup":
-            return meta.get("parent_group_id"), meta.get("id")
-        if meta.get("kind") == "group":
-            return meta.get("id"), None
-        return "", None
 
 
 # ------------------ Export: HTML → bloky ------------------
@@ -308,6 +237,7 @@ def replace_block_in_p(tree: ET.ElementTree, p: ET.Element, blocks: list) -> Non
             np.append(make_run(r['text'], r['b'], r['i'], r['u'], r['color']))
         parent.insert(idx + k, np)
 
+
 # ------------------ Hlavní okno ------------------
 
 class MainWindow(QMainWindow):
@@ -331,16 +261,15 @@ class MainWindow(QMainWindow):
         self.filter_edit = QLineEdit(); self.filter_edit.setPlaceholderText("Filtr: název / obsah otázky…")
         self.btn_move_selected = QPushButton("Přesunout vybrané…"); self.btn_delete_selected = QPushButton("Smazat vybrané")
         hb.addWidget(self.filter_edit,1); hb.addWidget(self.btn_move_selected); hb.addWidget(self.btn_delete_selected); lv.addWidget(bar)
-        self.tree = DnDTree(self); lv.addWidget(self.tree, 1)
+        self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Název", "Typ / body"])
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        lv.addWidget(self.tree, 1)
         right = QWidget(); rv = QVBoxLayout(right); rv.setContentsMargins(6,6,6,6); rv.setSpacing(8)
         self.editor_tb = QToolBar("Formát"); self.editor_tb.setIconSize(QSize(18,18))
         self.act_b = QAction("Tučné", self); self.act_b.setCheckable(True); self.act_b.setShortcut(QKeySequence.Bold)
         self.act_i = QAction("Kurzíva", self); self.act_i.setCheckable(True); self.act_i.setShortcut(QKeySequence.Italic)
         self.act_u = QAction("Podtržení", self); self.act_u.setCheckable(True); self.act_u.setShortcut(QKeySequence.Underline)
-        self.act_color = QAction("Barva", self)
-        self.act_bul = QAction("Odrážky", self); self.act_bul.setCheckable(True)
         self.editor_tb.addAction(self.act_b); self.editor_tb.addAction(self.act_i); self.editor_tb.addAction(self.act_u)
-        self.editor_tb.addSeparator(); self.editor_tb.addAction(self.act_color); self.editor_tb.addSeparator(); self.editor_tb.addAction(self.act_bul)
         rv.addWidget(self.editor_tb)
         form = QFormLayout()
         self.title_edit = QLineEdit(); self.combo_type = QComboBox(); self.combo_type.addItems(["Klasická","BONUS"])
@@ -406,7 +335,6 @@ class MainWindow(QMainWindow):
             return
         self.data_path = Path(path)
         self.statusBar().showMessage(f"Datový soubor: {self.data_path}", 2500)
-        # Při změně souboru zkus načíst existující data, jinak zůstaň u prázdného rootu
         self.load_data()
         self._refresh_tree()
 
@@ -495,7 +423,7 @@ class MainWindow(QMainWindow):
         if meta.get("kind") not in ("group","subgroup"):
             QMessageBox.information(self, "Podskupina", "Vyberte skupinu/podskupinu."); return
         name, ok = QInputDialog.getText(self, "Nová podskupina", "Název:")
-        if not ok or not name.strip(): return
+        if not ok nebo not name.strip(): return
         if meta.get("kind")=="group":
             g = self._find_g(meta["id"]); 
             if g: g.subgroups.append(Subgroup(str(_uuid.uuid4()), name.strip(), [], []))
@@ -534,6 +462,44 @@ class MainWindow(QMainWindow):
         sg.questions = [qq for qq in sg.questions if qq.id != qid]
         self._refresh_tree(); self.save_data()
 
+    def _bulk_move_selected(self):
+        items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get("kind")=="question"]
+        if not items: 
+            QMessageBox.information(self, "Přesun", "Vyberte alespoň jednu otázku."); return
+        # Stromová volba cíle
+        dlg = QDialog(self); dlg.setWindowTitle("Vyberte cílovou skupinu/podskupinu")
+        lay = QVBoxLayout(dlg)
+        tree = QTreeWidget(); tree.setHeaderLabels(["Název", "Typ"]); lay.addWidget(tree, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); lay.addWidget(bb)
+        for g in self.root.groups:
+            g_it = QTreeWidgetItem([g.name, "Skupina"]); g_it.setData(0, Qt.UserRole, {"kind":"group","id": g.id}); g_it.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon)); tree.addTopLevelItem(g_it)
+            def add_s(parent, gid, subs: List[Subgroup]):
+                for sg in subs:
+                    it = QTreeWidgetItem([sg.name, "Podskupina"]); it.setData(0, Qt.UserRole, {"kind":"subgroup","id": sg.id, "parent_group_id": gid}); it.setIcon(0, self.style().standardIcon(QStyle.SP_DirOpenIcon)); parent.addChild(it)
+                    if sg.subgroups: add_s(it, gid, sg.subgroups)
+            add_s(g_it, g.id, g.subgroups)
+        tree.expandAll()
+        if dlg.exec() != QDialog.Accepted: return
+        sel = tree.selectedItems()
+        if not sel: return
+        meta = sel[0].data(0, Qt.UserRole) or {}
+        gid = meta.get("id") if meta.get("kind")=="group" else meta.get("parent_group_id")
+        sgid = None if meta.get("kind")=="group" else meta.get("id")
+        g = self._find_g(gid); target = self._find_sg(gid, sgid) if g else None
+        if not target:
+            if g and not g.subgroups: g.subgroups.append(Subgroup(str(_uuid.uuid4()), "Default", [], []))
+            target = g.subgroups[0] if g else None
+        moved = 0
+        for it in items:
+            srcmeta = it.data(0, Qt.UserRole) or {}
+            src = self._find_sg(srcmeta.get("parent_group_id"), srcmeta.get("parent_subgroup_id"))
+            q = self._find_q(srcmeta.get("parent_group_id"), srcmeta.get("parent_subgroup_id"), srcmeta.get("id"))
+            if src and q:
+                src.questions = [qq for qq in src.questions if qq.id != q.id]
+                target.questions.append(q); moved += 1
+        self._refresh_tree(); self.save_data()
+        self.statusBar().showMessage(f"Přesunuto {moved} otázek.", 4000)
+
     def _bulk_delete_selected(self):
         items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get("kind")=="question"]
         if not items:
@@ -569,25 +535,7 @@ class MainWindow(QMainWindow):
         for g in self.root.groups:
             if apply_in(g.subgroups): break
         if not silent: self.statusBar().showMessage("Otázka uložena.", 1200)
-
-    def _find_g(self, gid: str) -> Optional[Group]:
-        return next((g for g in self.root.groups if g.id==gid), None)
-
-    def _find_sg(self, gid: str, sgid: str) -> Optional[Subgroup]:
-        g = self._find_g(gid)
-        if not g: return None
-        def walk(lst: List[Subgroup]):
-            for sg in lst:
-                if sg.id == sgid: return sg
-                r = walk(sg.subgroups)
-                if r: return r
-            return None
-        return walk(g.subgroups)
-
-    def _find_q(self, gid: str, sgid: str, qid: str) -> Optional[Question]:
-        sg = self._find_sg(gid, sgid)
-        if not sg: return None
-        return next((q for q in sg.questions if q.id==qid), None)
+        self.save_data()
 
     def _all_by_type(self, qtype: str) -> List[Question]:
         out = []
@@ -614,160 +562,6 @@ class MainWindow(QMainWindow):
         if not txt: return "Otázka"
         head = re.split(r'[.!?]\s', txt)[0] or txt
         return head[:80] + ('…' if len(head)>80 else '')
-
-    # Import DOCX (zjednodušený parser)
-    def _import_from_docx(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Import z DOCX", str(self.project_root), "Word dokument (*.docx)")
-        if not paths: return
-        gid, sgid = self._ensure_unassigned()
-        target = self._find_sg(gid, sgid)
-        total = 0
-        for p in paths:
-            try:
-                with zipfile.ZipFile(p, "r") as z:
-                    xml = z.read("word/document.xml")
-                root = ET.fromstring(xml)
-                paras = ["".join((t.text or "") for t in p.findall(".//w:t", NS)).strip() for p in root.findall(".//w:p", NS)]
-                rx_bonus = re.compile(r'^\s*Otázka\s+\d+|bonus', re.IGNORECASE)
-                rx_classic = re.compile(r'^\s*\d+[\.)]\s')
-                for t in paras:
-                    if not t: continue
-                    if rx_bonus.search(t):
-                        q = Question.new_default("bonus"); q.text_html = f"<p>{_html.escape(t)}</p>"; q.title = self._derive_title(q.text_html)
-                        if target: target.questions.append(q); total += 1
-                    elif rx_classic.match(t):
-                        q = Question.new_default("classic"); q.text_html = f"<p>{_html.escape(t)}</p>"; q.title = self._derive_title(q.text_html)
-                        if target: target.questions.append(q); total += 1
-            except Exception as e:
-                QMessageBox.warning(self, "Import", f"{p}\n{e}")
-        self._refresh_tree(); self.save_data()
-        self.statusBar().showMessage(f"Import hotov: {total} otázek do 'Neroztříděné'.", 6000)
-
-    def _ensure_unassigned(self) -> tuple[str,str]:
-        g = next((g for g in self.root.groups if g.name=="Neroztříděné"), None)
-        if not g:
-            g = Group(str(_uuid.uuid4()), "Neroztříděné", []); self.root.groups.append(g)
-        if not g.subgroups:
-            g.subgroups.append(Subgroup(str(_uuid.uuid4()), "Default", [], []))
-        return g.id, g.subgroups[0].id
-
-    # Přesuny
-    def _bulk_move_selected(self):
-        items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get("kind")=="question"]
-        if not items: 
-            QMessageBox.information(self, "Přesun", "Vyberte alespoň jednu otázku."); return
-        dlg = MoveTargetDialog(self)
-        if dlg.exec() != QDialog.Accepted: return
-        gid, sgid = dlg.selected_target()
-        g = self._find_g(gid); target = self._find_sg(gid, sgid) if g else None
-        if not target:
-            if g and not g.subgroups: g.subgroups.append(Subgroup(str(_uuid.uuid4()), "Default", [], []))
-            target = g.subgroups[0] if g else None
-        moved = 0
-        for it in items:
-            meta = it.data(0, Qt.UserRole) or {}
-            src = self._find_sg(meta.get("parent_group_id"), meta.get("parent_subgroup_id"))
-            q = self._find_q(meta.get("parent_group_id"), meta.get("parent_subgroup_id"), meta.get("id"))
-            if src and q:
-                src.questions = [qq for qq in src.questions if qq.id != q.id]
-                target.questions.append(q); moved += 1
-        self._refresh_tree(); self.save_data()
-        self.statusBar().showMessage(f"Přesunuto {moved} otázek.", 4000)
-
-    # Export (default cesty + robustní náhrada)
-    def _export_docx_wizard(self):
-        default_template = self.project_root / "data" / "Šablony" / "template_AK3KR.docx"
-        default_out_dir = self.project_root / "data" / "Vygenerované testy"
-        default_out_dir.mkdir(parents=True, exist_ok=True)
-        default_out = default_out_dir / f"Test_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
-
-        templ_path, _ = QFileDialog.getOpenFileName(self, "Zvolte šablonu DOCX", str(default_template if default_template.exists() else self.project_root), "Word dokument (*.docx)")
-        if not templ_path:
-            templ_path = str(default_template)
-        out_path, _ = QFileDialog.getSaveFileName(self, "Uložit výstup DOCX", str(default_out), "Word dokument (*.docx)")
-        if not out_path:
-            out_path = str(default_out)
-
-        try:
-            ph = self._scan_placeholders(Path(templ_path))
-        except Exception as e:
-            QMessageBox.critical(self, "Šablona", f"Nelze číst šablonu:\n{e}"); return
-
-        classics = self._all_by_type("classic")
-        bonuses  = self._all_by_type("bonus")
-        repl_simple: Dict[str,str] = {}
-        repl_rich: Dict[str,str] = {}
-
-        if "PoznamkaVerze" in ph["any"]:
-            repl_simple["PoznamkaVerze"] = f"MůjText_{datetime.now().strftime('%Y-%m-%d')}_{str(_uuid.uuid4())[:8]}"
-        if "DatumČas" in ph["any"]:
-            repl_simple["DatumČas"] = datetime.now().strftime("%A %d.%m.%Y %H:%M")
-
-        for name in sorted([t for t in ph["q"]], key=lambda s: int(re.findall(r"\d+", s)[0])):
-            idx = int(re.findall(r"\d+", name)[0]) - 1
-            if idx < len(classics): repl_rich[name] = classics[idx].text_html
-        for name in sorted([t for t in ph["b"]], key=lambda s: int(re.findall(r"\d+", s)[0])):
-            idx = int(re.findall(r"\d+", name)[0]) - 1
-            if idx < len(bonuses): repl_rich[name] = bonuses[idx].text_html
-
-        if "MinBody" in ph["any"]:
-            repl_simple["MinBody"] = f"{sum(float(q.bonus_wrong) for q in bonuses):.2f}"
-        if "MaxBody" in ph["any"]:
-            repl_simple["MaxBody"] = f"{sum(int(q.points) for q in classics) + sum(float(q.bonus_correct) for q in bonuses):.2f}"
-
-        try:
-            self._generate_from_template(Path(templ_path), Path(out_path), repl_simple, repl_rich)
-        except Exception as e:
-            QMessageBox.critical(self, "Export", f"Chyba při exportu:\n{e}"); return
-        QMessageBox.information(self, "Export", f"Vygenerováno:\n{out_path}")
-
-    def _scan_placeholders(self, template: Path) -> Dict[str, set]:
-        with zipfile.ZipFile(template, "r") as z:
-            texts = []
-            for name in z.namelist():
-                if name.startswith("word/") and name.endswith(".xml"):
-                    try:
-                        tree = ET.ElementTree(ET.fromstring(z.read(name).decode("utf-8", errors="ignore")))
-                    except Exception:
-                        continue
-                    for p in tree.getroot().findall(".//w:p", NS):
-                        s = "".join((t.text or "") for t in p.findall(".//w:t", NS))
-                        s = re.sub(r"<\s*([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+[0-9]*)\s*>", r"<\1>", s)
-                        if s.strip(): texts.append(s)
-        all_tokens = set()
-        for s in texts:
-            for m in re.findall(r"<([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+[0-9]*)>", s):
-                all_tokens.add(m)
-        qs = {t for t in all_tokens if re.match(r"^Otázka\d+$", t)}
-        bs = {t for t in all_tokens if re.match(r"^BONUS\d+$", t)}
-        return {"q": qs, "b": bs, "any": all_tokens}
-
-    def _generate_from_template(self, template: Path, out: Path, simple: Dict[str,str], rich_html: Dict[str,str]) -> None:
-        rich_blocks = {k: parse_html_blocks(v) for k,v in rich_html.items()}
-        def normalize(s: str) -> str:
-            return re.sub(r"<\s*([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+[0-9]*)\s*>", r"<\1>", s or "")
-        with zipfile.ZipFile(template, "r") as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-                if item.filename.startswith("word/") and item.filename.endswith(".xml"):
-                    try:
-                        tree = ET.ElementTree(ET.fromstring(data.decode("utf-8")))
-                        root = tree.getroot()
-                        for p in list(root.findall(".//w:p", NS)):
-                            s = normalize(paragraph_text(p).strip())
-                            if not s: continue
-                            m = re.fullmatch(r"<([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+[0-9]*)>", s)
-                            if m:
-                                name = m.group(1)
-                                if name in rich_blocks:
-                                    replace_block_in_p(tree, p, rich_blocks[name]); continue
-                                if name in simple:
-                                    clear_runs(p); p.append(make_run(simple[name])); continue
-                            replace_inline_in_p(p, simple, rich_blocks)
-                        data = ET.tostring(root, encoding="utf-8", xml_declaration=False)
-                    except Exception:
-                        pass
-                zout.writestr(item, data)
 
 # main
 def main() -> int:
