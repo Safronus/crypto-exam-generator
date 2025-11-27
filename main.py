@@ -730,6 +730,13 @@ class ExportWizard(QWizard):
         left_layout.addWidget(QLabel("<b>Dostupné otázky:</b>"))
         self.tree_source = QTreeWidget()
         self.tree_source.setHeaderLabels(["Struktura otázek"])
+        
+        # --- PŘIDÁNO: Nastavení signálů ---
+        self.tree_source.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree_source.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree_source.itemSelectionChanged.connect(self._on_tree_selection)
+        # ----------------------------------
+        
         left_layout.addWidget(self.tree_source)
         columns_layout.addLayout(left_layout, 4) # Ratio 4
         
@@ -923,11 +930,13 @@ class ExportWizard(QWizard):
             self.lbl_templ_p2.setText(t_name)
             self.lbl_out_p2.setText(o_name)
 
-            # Rescan if empty
+            # Rescan
             if not self.placeholders_q and not self.placeholders_b:
                 self._scan_placeholders()
 
-            # 1. Clear Tree
+            # 1. Clear Tree (Pozor: clear() může vyvolat selectionChanged, ale to nevadí)
+            # Můžeme dočasně blokovat signály, pokud by to dělalo neplechu
+            self.tree_source.blockSignals(True)
             self.tree_source.clear()
             
             # 2. Clear Slots
@@ -936,18 +945,9 @@ class ExportWizard(QWizard):
                 if item.widget(): item.widget().deleteLater()
             self.layout_slots.addStretch()
             
-            # 3. Context Menu
-            self.tree_source.setContextMenuPolicy(Qt.CustomContextMenu)
-            try: self.tree_source.customContextMenuRequested.disconnect() 
-            except: pass
-            self.tree_source.customContextMenuRequested.connect(self._show_context_menu)
+            # (ZDE BYLO NASTAVENÍ SIGNÁLŮ - SMAZÁNO)
             
-            # PROPOJENÍ SIGNÁLU PRO NÁHLED
-            try: self.tree_source.itemSelectionChanged.disconnect()
-            except: pass
-            self.tree_source.itemSelectionChanged.connect(self._on_tree_selection)
-            
-            # 4. Populate Tree (Recursive)
+            # 4. Populate Tree
             def add_subgroup_recursive(parent_item, subgroup_list):
                 for sg in subgroup_list:
                     sg_item = QTreeWidgetItem([sg.name])
@@ -981,6 +981,9 @@ class ExportWizard(QWizard):
                 add_subgroup_recursive(g_item, g.subgroups)
                 
             self.tree_source.expandAll()
+            
+            # Odblokujeme signály po naplnění
+            self.tree_source.blockSignals(False)
 
             # 5. Create Slots
             if self.placeholders_q:
