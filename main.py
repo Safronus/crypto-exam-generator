@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Exam Generator (v1.8b)
+Crypto Exam Generator (v1.8c)
 
-- Export DOCX ze šablony (QWizard) + zachování formátování otázek:
-  * tučné/kurzíva/podtržení, barva textu, zarovnání odstavce, odrážky/číslování (jednoduše jako „• “ / „1. “ prefix).
-  * Nahrazují se pouze hodnoty v ostrých závorkách <>. Zbytek dokumentu zůstává beze změny.
-- Zachováno: autosave (1.7c), WYSIWYG editor bez náhledu (1.7d), import DOCX, DnD, filtr, multiselect.
+Novinky v 1.8c
+- Přidána aplikace ikona (icon/icon.png). Pokud existuje, nastaví se na QApplication i hlavní okno.
+- Oprava chyby: chybějící metoda MainWindow._import_from_docx (menu „Import z DOCX…“).
+- Import DOCX: jemné vylepšení – přenáší informaci o typu číslování (decimal / lowerLetter / upperLetter / bullet).
 
-Poznámka k listům: Word numbering je složitější (numbering.xml). Zde používáme vizuální prefixy („• “, „1. “), aby
-se vzhledově zachovala sémantika bez úprav numbering.xml (minimální změna).
-
-Autor: Python PySide6 aplikace - vývoj a úprava
+Pozn.: Word numbering (numbering.xml) je mapováno pouze na výsledné vizuální <ol>/<ul> v HTML, bez úprav numbering.xml
+(vizualně věrné, minimální zásah).
 """
 from __future__ import annotations
 
@@ -41,6 +39,7 @@ from PySide6.QtGui import (
     QColor,
     QPalette,
     QFont,
+    QIcon,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -74,7 +73,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.8b"
+APP_VERSION = "1.8c"
 
 
 # --------------------------- Datové typy ---------------------------
@@ -257,8 +256,6 @@ def round_dt_to_10m(dt: QDateTime) -> QDateTime:
 
 # ---- HTML -> jednoduché mezireprezentace pro DOCX ----
 
-from typing import Optional
-
 class HTMLToDocxParser(HTMLParser):
     """
     Převádí podmnožinu HTML z QTextEdit na seznam odstavců:
@@ -272,10 +269,11 @@ class HTMLToDocxParser(HTMLParser):
         self._stack: List[dict] = []
         self._current_runs: List[dict] = []
         self._align: str = "left"
+        a = {'b': False, 'i': False, 'u': False, 'color': None}
+        self._format = a.copy()
         self._in_ul = False
         self._in_ol = False
         self._ol_counter = 0
-        self._format = {'b': False, 'i': False, 'u': False, 'color': None}
 
     def _start_paragraph(self, prefix: str = "") -> None:
         if self._current_runs:
@@ -303,6 +301,7 @@ class HTMLToDocxParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         tag = tag.lower()
+
         if tag in ('p','div'):
             self._start_paragraph()
             style = (attrs.get('style') or '').lower()
@@ -314,8 +313,10 @@ class HTMLToDocxParser(HTMLParser):
                 align = attrs['align'].lower()
             if align in ('left','center','right','justify'):
                 self._align = align
+
         elif tag == 'br':
             self._append_text("\n")
+
         elif tag in ('b','strong'):
             self._format['b'] = True
         elif tag in ('i','em'):
@@ -333,11 +334,10 @@ class HTMLToDocxParser(HTMLParser):
                 if m2:
                     r,g,b = [max(0, min(255, int(x))) for x in m2.groups()]
                     col = f"{r:02X}{g:02X}{b:02X}"
+            prev = self._format['color']
+            self._stack.append({'tag':'span','prev_color': prev})
             if col:
-                self._stack.append({'tag':'span','prev_color': self._format['color']})
                 self._format['color'] = col
-            else:
-                self._stack.append({'tag':'span','prev_color': self._format['color']})
         elif tag == 'ul':
             self._in_ul = True
         elif tag == 'ol':
@@ -433,7 +433,7 @@ def make_w_paragraph(align: str, runs: List[dict], prefix: str="") -> ET.Element
     return p
 
 
-# --------------------------- Hlavní okno (část exportu) ---------------------------
+# --------------------------- Export Wizard ---------------------------
 
 class ExportWizard(QWizard):
     def __init__(self, owner: "MainWindow") -> None:
@@ -477,7 +477,6 @@ class ExportWizard(QWizard):
 
         self.addPage(self.page1)
 
-        # Page 2
         self.page2 = QWizardPage(); self.page2.setTitle("Krok 2/3 – Výběr otázek")
         l2 = QVBoxLayout(self.page2)
         self.area = QScrollArea(); self.area.setWidgetResizable(True)
@@ -487,7 +486,6 @@ class ExportWizard(QWizard):
         l2.addWidget(self.lbl_hint)
         self.addPage(self.page2)
 
-        # Page 3
         self.page3 = QWizardPage(); self.page3.setTitle("Krok 3/3 – Souhrn a export")
         l3 = QFormLayout(self.page3)
         self.lbl_counts = QLabel("-"); self.lbl_minmax = QLabel("-")
@@ -675,6 +673,13 @@ class MainWindow(QMainWindow):
         default_data_dir = self.project_root / "data"
         default_data_dir.mkdir(parents=True, exist_ok=True)
         self.data_path = data_path or (default_data_dir / "questions.json")
+
+        # Aplikace ikona (pokud existuje)
+        icon_file = self.project_root / "icon" / "icon.png"
+        if icon_file.exists():
+            app_icon = QIcon(str(icon_file))
+            self.setWindowIcon(app_icon)
+            QApplication.instance().setWindowIcon(app_icon)
 
         self.root: RootData = RootData(groups=[])
         self._current_question_id: Optional[str] = None
@@ -921,7 +926,6 @@ class MainWindow(QMainWindow):
         self.data_path.parent.mkdir(parents=True, exist_ok=True)
         data = {"groups": [self._serialize_group(g) for g in self.root.groups]}
         try:
-            from PySide6.QtCore import QSaveFile, QByteArray
             sf = QSaveFile(str(self.data_path))
             sf.open(QSaveFile.WriteOnly)
             payload = json.dumps(data, ensure_ascii=False, indent=2)
@@ -1318,6 +1322,8 @@ class MainWindow(QMainWindow):
         items = self.tree.selectedItems()
         if items: items[0].setText(1, text)
 
+    # -------------------- Vyhledávače --------------------
+
     def _find_group(self, gid: str) -> Optional[Group]:
         for g in self.root.groups:
             if g.id == gid:
@@ -1371,6 +1377,8 @@ class MainWindow(QMainWindow):
             if found:
                 self.tree.setCurrentItem(found); self.tree.scrollToItem(found)
                 break
+
+    # -------------------- Formátování Rich text --------------------
 
     def _merge_format_on_selection(self, fmt: QTextCharFormat) -> None:
         cursor = self.text_edit.textCursor()
@@ -1451,12 +1459,16 @@ class MainWindow(QMainWindow):
         self.spin_bonus_wrong.setEnabled(not is_classic)
         self._autosave_schedule()
 
+    # -------------------- Výběr datového souboru --------------------
+
     def _choose_data_file(self) -> None:
         new_path, _ = QFileDialog.getSaveFileName(self, "Zvolit/uložit JSON s otázkami", str(self.data_path), "JSON (*.json)")
         if new_path:
             self.data_path = Path(new_path)
             self.statusBar().showMessage(f"Datový soubor změněn na: {self.data_path}", 4000)
             self.load_data(); self._refresh_tree()
+
+    # -------------------- Filtr --------------------
 
     def _apply_filter(self, text: str) -> None:
         pat = (text or '').strip().lower()
@@ -1641,12 +1653,13 @@ class MainWindow(QMainWindow):
                     next_txt = paragraphs[j].get("text", "")
                     next_isnum = bool(paragraphs[j].get("is_numbered"))
                     next_ilvl = paragraphs[j].get("ilvl")
+                    next_fmt = paragraphs[j].get("num_fmt") or "decimal"
                     if not next_txt.strip() or is_noise(next_txt):
                         j += 1; continue
                     if (next_isnum and (next_ilvl is None or next_ilvl == 0)) or rx_bonus_start.match(next_txt) or rx_classic_numtxt.match(next_txt) or is_question_like(next_txt):
                         break
                     if next_isnum:
-                        list_buffer.append((next_txt.strip(), next_ilvl or 0, "decimal")); j += 1; continue
+                        list_buffer.append((next_txt.strip(), next_ilvl or 0, next_fmt)); j += 1; continue
                     if len(next_txt.strip()) <= 120:
                         block_html += f"<p>{html_escape(next_txt.strip())}</p>"; j += 1; continue
                     break
@@ -1666,6 +1679,32 @@ class MainWindow(QMainWindow):
         if not g.subgroups:
             g.subgroups.append(Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[]))
         return g.id, g.subgroups[0].id
+
+    def _import_from_docx(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "Import z DOCX", str(self.project_root), "Word dokument (*.docx)")
+        if not paths:
+            return
+        g_id, sg_id = self._ensure_unassigned_group()
+        target_sg = self._find_subgroup(g_id, sg_id)
+        total = 0
+        for p in paths:
+            try:
+                paras = self._extract_paragraphs_from_docx(Path(p))
+                qs = self._parse_questions_from_paragraphs(paras)
+                if not qs:
+                    QMessageBox.information(self, "Import", f"{p}\nNebyla nalezena žádná otázka.")
+                    continue
+                if target_sg is not None:
+                    target_sg.questions.extend(qs)
+                total += len(qs)
+            except Exception as e:
+                QMessageBox.warning(self, "Import – chyba", f"Soubor: {p}\n{e}")
+        self._refresh_tree()
+        self.save_data()
+        if total:
+            self.statusBar().showMessage(f"Import hotov: {total} otázek do 'Neroztříděné'.", 6000)
+
+    # -------------------- Přesun otázky --------------------
 
     def _move_question(self) -> None:
         kind, meta = self._selected_node()
@@ -1719,7 +1758,7 @@ class MainWindow(QMainWindow):
         g_name = g.name if g else ""; sg_name = target_sg.name if target_sg else "Default"
         self.statusBar().showMessage(f"Přesunuto {moved} otázek do {g_name} / {sg_name}.", 4000)
 
-    # -------------------- Export DOCX ze šablony --------------------
+    # -------------------- Export DOCX --------------------
 
     def _all_questions_by_type(self, qtype: str) -> List[Question]:
         out: List[Question] = []
@@ -1748,7 +1787,6 @@ class MainWindow(QMainWindow):
                     if full == token1 or full == token2:
                         paras = parse_html_to_paragraphs(html)
                         new_elements = [ make_w_paragraph(d['align'], d['runs'], d.get('prefix','')) for d in paras ]
-                        parent = None
                         def find_parent(r, child):
                             for elem in r.iter():
                                 for e in list(elem):
@@ -1798,6 +1836,13 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     apply_dark_theme(app)
+
+    # Nastavení ikony na úrovni aplikace (pokud existuje)
+    project_root = Path.cwd()
+    icon_file = project_root / "icon" / "icon.png"
+    if icon_file.exists():
+        app.setWindowIcon(QIcon(str(icon_file)))
+
     w = MainWindow()
     w.show()
     return app.exec()
