@@ -602,98 +602,80 @@ class ExportWizard(QWizard):
         self.owner = owner
         self.resize(1600, 1200)
 
-        # IDs - Pro jistotu necháme, ale nextId odstraníme
+        # Lokalizace
+        self.setButtonText(QWizard.BackButton, "< Zpět")
+        self.setButtonText(QWizard.NextButton, "Další >")
+        self.setButtonText(QWizard.CommitButton, "Dokončit")
+        self.setButtonText(QWizard.FinishButton, "Dokončit")
+        self.setButtonText(QWizard.CancelButton, "Zrušit")
+
+        # IDs
         self.ID_PAGE1 = 0
         self.ID_PAGE2 = 1
         self.ID_PAGE3 = 2
 
-        # Cesty
+        # Data
         self.template_path: Optional[Path] = None
         self.output_path: Optional[Path] = None
-        # Flag, zda uživatel změnil výstup ručně (abychom mu to nepřepisovali)
         self.output_changed_manually = False
-
-        # Placeholdery
         self.placeholders_q = []
         self.placeholders_b = []
         self.selection_map = {}
 
-        # Default dirs
+        # Cesty (Default)
         self.templates_dir = self.owner.project_root / "data" / "Šablony"
         self.output_dir = self.owner.project_root / "data" / "Vygenerované testy"
         self.templates_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         self.default_template = self.templates_dir / "template_AK3KR_předtermín.docx"
+        # Inicializace default_output (aby nepadal dialog)
+        self.default_output = self.output_dir / "export.docx" 
 
-        # --- BUILD ---
-        # Postavíme stránky (jen vytvoříme objekty)
-        self._build_page1()
-        self._build_page2()
-        self._build_page3()
-        
-        # Registrace stránek (v tomto pořadí půjdou za sebou)
+        # --- INIT STRÁNEK ---
+        self.page1 = QWizardPage()
+        self.page2 = QWizardPage()
+        self.page3 = QWizardPage()
+
+        self._build_page1_content()
+        self._build_page2_content()
+        self._build_page3_content()
+
         self.setPage(self.ID_PAGE1, self.page1)
         self.setPage(self.ID_PAGE2, self.page2)
         self.setPage(self.ID_PAGE3, self.page3)
         
         self.setStartId(self.ID_PAGE1)
-        
-        # Auto-load Template
+
+        # Auto-load Šablona
         if self.default_template.exists():
             self.le_template.setText(str(self.default_template))
             self.template_path = self.default_template
             QTimer.singleShot(100, self._scan_placeholders)
         
-        # Auto-generate Output Name (poprvé)
+        # Auto-generate Output Name (Hned teď!)
+        # Toto nastaví self.output_path a text v QLineEdit
         self._update_default_output()
 
-    # !!! ODSTRANIT metodu nextId() úplně !!!
-    # QWizard automaticky půjde podle ID: 0 -> 1 -> 2, pokud initializePage neselže.
 
-    def _update_default_output(self):
-        if self.output_changed_manually:
-            return
+    # --- Build Content Methods ---
 
-        # Získání hodnot
-        prefix = self.le_prefix.text().strip() or "Test"
-        # Datum z widgetu
-        dt = self.dt_edit.dateTime()
-        # Formát: YYYY-MM-DD_HHMM
-        date_str = dt.toString("yyyy-MM-dd_HHmm")
-        
-        filename = f"{prefix}_{date_str}.docx"
-        new_path = self.output_dir / filename
-        
-        # Nastavíme text bez vyvolání signálu textChanged (blokace signálů)
-        self.le_output.blockSignals(True)
-        self.le_output.setText(str(new_path))
-        self.le_output.blockSignals(False)
-        
-        self.output_path = new_path
-
-    def _on_output_text_changed(self, text):
-        # Pokud uživatel píše do pole, označíme jako manuálně změněné
-        self.output_changed_manually = True
-        self.output_path = Path(text)
-
-    def _build_page1(self):
-        self.page1 = QWizardPage()
+    def _build_page1_content(self):
         self.page1.setTitle("Krok 1: Výběr šablony a globální nastavení")
         l1 = QVBoxLayout(self.page1)
         
-        # GroupBox: Parametry (Přesunuto nahoru, protože ovlivňují název souboru)
+        # GroupBox: Parametry
         gb_params = QGroupBox("Parametry testu")
         form_params = QFormLayout()
         
         self.le_prefix = QLineEdit("MůjTest")
-        self.le_prefix.textChanged.connect(self._update_default_output) # Update při změně
+        self.le_prefix.textChanged.connect(self._update_default_output)
         form_params.addRow("Prefix verze:", self.le_prefix)
         
         self.dt_edit = QDateTimeEdit(QDateTime.currentDateTime())
         self.dt_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
         self.dt_edit.setCalendarPopup(True)
-        self.dt_edit.dateTimeChanged.connect(self._update_default_output) # Update při změně
+        self.dt_edit.dateTimeChanged.connect(self._update_default_output)
         form_params.addRow("Datum testu:", self.dt_edit)
         
         gb_params.setLayout(form_params)
@@ -702,36 +684,37 @@ class ExportWizard(QWizard):
         # GroupBox: Soubory
         gb_files = QGroupBox("Soubory")
         form_files = QFormLayout()
+        
         self.le_template = QLineEdit()
         self.le_template.textChanged.connect(self._on_templ_change)
-        btn_t = QPushButton("Vybrat šablonu..."); btn_t.clicked.connect(self._choose_template)
+        btn_t = QPushButton("Vybrat šablonu...")
+        btn_t.clicked.connect(self._choose_template)
         h_t = QHBoxLayout(); h_t.addWidget(self.le_template); h_t.addWidget(btn_t)
         form_files.addRow("Šablona:", h_t)
         
         self.le_output = QLineEdit()
-        self.le_output.textChanged.connect(self._on_output_text_changed) # Detekce manuální změny
-        btn_o = QPushButton("Cíl exportu..."); btn_o.clicked.connect(self._choose_output)
+        self.le_output.textChanged.connect(self._on_output_text_changed)
+        btn_o = QPushButton("Cíl exportu...")
+        btn_o.clicked.connect(self._choose_output)
         h_o = QHBoxLayout(); h_o.addWidget(self.le_output); h_o.addWidget(btn_o)
         form_files.addRow("Výstup:", h_o)
+        
         gb_files.setLayout(form_files)
         l1.addWidget(gb_files)
         
         self.lbl_scan_info = QLabel("Info: Čekám na načtení šablony...")
         self.lbl_scan_info.setStyleSheet("color: gray; font-style: italic;")
         l1.addWidget(self.lbl_scan_info)
-        
-        # self.addPage(self.page1) - NEVOLAT, děláme v initu
 
-    def _build_page2(self):
-        self.page2 = QWizardPage()
+    def _build_page2_content(self):
         self.page2.setTitle("Krok 2: Přiřazení otázek do šablony")
+        self.page2.initializePage = self._init_page2
         
-        # Hlavní layout stránky
         main_layout = QVBoxLayout(self.page2)
         
-        # 1. INFO PANEL (Kontext)
+        # Info Panel
         self.info_box_p2 = QGroupBox("Kontext exportu")
-        self.info_box_p2.setStyleSheet("background-color: #2d2d30; font-size: 11px; color: #cccccc;")
+        self.info_box_p2.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #555; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         l_info = QFormLayout(self.info_box_p2)
         self.lbl_templ_p2 = QLabel("-")
         self.lbl_out_p2 = QLabel("-")
@@ -739,10 +722,9 @@ class ExportWizard(QWizard):
         l_info.addRow("Výstupní soubor:", self.lbl_out_p2)
         main_layout.addWidget(self.info_box_p2)
 
-        # 2. Obsah (Splitter nebo Layout)
         content_layout = QHBoxLayout()
         
-        # Levý panel: Dostupné otázky
+        # Levý panel: Strom
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("<b>Dostupné otázky:</b>"))
         self.tree_source = QTreeWidget()
@@ -764,15 +746,15 @@ class ExportWizard(QWizard):
         content_layout.addLayout(right_layout, 1)
         
         main_layout.addLayout(content_layout)
-        
-    def _build_page3(self):
-        self.page3 = QWizardPage()
+
+    def _build_page3_content(self):
         self.page3.setTitle("Krok 3: Kontrola a Export")
+        self.page3.initializePage = self._init_page3
+        
         main_layout = QVBoxLayout(self.page3)
         
         # Info Panel
         self.info_box_p3 = QGroupBox("Kontext exportu")
-        # Tmavý styl pro groupbox
         self.info_box_p3.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #555; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         l_info = QFormLayout(self.info_box_p3)
         self.lbl_templ_p3 = QLabel("-")
@@ -781,27 +763,44 @@ class ExportWizard(QWizard):
         l_info.addRow("Výstupní soubor:", self.lbl_out_p3)
         main_layout.addWidget(self.info_box_p3)
         
-        # Náhled HTML
+        # Náhled
         lbl_prev = QLabel("<b>Náhled obsahu testu:</b>")
         main_layout.addWidget(lbl_prev)
         
         self.preview_edit = QTextEdit()
         self.preview_edit.setReadOnly(True)
-        # Styl pro Dark Theme (šedé pozadí, světlý text)
+        # Dark Theme CSS pro QTextEdit
         self.preview_edit.setStyleSheet("QTextEdit { background-color: #252526; color: #e0e0e0; border: 1px solid #3e3e42; }")
         main_layout.addWidget(self.preview_edit)
-        
-        self.addPage(self.page3)
-        self.page3.initializePage = self._init_page3
 
-    # --- Logic Krok 1 ---
+    # --- Helpers & Logic ---
+
+    def _update_default_output(self):
+        if self.output_changed_manually:
+            return
+        prefix = self.le_prefix.text().strip() or "Test"
+        dt = self.dt_edit.dateTime()
+        filename = f"{prefix}_{dt.toString('yyyy-MM-dd_HHmm')}.docx"
+        new_path = self.output_dir / filename
+        
+        self.le_output.blockSignals(True)
+        self.le_output.setText(str(new_path))
+        self.le_output.blockSignals(False)
+        self.output_path = new_path
+
+    def _on_output_text_changed(self, text):
+        self.output_changed_manually = True
+        self.output_path = Path(text)
+
     def _choose_template(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Šablona", str(self.templates_dir), "*.docx")
-        if path: self.le_template.setText(path)
+        path, _ = QFileDialog.getOpenFileName(self, "Vybrat šablonu", str(self.templates_dir), "*.docx")
+        if path:
+            self.le_template.setText(path)
 
     def _choose_output(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Výstup", str(self.default_output), "*.docx")
-        if path: self.le_output.setText(path)
+        path, _ = QFileDialog.getSaveFileName(self, "Cíl exportu", str(self.default_output), "*.docx")
+        if path:
+            self.le_output.setText(path)
 
     def _on_templ_change(self, text):
         path = Path(text)
@@ -810,16 +809,16 @@ class ExportWizard(QWizard):
             self._scan_placeholders()
         else:
             self.template_path = None
-            self.lbl_scan_info.setText("Šablona neexistuje.")
+            self.lbl_scan_info.setText("Šablona neexistuje nebo není platná.")
 
     def _scan_placeholders(self):
         if not self.template_path or not self.template_path.exists():
-            self.lbl_scan_info.setText("Šablona není vybrána.")
             return
 
         try:
             doc = docx.Document(self.template_path)
             full_text = ""
+            # Načteme text z celého dokumentu pro regex
             for p in doc.paragraphs: full_text += p.text + "\n"
             for t in doc.tables:
                 for r in t.rows:
@@ -827,7 +826,7 @@ class ExportWizard(QWizard):
                         for p in c.paragraphs: full_text += p.text + "\n"
             
             import re
-            # Hledáme <Placeholder> i {Placeholder}
+            # Regex pro <Placeholder> i {Placeholder}
             placeholders = re.findall(r'[<{]([A-Za-z0-9ÁČĎÉĚÍŇÓŘŠŤÚŮÝŽáčďéěíňóřšťúůýž]+)[>}]', full_text)
             placeholders = sorted(list(set(placeholders)))
             
@@ -842,129 +841,42 @@ class ExportWizard(QWizard):
             self.has_minmax = (any('MinBody' in x for x in placeholders), any('MaxBody' in x for x in placeholders))
             
             msg = f"Nalezeno: {len(self.placeholders_q)}x Otázka, {len(self.placeholders_b)}x BONUS."
-            if self.has_minmax[0]: msg += " (Min/Max body)."
+            if self.has_minmax[0]: msg += " (S body)."
             self.lbl_scan_info.setText(msg)
-            
-            # Pro jistotu resetujeme výběr v mapě, pokud zmizely placeholdery
-            # (ale raději zachováme to, co sedí)
             
         except Exception as e:
             self.lbl_scan_info.setText(f"Chyba čtení šablony: {e}")
 
+    # --- Page Initializers ---
 
-    def _show_context_menu(self, position):
-        # Zjistíme item
-        item = self.tree_source.itemAt(position)
-        if not item: return
-        qid = item.data(0, Qt.UserRole)
-        if not qid: return # Skupina, ne otázka
-        
-        q = self.owner._find_question_by_id(qid)
-        if not q: return
-
-        from PySide6.QtWidgets import QMenu
-        from PySide6.QtGui import QAction
-        
-        menu = QMenu()
-        menu_assign = menu.addMenu("Přiřadit k...")
-        
-        # Zjistíme volné sloty podle typu
-        free_slots = []
-        if q.type == 'classic':
-            for ph in self.placeholders_q:
-                if ph not in self.selection_map: # Je volný
-                    free_slots.append(ph)
-        else: # Bonus
-            for ph in self.placeholders_b:
-                if ph not in self.selection_map:
-                    free_slots.append(ph)
-        
-        if not free_slots:
-            a = menu_assign.addAction("(Žádné volné sloty)")
-            a.setEnabled(False)
-        else:
-            for slot in free_slots:
-                # Vytvoříme akci s uzávěrem (closure) pro slot
-                action = QAction(slot, self.tree_source)
-                # Lambda: pozor na variable capture in loop, použijeme default arg
-                action.triggered.connect(lambda checked=False, s=slot, q_id=qid: self._assign_from_context(s, q_id))
-                menu_assign.addAction(action)
-
-        menu.exec(self.tree_source.viewport().mapToGlobal(position))
-
-    def _assign_from_context(self, slot_name, qid):
-        # Logika přiřazení (stejná jako u tlačítka "Vybrat", ale obráceně)
-        self.selection_map[slot_name] = qid
-        
-        # Aktualizujeme UI slotu (najdeme widget v layoutu)
-        # To je trochu složitější, protože nemáme přímou referenci. 
-        # Musíme projít layout nebo si držet mapu widgetů.
-        # Nejjednodušší: Znovu inicializovat Page 2 (refresh), ale to sbalí strom.
-        # Lepší: Najít widget.
-        
-        # Projdeme layout slotů
-        for i in range(self.layout_slots.count()):
-            w = self.layout_slots.itemAt(i).widget()
-            if w and isinstance(w, QWidget):
-                # Najdeme label s názvem slotu
-                children = w.findChildren(QLabel)
-                if children and children[0].text() == f"{slot_name}:":
-                    # To je on!
-                    # Label hodnoty je druhý label (index 1, index 0 je název)
-                    # Ale layout má pořadí: LblName, LblVal, BtnSel, BtnClr... ne, 
-                    # Layout: LblName, LblVal, BtnSel, BtnClr.
-                    # findChildren nemusí zachovat pořadí layoutu.
-                    
-                    # Bezpečnější: w.layout().itemAt(1).widget() je LblVal
-                    lbl_val = w.layout().itemAt(1).widget()
-                    btn_clr = w.layout().itemAt(3).widget()
-                    
-                    q = self.owner._find_question_by_id(qid)
-                    lbl_val.setText(q.title)
-                    lbl_val.setStyleSheet("color: white; font-weight: bold;")
-                    btn_clr.setEnabled(True)
-                    break
-        
-        # Skryjeme item ve stromu
-        it = QTreeWidgetItemIterator(self.tree_source)
-        while it.value():
-            if it.value().data(0, Qt.UserRole) == qid:
-                it.value().setHidden(True)
-                break
-            it += 1
-
-    # --- Logic Krok 2 ---
     def _init_page2(self):
-        print("DEBUG: Vstupuji do Krok 2 (_init_page2)")
         try:
-            # Aktualizace info panelu
+            # Info update
             t_name = self.template_path.name if self.template_path else "Nevybráno"
             o_name = self.output_path.name if self.output_path else "Nevybráno"
             self.lbl_templ_p2.setText(t_name)
             self.lbl_out_p2.setText(o_name)
 
-            # Pokud placeholdery nejsou načtené, zkusíme znovu
+            # Rescan if empty
             if not self.placeholders_q and not self.placeholders_b:
-                print("DEBUG: Placeholdery prázdné, spouštím scan...")
                 self._scan_placeholders()
 
-            # 1. Vyčistit strom otázek
+            # 1. Clear Tree
             self.tree_source.clear()
             
-            # 2. Vyčistit layout slotů
+            # 2. Clear Slots
             while self.layout_slots.count():
                 item = self.layout_slots.takeAt(0)
-                if item.widget(): 
-                    item.widget().deleteLater()
+                if item.widget(): item.widget().deleteLater()
             self.layout_slots.addStretch()
             
-            # 3. Nastavit kontextové menu
+            # 3. Context Menu
             self.tree_source.setContextMenuPolicy(Qt.CustomContextMenu)
             try: self.tree_source.customContextMenuRequested.disconnect() 
             except: pass
             self.tree_source.customContextMenuRequested.connect(self._show_context_menu)
             
-            # 4. Helper - rekurzivní strom
+            # 4. Populate Tree (Recursive)
             def add_subgroup_recursive(parent_item, subgroup_list):
                 for sg in subgroup_list:
                     sg_item = QTreeWidgetItem([sg.name])
@@ -974,31 +886,32 @@ class ExportWizard(QWizard):
                     for q in sg.questions:
                         info = f"({q.points} b)" if q.type == 'classic' else f"(Bonus: {q.bonus_correct})"
                         label = f"{q.title} {info}"
-                        if q.id in self.selection_map.values(): label += " [VYBRÁNO]"
+                        if q.id in self.selection_map.values():
+                            label += " [VYBRÁNO]"
                         
                         q_item = QTreeWidgetItem([label])
                         q_item.setData(0, Qt.UserRole, q.id)
                         q_item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
                         
-                        if q.id in self.selection_map.values(): q_item.setHidden(True)
+                        if q.id in self.selection_map.values():
+                            q_item.setHidden(True)
+                        
                         sg_item.addChild(q_item)
                     
                     if sg.subgroups:
                         add_subgroup_recursive(sg_item, sg.subgroups)
 
-            # 5. Naplnění stromu
             groups = self.owner.root.groups
             for g in groups:
                 g_item = QTreeWidgetItem([g.name])
                 g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
                 f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
-                
                 self.tree_source.addTopLevelItem(g_item)
                 add_subgroup_recursive(g_item, g.subgroups)
                 
             self.tree_source.expandAll()
 
-            # 6. Sloty
+            # 5. Create Slots
             if self.placeholders_q:
                 lbl = QLabel("--- KLASICKÉ OTÁZKY ---")
                 lbl.setStyleSheet("font-weight:bold; color:#4da6ff; margin-top:5px;")
@@ -1014,12 +927,9 @@ class ExportWizard(QWizard):
                     self._add_slot_widget(ph, 'bonus')
                     
         except Exception as e:
-            print(f"CRITICAL ERROR in _init_page2: {e}")
-            import traceback
-            traceback.print_exc()
-            QMessageBox.critical(self, "Chyba", f"Chyba při inicializaci kroku 2:\n{e}")
+            print(f"ERROR _init_page2: {e}")
+            QMessageBox.critical(self, "Chyba", f"Chyba inicializace kroku 2:\n{e}")
 
-    
     def _add_slot_widget(self, placeholder_name, allowed_type):
         w = QWidget()
         l = QHBoxLayout(w)
@@ -1031,7 +941,6 @@ class ExportWizard(QWizard):
         btn_sel = QPushButton("Vybrat...")
         btn_sel.setFixedWidth(80)
         
-        # Zjistíme, zda už je něco vybráno (z paměti)
         current_qid = self.selection_map.get(placeholder_name)
         current_title = "(nevybráno)"
         if current_qid:
@@ -1046,7 +955,7 @@ class ExportWizard(QWizard):
         btn_clr.setEnabled(bool(current_qid))
         
         l.addWidget(lbl_ph)
-        l.addWidget(lbl_val, 1) # Stretch
+        l.addWidget(lbl_val, 1)
         l.addWidget(btn_sel)
         l.addWidget(btn_clr)
         
@@ -1066,16 +975,13 @@ class ExportWizard(QWizard):
                 QMessageBox.warning(self, "Typ nesedí", f"Do slotu {placeholder_name} nelze vložit otázku typu {q.type}.")
                 return
             
-            # Pokud už tam něco bylo, vrátíme to do stromu
             old_qid = self.selection_map.get(placeholder_name)
-            if old_qid:
-                self._show_tree_item(old_qid)
+            if old_qid: self._show_tree_item(old_qid)
             
             self.selection_map[placeholder_name] = qid
             lbl_val.setText(q.title)
             lbl_val.setStyleSheet("color: white; font-weight: bold;")
             btn_clr.setEnabled(True)
-            
             item.setHidden(True)
 
         def clear_current():
@@ -1083,7 +989,6 @@ class ExportWizard(QWizard):
             if old_qid:
                 del self.selection_map[placeholder_name]
                 self._show_tree_item(old_qid)
-                
             lbl_val.setText("(nevybráno)")
             lbl_val.setStyleSheet("color: gray; font-style: italic;")
             btn_clr.setEnabled(False)
@@ -1093,18 +998,74 @@ class ExportWizard(QWizard):
         self.layout_slots.insertWidget(self.layout_slots.count()-1, w)
 
     def _show_tree_item(self, qid):
-        # Najít item v tree a odkrýt ho
         it = QTreeWidgetItemIterator(self.tree_source)
         while it.value():
-            item = it.value()
-            if item.data(0, Qt.UserRole) == qid:
-                item.setHidden(False)
+            if it.value().data(0, Qt.UserRole) == qid:
+                it.value().setHidden(False)
                 break
             it += 1
 
-    # --- Logic Krok 3 ---
+    def _show_context_menu(self, position):
+        item = self.tree_source.itemAt(position)
+        if not item: return
+        qid = item.data(0, Qt.UserRole)
+        if not qid: return
+        
+        q = self.owner._find_question_by_id(qid)
+        if not q: return
+
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+        
+        menu = QMenu()
+        menu_assign = menu.addMenu("Přiřadit k...")
+        
+        free_slots = []
+        if q.type == 'classic':
+            for ph in self.placeholders_q:
+                if ph not in self.selection_map: free_slots.append(ph)
+        else:
+            for ph in self.placeholders_b:
+                if ph not in self.selection_map: free_slots.append(ph)
+        
+        if not free_slots:
+            a = menu_assign.addAction("(Žádné volné sloty)")
+            a.setEnabled(False)
+        else:
+            for slot in free_slots:
+                action = QAction(slot, self.tree_source)
+                action.triggered.connect(lambda checked=False, s=slot, q_id=qid: self._assign_from_context(s, q_id))
+                menu_assign.addAction(action)
+
+        menu.exec(self.tree_source.viewport().mapToGlobal(position))
+
+    def _assign_from_context(self, slot_name, qid):
+        self.selection_map[slot_name] = qid
+        
+        # Refresh slot UI
+        for i in range(self.layout_slots.count()):
+            w = self.layout_slots.itemAt(i).widget()
+            if w and isinstance(w, QWidget):
+                children = w.findChildren(QLabel)
+                if children and children[0].text() == f"{slot_name}:":
+                    # Found slot widget
+                    lbl_val = w.layout().itemAt(1).widget()
+                    btn_clr = w.layout().itemAt(3).widget()
+                    q = self.owner._find_question_by_id(qid)
+                    lbl_val.setText(q.title)
+                    lbl_val.setStyleSheet("color: white; font-weight: bold;")
+                    btn_clr.setEnabled(True)
+                    break
+        
+        # Hide tree item
+        it = QTreeWidgetItemIterator(self.tree_source)
+        while it.value():
+            if it.value().data(0, Qt.UserRole) == qid:
+                it.value().setHidden(True)
+                break
+            it += 1
+
     def _init_page3(self):
-        print("DEBUG: Vstupuji do Krok 3 (_init_page3)")
         try:
             t_name = self.template_path.name if self.template_path else "Nevybráno"
             o_name = self.output_path.name if self.output_path else "Nevybráno"
@@ -1114,7 +1075,6 @@ class ExportWizard(QWizard):
             total_points = 0.0
             min_loss = 0.0
             
-            # Barvy
             bg_color = "#252526"; text_color = "#e0e0e0"; border_color = "#555555"
             sec_q_bg = "#2d3845"; sec_b_bg = "#453d2d"; sec_s_bg = "#2d452d"
             
@@ -1179,44 +1139,32 @@ class ExportWizard(QWizard):
             self.preview_edit.setHtml(html)
             
         except Exception as e:
-            print(f"CRITICAL ERROR in _init_page3: {e}")
-            import traceback
-            traceback.print_exc()
-            self.preview_edit.setText(f"Chyba při generování náhledu: {e}")
-
-
-    def _add_row_3col(self, c1, c2, c3):
-        r = self.tbl_preview.rowCount()
-        self.tbl_preview.insertRow(r)
-        self.tbl_preview.setItem(r, 0, QTableWidgetItem(str(c1)))
-        self.tbl_preview.setItem(r, 1, QTableWidgetItem(str(c2)))
-        self.tbl_preview.setItem(r, 2, QTableWidgetItem(str(c3)))
-
+            self.preview_edit.setText(f"Chyba náhledu: {e}")
 
     def accept(self) -> None:
         if not self.template_path or not self.output_path: return
 
-        # Build Replacements
         repl_plain: Dict[str, str] = {}
         
-        # Datum
         dt = round_dt_to_10m(self.dt_edit.dateTime())
-        repl_plain["DatumČas"] = f"{cz_day_of_week(dt.toPython())} {dt.toString('dd.MM.yyyy HH:mm')}"
-        repl_plain["DatumCas"] = repl_plain["DatumČas"] # alias
-        repl_plain["DATUMCAS"] = repl_plain["DatumČas"]
+        dt_str = f"{cz_day_of_week(dt.toPython())} {dt.toString('dd.MM.yyyy HH:mm')}"
+        repl_plain["DatumČas"] = dt_str
+        repl_plain["DatumCas"] = dt_str
+        repl_plain["DATUMCAS"] = dt_str
         
-        # Pozn
-        prefix = self.le_prefix.text()
+        prefix = self.le_prefix.text().strip()
         today = datetime.now().strftime("%Y-%m-%d")
-        repl_plain["PoznamkaVerze"] = f"{prefix} {today}_{str(_uuid.uuid4())[:8]}"
-        repl_plain["POZNAMKAVERZE"] = repl_plain["PoznamkaVerze"]
+        # Unikátní UUID pro verzi
+        verze_str = f"{prefix} {today}_{str(_uuid.uuid4())[:8]}"
+        repl_plain["PoznamkaVerze"] = verze_str
+        repl_plain["POZNAMKAVERZE"] = verze_str
         
         # Body
-        # Spočítáme znovu
         total_points = 0.0
         min_loss = 0.0
         for qid in self.selection_map.values():
             q = self.owner._find_question_by_id(qid)
+            if not q: continue
             if q.type == 'classic': total_points += float(q.points)
             else:
                 total_points += float(q.bonus_correct)
@@ -1227,12 +1175,11 @@ class ExportWizard(QWizard):
         repl_plain["MinBody"] = f"{min_loss:.2f}"
         repl_plain["MINBODY"] = f"{min_loss:.2f}"
 
-        # Rich Map
+        # Rich text map
         rich_map: Dict[str, str] = {}
         for ph, qid in self.selection_map.items():
             q = self.owner._find_question_by_id(qid)
-            if q:
-                rich_map[ph] = q.text_html
+            if q: rich_map[ph] = q.text_html
 
         try:
             self.owner._generate_docx_from_template(self.template_path, self.output_path, repl_plain, rich_map)
@@ -2384,8 +2331,16 @@ class MainWindow(QMainWindow):
             walk_subs(g.subgroups)
         return out
 
-    def _export_docx_wizard(self) -> None:
-        wiz = ExportWizard(self); wiz.le_output.setText(str(self.project_root / "test_vystup.docx")); wiz.exec()
+    def _export_docx_wizard(self):
+        # PŮVODNÍ (ŠPATNĚ):
+        # wiz = ExportWizard(self)
+        # wiz.le_output.setText(str(self.project_root / "test_vystup.docx")) <--- TOTO SMAZAT!
+        # wiz.exec()
+
+        # NOVÉ (SPRÁVNĚ):
+        wiz = ExportWizard(self)
+        wiz.exec()
+
 
     def _generate_docx_from_template(self, template_path: Path, output_path: Path,
                                      simple_repl: Dict[str, str], rich_repl_html: Dict[str, str]) -> None:
