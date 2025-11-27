@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 '''
-Crypto Exam Generator (v1.0)
+Crypto Exam Generator (v1.1)
 Jednosouborová PySide6 aplikace pro správu zkušebních otázek
 s podporou skupin a podskupin, typů otázek (klasická/BONUS),
-bohatého formátování textu (tučné, kurzíva, podtržení, barvy, odrážky)
-a ukládání do JSON (mimo git – doporučené do ./data/).
+bohatého formátování textu (tučné, kurzíva, podtržení, barvy, odrážky),
+ukládání do JSON (mimo git – doporučené do ./data/)
+a importu otázek z DOCX (Word).
 
 Platforma: macOS (podporováno i jinde), výchozí dark theme (Fusion).
 Autor: (doplní uživatel)
@@ -17,6 +18,10 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+import re
+import html
+import zipfile
+from xml.etree import ElementTree as ET
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -48,7 +53,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 
 # --------------------------- Datové typy ---------------------------
 
@@ -71,8 +76,8 @@ class Question:
                 type="bonus",
                 text_html="<p><br></p>",
                 points=0,
-                bonus_correct=2,
-                bonus_wrong=0,
+                bonus_correct=1,   # default import bonus correct
+                bonus_wrong=0,     # default import bonus wrong
                 created_at=now,
             )
         return Question(
@@ -150,6 +155,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
+        self._build_menus()   # v1.1 menu
         self.load_data()
         self._refresh_tree()
 
@@ -209,7 +215,7 @@ class MainWindow(QMainWindow):
 
         self.spin_bonus_correct = QSpinBox()
         self.spin_bonus_correct.setRange(-999, 999)
-        self.spin_bonus_correct.setValue(2)
+        self.spin_bonus_correct.setValue(1)
 
         self.spin_bonus_wrong = QSpinBox()
         self.spin_bonus_wrong.setRange(-999, 999)
@@ -309,6 +315,22 @@ class MainWindow(QMainWindow):
         self.act_delete.triggered.connect(self._delete_selected)
         self.act_save_all.triggered.connect(self.save_data)
         self.act_choose_data.triggered.connect(self._choose_data_file)
+
+    # -------------------- Menu (v1.1) --------------------
+
+    def _build_menus(self) -> None:
+        bar = self.menuBar()
+        file_menu = bar.addMenu("Soubor")
+        edit_menu = bar.addMenu("Úpravy")
+
+        self.act_import_docx = QAction("Import z DOCX…", self)
+        self.act_move_question = QAction("Přesunout otázku…", self)
+
+        file_menu.addAction(self.act_import_docx)
+        edit_menu.addAction(self.act_move_question)
+
+        self.act_import_docx.triggered.connect(self._import_from_docx)
+        self.act_move_question.triggered.connect(self._move_question)
 
     # -------------------- Práce s daty (JSON) --------------------
 
@@ -530,7 +552,7 @@ class MainWindow(QMainWindow):
         self._current_question_id = None
         self.text_edit.clear()
         self.spin_points.setValue(1)
-        self.spin_bonus_correct.setValue(2)
+        self.spin_bonus_correct.setValue(1)
         self.spin_bonus_wrong.setValue(0)
         self.combo_type.setCurrentIndex(0)
         self._set_editor_enabled(False)
@@ -685,6 +707,147 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Datový soubor změněn na: {self.data_path}", 4000)
             self.load_data()
             self._refresh_tree()
+
+    # -------------------- Import z DOCX (v1.1) --------------------
+
+    def _import_from_docx(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "Vyberte .docx soubory", str(self.project_root), "Word dokumenty (*.docx)")
+        if not paths:
+            return
+        imported = 0
+        group_id, subgroup_id = self._ensure_unassigned_group()
+        for p in paths:
+            try:
+                text = self._extract_text_from_docx(Path(p))
+                questions = self._parse_questions_from_text(text)
+                if questions:
+                    sg = self._find_subgroup(group_id, subgroup_id)
+                    if not sg:
+                        continue
+                    for q in questions:
+                        sg.questions.append(q)
+                    imported += len(questions)
+            except Exception as e:
+                QMessageBox.warning(self, "Import selhal", f"{p}\n{e}")
+        if imported:
+            self._refresh_tree()
+            self.statusBar().showMessage(f"Importováno {imported} otázek do skupiny 'Neroztříděné'.", 5000)
+        else:
+            QMessageBox.information(self, "Import", "Nebyla nalezena žádná otázka.")
+
+    def _extract_text_from_docx(self, path: Path) -> str:
+        with zipfile.ZipFile(path, "r") as z:
+            with z.open("word/document.xml") as f:
+                xml_bytes = f.read()
+        root = ET.fromstring(xml_bytes)
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        lines = []
+        for para in root.findall(".//w:p", ns):
+            runs = para.findall(".//w:t", ns)
+            line = "".join(t.text or "" for t in runs)
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _ensure_unassigned_group(self) -> tuple[str, str]:
+        name = "Neroztříděné"
+        g = next((g for g in self.root.groups if g.name == name), None)
+        if not g:
+            g = Group(id=str(uuid.uuid4()), name=name, subgroups=[])
+            self.root.groups.append(g)
+        if not g.subgroups:
+            g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name="Default", questions=[]))
+        return g.id, g.subgroups[0].id
+
+    def _parse_questions_from_text(self, text: str) -> list[Question]:
+        lines = text.splitlines()
+        blocks = []
+        buf = []
+        def flush():
+            s = "\n".join(buf).strip()
+            if s:
+                blocks.append(s)
+            buf.clear()
+        for ln in lines:
+            if re.match(r"\s*Otázka\s+\d+", ln, flags=re.IGNORECASE):
+                flush()
+                buf.append(ln)
+            elif not ln.strip():
+                flush()
+            else:
+                buf.append(ln)
+        flush()
+
+        def is_noise(block: str) -> bool:
+            hay = block.lower()
+            noise_keys = [
+                "datum:", "jméno", "podpis", "klasifikační", "stupnice", "maximum bodů",
+                "na uvedené otázky", "souhlasíte", "cookies"
+            ]
+            return any(k in hay for k in noise_keys)
+
+        out: list[Question] = []
+        for b in blocks:
+            if is_noise(b):
+                continue
+            b_stripped = b.strip()
+            is_bonus = bool(re.search(r"\bOtázka\s+\d+", b_stripped, flags=re.IGNORECASE)) or ("bonus" in b_stripped.lower())
+            is_classic = bool(re.match(r"\s*\d+[\.)]\s", b_stripped)) or (" bod" in b_stripped.lower())
+            qtype = "bonus" if is_bonus else "classic"
+            if qtype == "classic" and not is_classic:
+                if not ("?" in b_stripped or re.search(r"\b(Popište|Uveďte|Zašifrujte|Vysvětlete|Porovnejte|Jaký|Jak|Stručně)\b", b_stripped, re.IGNORECASE)):
+                    continue
+            html_text = "<p>" + html.escape(b_stripped).replace("\n", "<br>") + "</p>"
+            if qtype == "bonus":
+                q = Question.new_default("bonus")
+                q.text_html = html_text
+                q.bonus_correct = 1
+                q.bonus_wrong = 0
+            else:
+                q = Question.new_default("classic")
+                q.text_html = html_text
+                q.points = 1
+            out.append(q)
+        return out
+
+    # -------------------- Přesun otázky (v1.1) --------------------
+
+    def _move_question(self) -> None:
+        kind, meta = self._selected_node()
+        if kind != "question":
+            QMessageBox.information(self, "Přesun", "Vyberte nejprve otázku ve stromu.")
+            return
+        from PySide6.QtWidgets import QInputDialog
+        group_names = [g.name for g in self.root.groups]
+        if not group_names:
+            QMessageBox.information(self, "Přesun", "Neexistují žádné skupiny.")
+            return
+        g_name, ok = QInputDialog.getItem(self, "Přesun otázky", "Cílová skupina:", group_names, 0, False)
+        if not ok or not g_name:
+            return
+        g = next((g for g in self.root.groups if g.name == g_name), None)
+        if not g:
+            return
+        if not g.subgroups:
+            g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name="Default", questions=[]))
+        sg_names = [sg.name for sg in g.subgroups]
+        sg_name, ok = QInputDialog.getItem(self, "Přesun otázky", "Cílová podskupina:", sg_names, 0, False)
+        if not ok or not sg_name:
+            return
+        target_sg = next((s for s in g.subgroups if s.name == sg_name), None)
+        if not target_sg:
+            return
+        src_gid = meta["parent_group_id"]
+        src_sgid = meta["parent_subgroup_id"]
+        qid = meta["id"]
+        src_sg = self._find_subgroup(src_gid, src_sgid)
+        q = self._find_question(src_gid, src_sgid, qid)
+        if not (src_sg and q):
+            return
+        src_sg.questions = [qq for qq in src_sg.questions if qq.id != qid]
+        target_sg.questions.append(q)
+        self._refresh_tree()
+        self.statusBar().showMessage(f"Otázka přesunuta do {g_name} / {sg_name}.", 4000)
+
 
 # --------------------------- main ---------------------------
 

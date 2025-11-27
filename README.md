@@ -22,6 +22,22 @@ podtržení, barvy, odrážky). Data se ukládají do **JSON** a jsou ve výchoz
 
 ---
 
+## Import z DOCX (nové ve verzi 1.1)
+
+- V menu **Soubor → Import z DOCX…** vyber .docx testy (např. export z Wordu).
+- Aplikace z dokumentu automaticky najde otázky:
+  - **Klasické** – číslované (např. „1. …“) nebo obsahují bodové ohodnocení v textu (ignoruje se, nastaví se **1 bod**).
+  - **BONUS** – bloky obsahující „**Otázka 111**“, „**Otázka 666**“ nebo slovo **BONUS**.
+- Importované otázky se uloží do skupiny **„Neroztříděné“** (vytvoří se automaticky).
+
+> Pozn.: U BONUS otázek se pro import nastavuje výchozí **+1 / 0** (správně / špatně).
+
+## Přesun otázek mezi skupinami
+
+- V menu **Úpravy → Přesunout otázku…** lze aktuálně vybranou otázku přesunout do jiné skupiny / podskupiny.
+
+---
+
 ## Instalace (macOS)
 
 ```bash
@@ -38,7 +54,7 @@ python3 main.py
 ```
 
 > Pozn.: Aplikace vytvoří složku `data/` (pokud neexistuje) a soubor `questions.json`.
-> V menu toolbaru je možné **zvolit jiný JSON soubor** umístěný např. mimo repository.
+> V menu je možné **zvolit jiný JSON soubor** umístěný např. mimo repository.
 
 ---
 
@@ -91,7 +107,7 @@ git init
 git add main.py README.md .gitignore
 
 # 3) První commit
-git commit -m "feat: initial commit for Crypto Exam Generator v1.0"
+git commit -m "feat: initial commit for Crypto Exam Generator v1.1"
 
 # 4) Vytvoření vzdáleného repozitáře a push (privátní)
 gh repo create crypto-exam-generator --private --source=. --remote=origin --push
@@ -113,9 +129,10 @@ Viz přiložený `.gitignore`.
 
 ## Verze
 
-- **Aktuální verze:** `1.0` (release: 2025-11-27)
+- **Aktuální verze:** `1.1` (release: 2025-11-27)
 - Changelog:
-  - `1.0` – První veřejná verze: GUI, skupiny/podskupiny, typy otázek, editor formátování, JSON úložiště.
+  - `1.1` – Import z DOCX, přesun otázek mezi skupinami.
+  - `1.0` – První verze: GUI, skupiny/podskupiny, typy otázek, editor formátování, JSON úložiště.
 
 ---
 
