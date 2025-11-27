@@ -18,6 +18,13 @@ Data se ukládají do **JSON** a jsou ve výchozím nastavení mimo git (`/data`
 
 ## Import z DOCX
 
+### Kde najdu import?
+- **macOS**: menu **Soubor → Import z DOCX…** je v horní systémové liště (vedle názvu aplikace).
+- Navíc je v okně aplikace **tlačítko v toolbaru „Import“**.
+- Klávesová zkratka: **Ctrl+I** (na macOS `⌘I` pokud máš mapování Cmd).
+
+
+
 - V menu **Soubor → Import z DOCX…** vyber .docx testy (např. export z Wordu).
 - Aplikace automaticky najde otázky:
   - **Klasické** – číslované (např. „1. …“); bodování v textu je **ignorováno** a nastaví se **1 bod**.
@@ -73,7 +80,7 @@ python3 main.py
 
 ## Verze
 
-- **Aktuální verze:** `1.2` (release: 2025-11-27)
+- **Aktuální verze:** `1.2a` (release: 2025-11-27)
 - Changelog:
   - `1.2` – Hierarchické podskupiny + drag & drop (autosave po přesunu).
   - `1.1a` – Autosave prázdných skupin/podskupin po přidání/rename/mazání.

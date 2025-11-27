@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.2"  # minor: nested subgroups + drag&drop
+APP_VERSION = "1.2a"  # minor: nested subgroups + drag&drop
 
 # --------------------------- Datové typy ---------------------------
 
@@ -347,11 +347,20 @@ class MainWindow(QMainWindow):
         self.act_import_docx = QAction("Import z DOCX…", self)
         self.act_move_question = QAction("Přesunout otázku…", self)
 
+        # Zkratka pro rychlý import
+        self.act_import_docx.setShortcut("Ctrl+I")
+
         file_menu.addAction(self.act_import_docx)
         edit_menu.addAction(self.act_move_question)
 
         self.act_import_docx.triggered.connect(self._import_from_docx)
         self.act_move_question.triggered.connect(self._move_question)
+
+        # Viditelné tlačítko do toolbaru (pro snazší nalezení)
+        tb_import = self.addToolBar("Import")
+        tb_import.setIconSize(QSize(18, 18))
+        tb_import.addAction(self.act_import_docx)
+
 
     # -------------------- Práce s daty (JSON) --------------------
 
