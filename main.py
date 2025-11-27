@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.3"  # minor: nested subgroups + drag&drop
+APP_VERSION = "1.4"  # minor: nested subgroups + drag&drop
 
 # --------------------------- Datové typy ---------------------------
 
@@ -932,6 +932,100 @@ self.setCentralWidget(splitter)
             self.load_data()
             self._refresh_tree()
 
+
+    # ---- Numbering helpers ----
+    def _read_numbering_map(self, z: zipfile.ZipFile) -> tuple[dict[int, int], dict[tuple[int, int], str]]:
+        """
+        Returns:
+            num_to_abstract: map numId -> abstractNumId
+            fmt_map: map (abstractNumId, ilvl) -> numFmt (e.g., 'decimal', 'lowerLetter', 'bullet')
+        """
+        num_to_abstract: dict[int, int] = {}
+        fmt_map: dict[tuple[int, int], str] = {}
+        try:
+            with z.open("word/numbering.xml") as f:
+                xml = f.read()
+        except KeyError:
+            return num_to_abstract, fmt_map
+
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        root = ET.fromstring(xml)
+
+        # map numId -> abstractNumId
+        for num in root.findall(".//w:num", ns):
+            num_id_el = num.get("{%s}numId" % ns["w"]) or num.attrib.get("w:numId")
+            # some libraries put numId as attribute; but typically it's element value
+            num_id = None
+            if num_id_el is None:
+                # try child w:numId/@w:val
+                nid = num.find("w:numId", ns)
+                if nid is not None and nid.get("{%s}val" % ns["w"]) is not None:
+                    num_id = int(nid.get("{%s}val" % ns["w"]))
+            else:
+                try:
+                    num_id = int(num_id_el)
+                except Exception:
+                    pass
+            if num_id is None:
+                # standard way
+                nid = num.get("{%s}numId" % ns["w"])
+            abstract = num.find("w:abstractNumId", ns)
+            if abstract is not None and abstract.get("{%s}val" % ns["w"]) is not None and num_id is not None:
+                num_to_abstract[num_id] = int(abstract.get("{%s}val" % ns["w"]))
+
+        # map (abstractNumId, ilvl) -> numFmt
+        for absn in root.findall(".//w:abstractNum", ns):
+            abs_id_attr = absn.get("{%s}abstractNumId" % ns["w"])
+            if abs_id_attr is None:
+                # alternate structure: attribute may not be present; try element path
+                # fall back to incremental counter (not ideal); skip
+                continue
+            abs_id = int(abs_id_attr)
+            for lvl in absn.findall("w:lvl", ns):
+                ilvl_attr = lvl.get("{%s}ilvl" % ns["w"])
+                if ilvl_attr is None:
+                    continue
+                ilvl = int(ilvl_attr)
+                numfmt = lvl.find("w:numFmt", ns)
+                fmt = numfmt.get("{%s}val" % ns["w"]) if numfmt is not None else "decimal"
+                fmt_map[(abs_id, ilvl)] = fmt
+        return num_to_abstract, fmt_map
+
+    def _extract_paragraphs_from_docx(self, path: Path) -> list[dict]:
+        """
+        Extract paragraphs with numbering metadata.
+        Returns list of dicts: {'text': str, 'is_numbered': bool, 'num_fmt': str|None, 'ilvl': int|None}
+        """
+        with zipfile.ZipFile(path, "r") as z:
+            with z.open("word/document.xml") as f:
+                xml_bytes = f.read()
+            num_to_abs, fmt_map = self._read_numbering_map(z)
+
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        root = ET.fromstring(xml_bytes)
+        out: list[dict] = []
+        for p in root.findall(".//w:p", ns):
+            ppr = p.find("w:pPr", ns)
+            is_num = False
+            num_fmt = None
+            ilvl = None
+            if ppr is not None:
+                numpr = ppr.find("w:numPr", ns)
+                if numpr is not None:
+                    is_num = True
+                    num_id_el = numpr.find("w:numId", ns)
+                    ilvl_el = numpr.find("w:ilvl", ns)
+                    if ilvl_el is not None and ilvl_el.get("{%s}val" % ns["w"]) is not None:
+                        ilvl = int(ilvl_el.get("{%s}val" % ns["w"]))
+                    if num_id_el is not None and num_id_el.get("{%s}val" % ns["w"]) is not None:
+                        num_id = int(num_id_el.get("{%s}val" % ns["w"]))
+                        abs_id = num_to_abs.get(num_id)
+                        if abs_id is not None:
+                            num_fmt = fmt_map.get((abs_id, ilvl or 0), None)
+            texts = [t.text or "" for t in p.findall(".//w:t", ns)]
+            txt = "".join(texts).strip()
+            out.append({"text": txt, "is_numbered": is_num, "num_fmt": num_fmt, "ilvl": ilvl})
+        return out
     # -------------------- Import z DOCX --------------------
 
     def _import_from_docx(self) -> None:
@@ -993,55 +1087,142 @@ self.setCentralWidget(splitter)
             g.subgroups.append(Subgroup(id=str(uuid.uuid4()), name="Default", subgroups=[], questions=[]))
         return g.id, g.subgroups[0].id
 
-    def _parse_questions_from_paragraphs(self, paragraphs: list[tuple[str, bool]]) -> list[Question]:
-        lines = text.splitlines()
-        blocks = []
-        buf = []
-        def flush():
-            s = "\n".join(buf).strip()
-            if s:
-                blocks.append(s)
-            buf.clear()
-        for ln in lines:
-            if re.match(r"\s*Otázka\s+\d+", ln, flags=re.IGNORECASE):
-                flush()
-                buf.append(ln)
-            elif not ln.strip():
-                flush()
-            else:
-                buf.append(ln)
-        flush()
-
-        def is_noise(block: str) -> bool:
-            hay = block.lower()
-            noise_keys = [
-                "datum:", "jméno", "podpis", "klasifikační", "stupnice", "maximum bodů",
-                "na uvedené otázky", "souhlasíte", "cookies"
-            ]
-            return any(k in hay for k in noise_keys)
-
+    
+    def _parse_questions_from_paragraphs(self, paragraphs: list[dict]) -> list[Question]:
+        """
+        Každý číslovaný odstavec na úrovni 0 (hlavní seznam) je 1 KLASICKÁ otázka.
+        BONUS: odstavec začínající "Otázka <číslo>" nebo obsahující "BONUS".
+        Zachováme jednoduché odrážky/číslování v následujících odstavcích jako HTML listy.
+        """
         out: list[Question] = []
-        for b in blocks:
-            if is_noise(b):
-                continue
-            b_stripped = b.strip()
-            is_bonus = bool(re.search(r"\bOtázka\s+\d+", b_stripped, flags=re.IGNORECASE)) or ("bonus" in b_stripped.lower())
-            is_classic = bool(re.match(r"\s*\d+[\.)]\s", b_stripped)) or (" bod" in b_stripped.lower())
-            qtype = "bonus" if is_bonus else "classic"
-            if qtype == "classic" and not is_classic:
-                if not ("?" in b_stripped or re.search(r"\b(Popište|Uveďte|Zašifrujte|Vysvětlete|Porovnejte|Jaký|Jak|Stručně)\b", b_stripped, re.IGNORECASE)):
-                    continue
-            html_text = "<p>" + html.escape(b_stripped).replace("\n", "<br>") + "</p>"
-            if qtype == "bonus":
-                q = Question.new_default("bonus")
-                q.text_html = html_text
-                q.bonus_correct = 1
-                q.bonus_wrong = 0
+        i = 0
+        n = len(paragraphs)
+
+        rx_scale = re.compile(r'^\s*[A-F]\s*->\s*<[^>]+>\s*bod', re.IGNORECASE)
+        rx_bonus_start = re.compile(r'^\s*Otázka\s+\d+', re.IGNORECASE)
+        rx_classic_numtxt = re.compile(r'^\s*\d+[\.)]\s')
+        rx_question_verb = re.compile(r'\b(Popište|Uveďte|Zašifrujte|Vysvětlete|Porovnejte|Jaký|Jak|Stručně|Lze|Kolik|Která|Co je)\b', re.IGNORECASE)
+
+        def is_noise(text_line: str) -> bool:
+            t0 = (text_line or "").strip().lower()
+            if not t0:
+                return True
+            keys = ['datum:', 'jméno', 'podpis', 'na uvedené otázky', 'maximum bodů', 'klasifikační', 'stupnice', 'souhlasíte', 'cookies']
+            if any(k in t0 for k in keys):
+                return True
+            if rx_scale.search(t0):
+                return True
+            return False
+
+        def is_question_like(t: str) -> bool:
+            return ('?' in t) or bool(rx_question_verb.search(t or ""))
+
+        def html_escape(s: str) -> str:
+            import html as _html
+            return _html.escape(s or "")
+
+        def wrap_list(items: list[tuple[str, int, str]]) -> str:
+            """
+            items: list of (text, ilvl, fmt) where fmt in {'bullet','decimal','lowerLetter','upperLetter',...}
+            We render a simple flat list (ignore nesting depth for now, but keep type).
+            """
+            if not items:
+                return ""
+            # prefer list type by fmt of first item
+            fmt = items[0][2] or "decimal"
+            if fmt == "bullet":
+                tag_open, tag_close = "<ul>", "</ul>"
+            elif fmt == "lowerLetter":
+                tag_open, tag_close = '<ol type="a">', "</ol>"
+            elif fmt == "upperLetter":
+                tag_open, tag_close = '<ol type="A">', "</ol>"
             else:
+                tag_open, tag_close = "<ol>", "</ol>"
+            lis = "".join(f"<li>{html_escape(t)}</li>" for (t, _lvl, _f) in items if t.strip())
+            return f"{tag_open}{lis}{tag_close}"
+
+        while i < n:
+            para = paragraphs[i]
+            txt = para.get("text", "")
+            is_num = bool(para.get("is_numbered"))
+            ilvl = para.get("ilvl")
+            fmt = para.get("num_fmt")
+
+            if is_noise(txt):
+                i += 1
+                continue
+
+            # BONUS otázka
+            if rx_bonus_start.match(txt) or ("bonus" in (txt or "").lower()):
+                block_html = f"<p>{html_escape(txt)}</p>"
+                # přilepíme krátké řádky (ne začátky nové otázky)
+                j = i + 1
+                while j < n:
+                    nt = paragraphs[j].get("text", "")
+                    n_isnum = bool(paragraphs[j].get("is_numbered"))
+                    if not nt.strip() or is_noise(nt) or n_isnum or rx_bonus_start.match(nt) or rx_classic_numtxt.match(nt) or is_question_like(nt):
+                        break
+                    if len(nt.strip()) <= 80:
+                        block_html += f"<p>{html_escape(nt.strip())}</p>"
+                        j += 1
+                    else:
+                        break
+                q = Question.new_default("bonus")
+                q.text_html = block_html
+                q.bonus_correct, q.bonus_wrong = 1, 0
+                out.append(q)
+                i = j
+                continue
+
+            # KLASICKÁ otázka – číslovaný odstavec na top level (ilvl==0) nebo text připomínající otázku
+            is_top_numbered = is_num and (ilvl is None or ilvl == 0)
+            if is_top_numbered or rx_classic_numtxt.match(txt) or is_question_like(txt):
+                # Začneme blok otázky
+                block_html = f"<p>{html_escape(txt)}</p>"
+                list_buffer: list[tuple[str, int, str]] = []
+                j = i + 1
+                while j < n:
+                    next_txt = paragraphs[j].get("text", "")
+                    next_isnum = bool(paragraphs[j].get("is_numbered"))
+                    next_ilvl = paragraphs[j].get("ilvl")
+                    next_fmt = paragraphs[j].get("num_fmt")
+
+                    if not next_txt.strip() or is_noise(next_txt):
+                        j += 1
+                        continue
+
+                    # Nový začátek otázky?
+                    if (next_isnum and (next_ilvl is None or next_ilvl == 0)) or rx_bonus_start.match(next_txt) or rx_classic_numtxt.match(next_txt) or is_question_like(next_txt):
+                        break
+
+                    # List item (odrážka / a., b., 1. ...)
+                    if next_isnum:
+                        list_buffer.append((next_txt.strip(), next_ilvl or 0, (next_fmt or "decimal")))
+                        j += 1
+                        # pokud následuje delší text bez číslování, necháme ho na další zpracování
+                        continue
+
+                    # Krátký řádek (např. "DES + 3DES", "AES", ...), přilepit jako odstavec
+                    if len(next_txt.strip()) <= 120:
+                        block_html += f"<p>{html_escape(next_txt.strip())}</p>"
+                        j += 1
+                        continue
+
+                    break  # delší nečíslované = pravděpodobně jiný blok
+
+                # Přidej nasbíraný list (pokud existuje)
+                if list_buffer:
+                    block_html += wrap_list(list_buffer)
+
                 q = Question.new_default("classic")
-                q.text_html = html_text
+                q.text_html = block_html
                 q.points = 1
-            out.append(q)
+                out.append(q)
+                i = j
+                continue
+
+            i += 1
+
         return out
 
     # -------------------- Přesun otázky (menu – zachováno) --------------------

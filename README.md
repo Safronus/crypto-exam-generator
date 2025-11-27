@@ -80,7 +80,7 @@ python3 main.py
 
 ## Verze
 
-- **Aktuální verze:** `1.3` (release: 2025-11-27)
+- **Aktuální verze:** `1.4` (release: 2025-11-27)
 - Changelog:
   - `1.2` – Hierarchické podskupiny + drag & drop (autosave po přesunu).
   - `1.1a` – Autosave prázdných skupin/podskupin po přidání/rename/mazání.
@@ -111,3 +111,13 @@ Zvol dle potřeby (např. MIT).
   ignoruje se klasifikační škála „**A -> <...> bodů**“ a podobné instrukce.
 - **Multiselect + hromadné akce:** nad stromem je **filtr** (název/obsah) a tlačítka **Přesunout vybrané…** a **Smazat vybrané**.
 - **Filtr:** hledá v názvech skupin/podskupin i v textu otázek (HTML se převádí na čistý text).
+
+
+---
+
+## Novinky ve verzi 1.4
+
+- **Import DOCX (fix):** opravena chyba `name 'text' is not defined` a spolehlivější detekce **1..10** podle wordového číslování (`w:numPr`).  
+- **Ignorace škály A–F:** řádky typu `A -> <...> bodů` až `F -> ...` se vynechají.  
+- **Zachování odrážek/číslování:** následné odstavce s odrážkami nebo číslovanými položkami se převádějí do HTML seznamů (`<ul>`, `<ol type="a">`, `<ol>`).  
+- **Výsledek:** Každá očíslovaná otázka je **samostatná položka**, BONUS otázky zachovány.
