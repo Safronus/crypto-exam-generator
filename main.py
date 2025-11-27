@@ -425,6 +425,7 @@ class MainWindow(QMainWindow):
         g = Group(id=str(uuid.uuid4()), name=name.strip(), subgroups=[])
         self.root.groups.append(g)
         self._refresh_tree()
+        self.save_data()
 
     def _add_subgroup(self) -> None:
         kind, meta = self._selected_node()
@@ -442,6 +443,7 @@ class MainWindow(QMainWindow):
         sg = Subgroup(id=str(uuid.uuid4()), name=name.strip(), questions=[])
         g.subgroups.append(sg)
         self._refresh_tree()
+        self.save_data()
 
     def _add_question(self) -> None:
         kind, meta = self._selected_node()
@@ -488,6 +490,7 @@ class MainWindow(QMainWindow):
                     sg.questions = [q for q in sg.questions if q.id != qid]
                     self._refresh_tree()
                     self._clear_editor()
+                    self.save_data()
         elif kind == "subgroup":
             gid = meta["parent_group_id"]
             sgid = meta["id"]
@@ -497,12 +500,14 @@ class MainWindow(QMainWindow):
                     g.subgroups = [s for s in g.subgroups if s.id != sgid]
                     self._refresh_tree()
                     self._clear_editor()
+                    self.save_data()
         elif kind == "group":
             gid = meta["id"]
             if QMessageBox.question(self, "Smazat skupinu", "Smazat celou skupinu včetně podskupin a otázek?") == QMessageBox.Yes:
                 self.root.groups = [g for g in self.root.groups if g.id != gid]
                 self._refresh_tree()
                 self._clear_editor()
+                self.save_data()
 
     def _on_rename_clicked(self) -> None:
         kind, meta = self._selected_node()
@@ -521,6 +526,7 @@ class MainWindow(QMainWindow):
             if sg:
                 sg.name = new_name
         self._refresh_tree()
+        self.save_data()
 
     # -------------------- Výběr v tree → načtení detailu --------------------
 
