@@ -83,7 +83,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "1.8c"
+APP_VERSION = "5.9.2"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2355,7 +2355,11 @@ class MainWindow(QMainWindow):
         return g.id, g.subgroups[0].id
 
     def _import_from_docx(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "Import z DOCX", str(self.project_root), "Word dokument (*.docx)")
+        # Výchozí složka pro import
+        import_dir = self.project_root / "data" / "Staré písemky"
+        import_dir.mkdir(parents=True, exist_ok=True)
+
+        paths, _ = QFileDialog.getOpenFileNames(self, "Import z DOCX", str(import_dir), "Word dokument (*.docx)")
         if not paths:
             return
         g_id, sg_id = self._ensure_unassigned_group()
@@ -2377,6 +2381,7 @@ class MainWindow(QMainWindow):
         self.save_data()
         if total:
             self.statusBar().showMessage(f"Import hotov: {total} otázek do 'Neroztříděné'.", 6000)
+
 
     # -------------------- Přesun otázky --------------------
 
