@@ -80,7 +80,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QTreeWidgetItemIterator,
-    QHeaderView
+    QHeaderView, QMenu
 )
 
 APP_NAME = "Crypto Exam Generator"
@@ -1318,13 +1318,20 @@ class ExportWizard(QWizard):
 
 class FunnyAnswerDialog(QDialog):
     """Dialog pro přidání nové vtipné odpovědi."""
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, project_root: Optional[Path] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Přidat vtipnou odpověď")
-        self.resize(500, 350)
+        self.resize(600, 400)
+        
+        self.project_root = project_root
         
         layout = QVBoxLayout(self)
         form = QFormLayout()
+        
+        # Výběr zdrojové písemky
+        self.combo_source = QComboBox()
+        self.combo_source.addItem("(Ruční zadání / Bez vazby na soubor)", None)
+        self.combo_source.currentIndexChanged.connect(self._on_source_changed)
         
         self.text_edit = QTextEdit()
         self.text_edit.setPlaceholderText("Znění vtipné odpovědi...")
@@ -1333,9 +1340,10 @@ class FunnyAnswerDialog(QDialog):
         self.author_edit.setPlaceholderText("Např. Student, Anonym...")
         
         self.date_edit = QDateTimeEdit(QDateTime.currentDateTime())
-        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setDisplayFormat("dd.MM.yyyy HH:mm") # Přidán i čas pro kontrolu
         self.date_edit.setCalendarPopup(True)
 
+        form.addRow("Zdroj písemky:", self.combo_source)
         form.addRow("Odpověď:", self.text_edit)
         form.addRow("Autor:", self.author_edit)
         form.addRow("Datum:", self.date_edit)
@@ -1346,14 +1354,70 @@ class FunnyAnswerDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
+        
+        # Načtení souborů
+        self._load_files()
+
+    def _load_files(self) -> None:
+        if not self.project_root:
+            return
+            
+        base_dir = self.project_root / "data" / "Vygenerované testy"
+        if not base_dir.exists():
+            return
+            
+        # Rekurzivní vyhledání všech .docx
+        found_files = sorted(base_dir.rglob("*.docx"), key=lambda p: p.stat().st_mtime, reverse=True)
+        
+        for p in found_files:
+            # Zobrazíme relativní cestu vůči složce vygenerovaných testů pro přehlednost
+            try:
+                rel_path = p.relative_to(base_dir)
+                display_text = str(rel_path)
+            except ValueError:
+                display_text = p.name
+            
+            self.combo_source.addItem(display_text, str(p))
+
+    def _on_source_changed(self, index: int) -> None:
+        data = self.combo_source.itemData(index)
+        if not data:
+            return
+            
+        path = Path(data)
+        filename = path.name
+        
+        # Očekávaný formát: Prefix_YYYY-MM-DD_HHMM_...
+        parts = filename.split('_')
+        
+        if len(parts) >= 3:
+            date_str = parts[1]  # YYYY-MM-DD
+            time_str = parts[2]  # HHMM
+            
+            # Validace a parsování
+            try:
+                # Datum
+                qdate = QDateTime.fromString(date_str, "yyyy-MM-dd").date()
+                
+                # Čas (HHMM)
+                qtime = QDateTime.fromString(time_str, "HHmm").time()
+                
+                if qdate.isValid() and qtime.isValid():
+                    dt = QDateTime(qdate, qtime)
+                    self.date_edit.setDateTime(dt)
+            except Exception:
+                # Pokud parsování selže, neděláme nic (necháme aktuální)
+                pass
 
     def get_data(self) -> tuple[str, str, str]:
+        # Vracíme datum ve formátu stringu, jak je zvykem v aplikaci (bez času, nebo s časem dle preference?)
+        # Původní kód používal dd.MM.yyyy, ale formát v tabulce FunnyAnswer je jen string.
+        # Pokud chceme zachovat čas získaný z názvu souboru, formátujeme ho.
         return (
             self.text_edit.toPlainText().strip(),
-            self.date_edit.text(),
+            self.date_edit.dateTime().toString("dd.MM.yyyy HH:mm"), 
             self.author_edit.text().strip()
         )
-
 
 class MainWindow(QMainWindow):
     """Hlavní okno aplikace."""
@@ -1689,11 +1753,12 @@ class MainWindow(QMainWindow):
         self.btn_rem_funny.clicked.connect(self._remove_funny_row)
 
     def _add_funny_row(self) -> None:
-        dlg = FunnyAnswerDialog(self)
+        # Předáváme self.project_root pro vyhledání souborů
+        dlg = FunnyAnswerDialog(self, project_root=self.project_root)
+        
         if dlg.exec() == QDialog.Accepted:
             text, date_str, author = dlg.get_data()
             
-            # I když je text prázdný, povolíme vložení, pokud uživatel chce
             row = self.table_funny.rowCount()
             self.table_funny.insertRow(row)
             
@@ -1702,6 +1767,7 @@ class MainWindow(QMainWindow):
             self.table_funny.setItem(row, 2, QTableWidgetItem(author))
             
             self._autosave_schedule()
+
 
     def _remove_funny_row(self) -> None:
         rows = sorted(set(index.row() for index in self.table_funny.selectedIndexes()), reverse=True)
@@ -1865,6 +1931,18 @@ class MainWindow(QMainWindow):
             bw = round(float(q.get("bonus_wrong", bw_default)), 2)
         except Exception:
             bw = round(float(bw_default), 2)
+            
+        # NOVÉ: Deserializace vtipných odpovědí
+        f_answers_raw = q.get("funny_answers", [])
+        f_answers = []
+        for item in f_answers_raw:
+            if isinstance(item, dict):
+                f_answers.append(FunnyAnswer(
+                    text=item.get("text", ""),
+                    date=item.get("date", ""),
+                    author=item.get("author", "")
+                ))
+                
         return Question(
             id=q.get("id", ""),
             type=q.get("type", "classic"),
@@ -1874,7 +1952,10 @@ class MainWindow(QMainWindow):
             bonus_correct=bc,
             bonus_wrong=bw,
             created_at=q.get("created_at", ""),
+            correct_answer=q.get("correct_answer", ""),
+            funny_answers=f_answers
         )
+
 
     def _serialize_group(self, g: Group) -> dict:
         return {"id": g.id, "name": g.name, "subgroups": [self._serialize_subgroup(sg) for sg in g.subgroups]}
