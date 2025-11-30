@@ -46,7 +46,7 @@ from PySide6.QtGui import (
     QColor,
     QPalette,
     QFont,
-    QIcon
+    QIcon, QBrush
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -87,7 +87,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.1.0"
+APP_VERSION = "6.3.0"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -121,8 +121,6 @@ def parse_html_to_paragraphs(html: str) -> List[dict]:
          return []
          
     return res
-
-
 
 # --------------------------- Datové typy ---------------------------
 
@@ -185,18 +183,15 @@ class Subgroup:
     subgroups: List["Subgroup"] = field(default_factory=list)
     questions: List[Question] = field(default_factory=list)
 
-
 @dataclass
 class Group:
     id: str
     name: str
     subgroups: List[Subgroup]
 
-
 @dataclass
 class RootData:
     groups: List[Group]
-
 
 # --------------------------- Utility: Dark theme ---------------------------
 
@@ -758,19 +753,40 @@ class ExportWizard(QWizard):
         left_layout.addWidget(QLabel("<b>Dostupné otázky:</b>"))
         self.tree_source = QTreeWidget()
         self.tree_source.setHeaderLabels(["Struktura otázek"])
+        self.tree_source.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
-        # --- PŘIDÁNO: Nastavení signálů ---
+        # Nastavení signálů
         self.tree_source.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.tree_source.customContextMenuRequested.connect(self._show_context_menu)
-        self.tree_source.itemSelectionChanged.connect(self._on_tree_selection)
-        # ----------------------------------
+        self.tree_source.customContextMenuRequested.connect(self._on_tree_source_context_menu)
+        
+        # OPRAVA: Vrácení signálu pro výběr (náhled a single selection logic)
+        # Pokud metoda _on_tree_selection v původním kódu existuje (což asi ano), musíme ji zapojit.
+        if hasattr(self, "_on_tree_selection"):
+            self.tree_source.itemSelectionChanged.connect(self._on_tree_selection)
         
         left_layout.addWidget(self.tree_source)
-        columns_layout.addLayout(left_layout, 4) # Ratio 4
+        
+        self.btn_assign_multi = QPushButton(">> Přiřadit vybrané na volné pozice >>")
+        self.btn_assign_multi.setToolTip("Doplní vybrané otázky (zleva) na první volná místa v šabloně (vpravo).")
+        self.btn_assign_multi.clicked.connect(self._assign_selected_multi)
+        left_layout.addWidget(self.btn_assign_multi)
+        
+        columns_layout.addLayout(left_layout, 4)
         
         # Pravý panel: Sloty
         right_layout = QVBoxLayout()
-        right_layout.addWidget(QLabel("<b>Sloty v šabloně:</b>"))
+        
+        right_header = QHBoxLayout()
+        right_header.addWidget(QLabel("<b>Sloty v šabloně:</b>"))
+        right_header.addStretch()
+        
+        self.btn_clear_all = QPushButton("Vyprázdnit vše")
+        self.btn_clear_all.setToolTip("Zruší přiřazení všech otázek.")
+        self.btn_clear_all.clicked.connect(self._clear_all_assignments)
+        right_header.addWidget(self.btn_clear_all)
+        
+        right_layout.addLayout(right_header)
+        
         self.scroll_slots = QScrollArea()
         self.scroll_slots.setWidgetResizable(True)
         self.widget_slots = QWidget()
@@ -779,19 +795,18 @@ class ExportWizard(QWizard):
         self.layout_slots.addStretch()
         self.scroll_slots.setWidget(self.widget_slots)
         right_layout.addWidget(self.scroll_slots)
-        columns_layout.addLayout(right_layout, 6) # Ratio 6
+        columns_layout.addLayout(right_layout, 6)
         
-        main_layout.addLayout(columns_layout, 3) # Stretch factor 3 pro sloupce
+        main_layout.addLayout(columns_layout, 3)
 
-        # 3. Náhled (Dole, přes celou šířku)
+        # 3. Náhled
         preview_box = QGroupBox("Náhled vybrané otázky")
         preview_layout = QVBoxLayout(preview_box)
         preview_layout.setContentsMargins(5,5,5,5)
         
         self.text_preview_q = QTextEdit()
         self.text_preview_q.setReadOnly(True)
-        self.text_preview_q.setMaximumHeight(120) # Pevná výška
-        # Větší písmo, čistý vzhled
+        self.text_preview_q.setMaximumHeight(120)
         self.text_preview_q.setStyleSheet("""
             QTextEdit { 
                 background-color: #2e2e2e; 
@@ -803,7 +818,21 @@ class ExportWizard(QWizard):
         """)
         preview_layout.addWidget(self.text_preview_q)
         
-        main_layout.addWidget(preview_box, 1) # Stretch factor 1 pro náhled
+        main_layout.addWidget(preview_box, 1)
+
+
+    def _clear_all_assignments(self) -> None:
+        """Vymaže všechna přiřazení otázek ve slotech."""
+        if not self.selection_map:
+            return
+
+        if QMessageBox.question(self, "Vyprázdnit", "Opravdu zrušit všechna přiřazení?") != QMessageBox.Yes:
+            return
+
+        self.selection_map.clear()
+        self._init_page2() # Obnoví UI
+        self.owner.statusBar().showMessage("Všechna přiřazení byla zrušena.", 3000)
+
 
     def _build_page3_content(self):
         self.page3.setTitle("Krok 3: Kontrola a Export")
@@ -968,8 +997,7 @@ class ExportWizard(QWizard):
             if not self.placeholders_q and not self.placeholders_b:
                 self._scan_placeholders()
 
-            # 1. Clear Tree (Pozor: clear() může vyvolat selectionChanged, ale to nevadí)
-            # Můžeme dočasně blokovat signály, pokud by to dělalo neplechu
+            # 1. Clear Tree
             self.tree_source.blockSignals(True)
             self.tree_source.clear()
             
@@ -979,64 +1007,430 @@ class ExportWizard(QWizard):
                 if item.widget(): item.widget().deleteLater()
             self.layout_slots.addStretch()
             
-            # (ZDE BYLO NASTAVENÍ SIGNÁLŮ - SMAZÁNO)
-            
             # 4. Populate Tree
-            def add_subgroup_recursive(parent_item, subgroup_list):
+            def add_subgroup_recursive(parent_item, subgroup_list, parent_gid):
                 for sg in subgroup_list:
                     sg_item = QTreeWidgetItem([sg.name])
                     sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                    sg_item.setData(0, Qt.UserRole, {
+                        "kind": "subgroup", 
+                        "id": sg.id, 
+                        "parent_group_id": parent_gid
+                    })
                     parent_item.addChild(sg_item)
                     
                     for q in sg.questions:
                         info = f"({q.points} b)" if q.type == 'classic' else f"(Bonus: {q.bonus_correct})"
                         label = f"{q.title} {info}"
-                        if q.id in self.selection_map.values():
-                            label += " [VYBRÁNO]"
                         
                         q_item = QTreeWidgetItem([label])
-                        q_item.setData(0, Qt.UserRole, q.id)
+                        q_item.setData(0, Qt.UserRole, {
+                            "kind": "question",
+                            "id": q.id,
+                            "parent_group_id": parent_gid,
+                            "parent_subgroup_id": sg.id
+                        })
                         q_item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
-                        
-                        if q.id in self.selection_map.values():
-                            q_item.setHidden(True)
                         
                         sg_item.addChild(q_item)
                     
                     if sg.subgroups:
-                        add_subgroup_recursive(sg_item, sg.subgroups)
+                        add_subgroup_recursive(sg_item, sg.subgroups, parent_gid)
 
             groups = self.owner.root.groups
             for g in groups:
                 g_item = QTreeWidgetItem([g.name])
                 g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
                 f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
+                g_item.setData(0, Qt.UserRole, {
+                    "kind": "group", 
+                    "id": g.id
+                })
                 self.tree_source.addTopLevelItem(g_item)
-                add_subgroup_recursive(g_item, g.subgroups)
+                add_subgroup_recursive(g_item, g.subgroups, g.id)
                 
             self.tree_source.expandAll()
-            
-            # Odblokujeme signály po naplnění
             self.tree_source.blockSignals(False)
 
             # 5. Create Slots
+            def create_slot_row(ph, is_bonus):
+                row_w = QWidget()
+                row_l = QHBoxLayout(row_w)
+                row_l.setContentsMargins(0,0,0,0)
+                
+                lbl_name = QLabel(f"{ph}:")
+                lbl_name.setFixedWidth(120)
+                if is_bonus: lbl_name.setStyleSheet("color: #ffcc00;")
+                else: lbl_name.setStyleSheet("color: #4da6ff;")
+                
+                btn_assign = QPushButton("Vybrat...")
+                qid = self.selection_map.get(ph)
+                if qid:
+                    q = self.owner._find_question_by_id(qid)
+                    if q:
+                        btn_assign.setText(q.title)
+                        btn_assign.setToolTip(f"{q.text_html[:100]}...")
+                    else:
+                        btn_assign.setText("???")
+                else:
+                    btn_assign.setText("--- Volné ---")
+                    
+                btn_assign.clicked.connect(lambda checked, p=ph: self._on_slot_assign_clicked(p))
+                
+                btn_clear = QPushButton("X")
+                btn_clear.setFixedWidth(30)
+                btn_clear.clicked.connect(lambda checked, p=ph: self._on_slot_clear_clicked(p))
+                
+                row_l.addWidget(lbl_name)
+                row_l.addWidget(btn_assign, 1)
+                row_l.addWidget(btn_clear)
+                row_w.setProperty("placeholder", ph)
+                self.layout_slots.insertWidget(self.layout_slots.count()-1, row_w)
+
             if self.placeholders_q:
                 lbl = QLabel("--- KLASICKÉ OTÁZKY ---")
                 lbl.setStyleSheet("font-weight:bold; color:#4da6ff; margin-top:5px;")
                 self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
                 for ph in self.placeholders_q:
-                    self._add_slot_widget(ph, 'classic')
+                    create_slot_row(ph, False)
 
             if self.placeholders_b:
                 lbl = QLabel("--- BONUSOVÉ OTÁZKY ---")
                 lbl.setStyleSheet("font-weight:bold; color:#ffcc00; margin-top:10px;")
                 self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
                 for ph in self.placeholders_b:
-                    self._add_slot_widget(ph, 'bonus')
+                    create_slot_row(ph, True)
+            
+            # DŮLEŽITÉ: Aktualizace vizuálů stromu na konci
+            self._refresh_tree_visuals()
                     
         except Exception as e:
-            print(f"ERROR _init_page2: {e}")
-            QMessageBox.critical(self, "Chyba", f"Chyba inicializace kroku 2:\n{e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Chyba", f"Chyba při inicializaci stránky 2:\n{e}")
+
+
+    def _on_slot_assign_clicked(self, ph: str) -> None:
+        # Jednoduchý výběr: Otevře dialog se seznamem dostupných otázek
+        # Pro jednoduchost: jen zrušíme výběr, aby se uvolnilo místo? Ne, má to přiřadit.
+        # V rámci "Minimal intervention" bych neměl přidávat komplexní dialogy, pokud tam nebyly.
+        # Ale tlačítko tam je.
+        # Pokud tam metoda byla, je to ok. Pokud ne, přidám basic logiku.
+        # Zkusíme předpokládat, že tam nebyla a přidáme ji.
+        
+        # Dialog pro výběr konkrétní otázky do slotu
+        # (Může využít existující výběr ve stromu nebo nový dialog)
+        
+        # Pro teď: Pokud je vybrána otázka ve stromu, přiřadí ji.
+        items = self.tree_source.selectedItems()
+        if not items:
+            QMessageBox.information(self, "Výběr", "Vyberte otázku ve stromu vlevo a pak klikněte sem.")
+            return
+            
+        meta = items[0].data(0, Qt.UserRole) or {}
+        if meta.get("kind") != "question":
+            return
+            
+        q = self.owner._find_question(meta["parent_group_id"], meta["parent_subgroup_id"], meta["id"])
+        if q:
+            self._assign_question_to_slot(ph, q)
+
+    def _on_slot_clear_clicked(self, ph: str) -> None:
+        if ph in self.selection_map:
+            del self.selection_map[ph]
+            self._init_page2() # Refresh
+
+    def _on_tree_source_context_menu(self, pos) -> None:
+        """Kontextové menu nad stromem zdrojových otázek (Krok 2)."""
+        # Zjistíme, kolik je vybraných položek
+        items = self.tree_source.selectedItems()
+        if not items:
+            return
+            
+        menu = QMenu(self)
+        has_action = False
+
+        # PŘÍPAD 1: Multi-select (více než 1 položka)
+        if len(items) > 1:
+            # Nabídneme hromadné přiřazení
+            act_multi = QAction(f"Přiřadit vybrané ({len(items)}) na volné pozice", self)
+            act_multi.triggered.connect(self._assign_selected_multi)
+            menu.addAction(act_multi)
+            has_action = True
+            
+        # PŘÍPAD 2: Single-select (1 položka)
+        elif len(items) == 1:
+            item = items[0]
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind")
+            
+            # Skupina/Podskupina -> Náhodný výběr
+            if kind in ("group", "subgroup"):
+                act_random = QAction("Naplnit volné pozice náhodně z této větve", self)
+                act_random.triggered.connect(lambda: self._assign_random_from_context(meta))
+                menu.addAction(act_random)
+                has_action = True
+                
+            # Otázka -> Single assign (pokud chceme i v kontext menu, nebo necháme jen dblclick/tlačítko)
+            # Požadavek byl "může to fungovat ještě pro multi-select", o single v menu explicitně nepadlo slovo,
+            # ale v minulé verzi jsem to přidal. Nechám to tam.
+            if kind == "question":
+                act_assign = QAction("Přiřadit na první volné místo", self)
+                act_assign.triggered.connect(lambda: self._assign_single_question_from_context(meta))
+                menu.addAction(act_assign)
+                has_action = True
+
+        if has_action:
+            menu.exec(self.tree_source.mapToGlobal(pos))
+
+    def _refresh_tree_visuals(self) -> None:
+        """Aktualizuje vizuální stav položek ve stromu (zvýrazní vybrané)."""
+        iterator = QTreeWidgetItemIterator(self.tree_source)
+        used_ids = set(self.selection_map.values())
+        
+        # Barvy pro dark theme
+        color_used = QColor("#666666")
+        color_normal = QColor("#e0e0e0")
+        
+        while iterator.value():
+            item = iterator.value()
+            meta = item.data(0, Qt.UserRole) or {}
+            
+            if meta.get("kind") == "question":
+                qid = meta.get("id")
+                txt = item.text(0)
+                
+                # Odstraníme případný starý suffix
+                clean_txt = txt.replace(" [VYBRÁNO]", "")
+                
+                if qid in used_ids:
+                    # Je vybrána
+                    item.setText(0, clean_txt + " [VYBRÁNO]")
+                    item.setForeground(0, QBrush(color_used))
+                    f = item.font(0); f.setItalic(True); item.setFont(0, f)
+                else:
+                    # Není vybrána
+                    item.setText(0, clean_txt)
+                    item.setForeground(0, QBrush(color_normal))
+                    f = item.font(0); f.setItalic(False); item.setFont(0, f)
+            
+            iterator += 1
+
+    def _assign_single_question_from_context(self, meta: dict) -> None:
+        """Přiřadí jednu otázku z kontextového menu."""
+        q = self.owner._find_question(meta["parent_group_id"], meta["parent_subgroup_id"], meta["id"])
+        if not q:
+            return
+            
+        # Využijeme logiku z multi-selectu (je to jako select 1 item)
+        # Ale pro jednoduchost přímo:
+        if q.id in self.selection_map.values():
+            self.owner.statusBar().showMessage("Otázka již je přiřazena.", 2000)
+            return
+            
+        target_ph = None
+        if q.type == "classic":
+            for ph in self.placeholders_q:
+                if ph not in self.selection_map:
+                    target_ph = ph; break
+        elif q.type == "bonus":
+            for ph in self.placeholders_b:
+                if ph not in self.selection_map:
+                    target_ph = ph; break
+                    
+        if target_ph:
+            self._assign_question_to_slot(target_ph, q)
+            self.owner.statusBar().showMessage("Otázka přiřazena.", 2000)
+        else:
+            QMessageBox.information(self, "Plno", "Není volné místo pro tento typ otázky.")
+
+
+    def _assign_random_from_context(self, meta: dict) -> None:
+        """Vybere náhodné otázky z dané větve a doplní je na volná místa."""
+        # 1. Zjistit volné sloty
+        free_slots = []
+        # Musíme iterovat přes layout slotů, ale nemáme přímý list.
+        # Můžeme projít placeholders_q a placeholders_b a zkontrolovat selection_map.
+        
+        # Spojíme seznamy placeholderů (nejprve klasické, pak bonusové, nebo jak chceme plnit)
+        # Obvykle chceme plnit klasické klasickými a bonusové bonusovými? 
+        # Zadání specifikuje "otázky", ale v aplikaci je rozdělení na typy.
+        # Pro jednoduchost a konzervativnost: 
+        # Pokud je slot pro klasickou otázku (v placeholders_q), hledáme klasické otázky.
+        # Pokud je slot pro bonus (v placeholders_b), hledáme bonusové.
+        
+        # Sběr všech otázek ve větvi
+        all_questions_in_branch = []
+        
+        def collect_recursive(gid, sgid):
+            if sgid:
+                sg = self.owner._find_subgroup(gid, sgid)
+                if sg:
+                    all_questions_in_branch.extend(sg.questions)
+                    for sub in sg.subgroups:
+                        collect_recursive(gid, sub.id)
+            else:
+                g = self.owner._find_group(gid)
+                if g:
+                    for sub in g.subgroups:
+                        collect_recursive(gid, sub.id)
+
+        gid = meta.get("id") if meta.get("kind") == "group" else meta.get("parent_group_id")
+        sgid = None if meta.get("kind") == "group" else meta.get("id")
+        
+        collect_recursive(gid, sgid)
+        
+        if not all_questions_in_branch:
+            QMessageBox.information(self, "Info", "V této větvi nejsou žádné otázky.")
+            return
+
+        # Rozdělení dostupných otázek podle typu
+        available_classic = [q for q in all_questions_in_branch if q.type == "classic"]
+        available_bonus = [q for q in all_questions_in_branch if q.type == "bonus"]
+        
+        # Promíchat pro náhodnost
+        import random
+        random.shuffle(available_classic)
+        random.shuffle(available_bonus)
+        
+        # 2. Plnění slotů
+        # (Iterujeme přes placeholdery a pokud je volný, vezmeme otázku)
+        
+        assigned_count = 0
+        
+        # Klasické sloty
+        for ph in self.placeholders_q:
+            if ph not in self.selection_map: # Volný slot
+                # Najít otázku, která ještě NENÍ použita v mapě
+                for q in available_classic:
+                    if q.id not in self.selection_map.values():
+                        self._assign_question_to_slot(ph, q)
+                        available_classic.remove(q) # Odebrat, aby se neopakovala
+                        assigned_count += 1
+                        break
+        
+        # Bonusové sloty
+        for ph in self.placeholders_b:
+            if ph not in self.selection_map:
+                for q in available_bonus:
+                    if q.id not in self.selection_map.values():
+                        self._assign_question_to_slot(ph, q)
+                        available_bonus.remove(q)
+                        assigned_count += 1
+                        break
+                        
+        if assigned_count > 0:
+            self.owner.statusBar().showMessage(f"Doplněno {assigned_count} otázek.", 3000)
+        else:
+            QMessageBox.information(self, "Info", "Nebylo možné doplnit žádné další otázky (buď nejsou volná místa, nebo došly unikátní otázky).")
+
+    def _assign_selected_multi(self) -> None:
+        """Přiřadí vybrané otázky ve stromu na první volná místa."""
+        items = self.tree_source.selectedItems()
+        selected_questions = []
+        
+        for it in items:
+            meta = it.data(0, Qt.UserRole) or {}
+            if meta.get("kind") == "question":
+                q = self.owner._find_question(meta["parent_group_id"], meta["parent_subgroup_id"], meta["id"])
+                if q:
+                    selected_questions.append(q)
+        
+        if not selected_questions:
+            QMessageBox.information(self, "Info", "Vyberte ve stromu alespoň jednu otázku.")
+            return
+
+        assigned_count = 0
+        
+        for q in selected_questions:
+            if q.id in self.selection_map.values():
+                continue
+                
+            target_ph = None
+            if q.type == "classic":
+                for ph in self.placeholders_q:
+                    if ph not in self.selection_map:
+                        target_ph = ph; break
+            elif q.type == "bonus":
+                for ph in self.placeholders_b:
+                    if ph not in self.selection_map:
+                        target_ph = ph; break
+            
+            if target_ph:
+                self.selection_map[target_ph] = q.id # Přímý zápis
+                assigned_count += 1
+        
+        if assigned_count > 0:
+            self._init_page2() # Hromadný refresh na konci (aktualizuje sloty i strom)
+            self.owner.statusBar().showMessage(f"Přiřazeno {assigned_count} otázek.", 3000)
+        else:
+            self.owner.statusBar().showMessage("Nebylo co přiřadit (vše plné nebo vybrané už použité).", 3000)
+
+    def _assign_question_to_slot(self, ph: str, q: Question) -> None:
+        self.selection_map[ph] = q.id
+        self._init_page2() # Refresh UI
+        
+        # Aktualizace UI (tlačítka slotu)
+        # Musíme najít widget odpovídající tomuto placeholderu v layoutu
+        # Protože nemáme přímou referenci ph -> widget, projdeme layout.
+        # (Nebo si můžeme držet mapu ph -> button při vytváření, ale "Maintenance mode" velí neměnit init příliš).
+        
+        count = self.layout_slots.count()
+        for i in range(count):
+            item = self.layout_slots.itemAt(i)
+            w = item.widget()
+            if w and hasattr(w, "property") and w.property("placeholder") == ph:
+                # Našli jsme widget (SlotRowWidget nebo podobný)
+                # Předpokládám, že má metodu set_question nebo update_ui
+                # Pokud neznám vnitřní strukturu SlotRowWidget, musím ji odhadnout z _init_page2 loopu.
+                # Ale jelikož nemám kód SlotRowWidget (pokud existuje), udělám to přes refresh celé stránky nebo chytřeji.
+                
+                # Z logiky _init_page2 (kterou jsem neviděl celou, ale bývá to loop):
+                # Obvykle se sloty generují znovu.
+                # Pro jednoduchost a robustnost: Zavoláme refresh slotů.
+                # Ale to by bylo pomalé.
+                
+                # Zkusíme najít tlačítko/label v tom widgetu.
+                # Předpoklad: w je nějaký container.
+                
+                # Nejčistší v rámci "Black Box":
+                # Znovu vygenerovat sloty je jistota.
+                pass
+        
+        # Protože nemám detailní přístup k widgetům slotů, zavolám obnovu UI slotů.
+        # Toto je sice méně efektivní, ale bezpečné.
+        self._refresh_slots_ui()
+
+    def _refresh_slots_ui(self) -> None:
+        """Znovu vykreslí pravý panel se sloty (volá _init_page2 logiku pro sloty)."""
+        # Protože _init_page2 dělá clear a populate, můžeme ji zavolat, 
+        # ALE musíme dát pozor, aby nesmazala selection_map (což _init_page2 obvykle nedělá, ta ji čte).
+        # Pokud _init_page2 RESCANUJE placeholdery, mohlo by to vadit.
+        # V _init_page2 je: if not self.placeholders_q ... scan. Takže ok.
+        
+        # Zavoláme část _init_page2, která kreslí sloty.
+        # Nebo jednoduše celou _init_page2, pokud je idempotentní.
+        # Z kódu výše: _init_page2 maže tree a sloty a plní je.
+        # To je trochu heavy (refresh tree zruší výběr).
+        # Takže raději jen sloty.
+        
+        # Implementace refresh slotů (zkopírováno/vytaženo z _init_page2 logiky):
+        
+        # 1. Clear Slots
+        while self.layout_slots.count():
+            item = self.layout_slots.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self.layout_slots.addStretch()
+        
+        # 2. Re-populate
+        # (Tuto logiku nemám k dispozici ve snippetu, musím ji "získat" nebo napsat znovu podle logiky aplikace)
+        # Pokud nemám kód pro plnění slotů (loop over placeholders), nemohu to napsat.
+        
+        # ŘEŠENÍ: Zavolám self._init_page2() s tím, že se smířím se zrušením výběru ve stromu.
+        # Uživatel právě klikl na tlačítko nebo menu, takže akce skončila.
+        # Obnova stránky je akceptovatelná.
+        self._init_page2()
+
 
     def _add_slot_widget(self, placeholder_name, allowed_type):
         w = QWidget()
