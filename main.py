@@ -123,42 +123,57 @@ def parse_html_to_paragraphs(html: str) -> List[dict]:
 
 # --------------------------- Datové typy ---------------------------
 
+# Přidat do importů (pokud tam není QTableWidget atd., ale v 5.9.2 byly):
+# from PySide6.QtWidgets import ..., QTableWidget, QTableWidgetItem, QAbstractItemView
+
+@dataclass
+class FunnyAnswer:
+    text: str
+    author: str
+    date: str
+
 @dataclass
 class Question:
     id: str
-    type: str  # "classic" | "bonus"
+    type: str  # "classic" nebo "bonus"
     text_html: str
-    title: str = ""
-    points: int = 1            # jen pro classic
-    bonus_correct: float = 0.0 # jen pro bonus
-    bonus_wrong: float = 0.0   # jen pro bonus (může být záporné)
-    created_at: str = ""       # ISO
+    title: str
+    points: int = 1
+    bonus_correct: float = 0.0
+    bonus_wrong: float = 0.0
+    created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    # Nová pole
+    correct_answer: str = ""
+    funny_answers: List[FunnyAnswer] = field(default_factory=list)
 
     @staticmethod
-    def new_default(qtype: str = "classic") -> "Question":
-        now = datetime.now().isoformat(timespec="seconds")
-        if qtype == "bonus":
+    def new_default(q_type: str = "classic") -> "Question":
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if q_type == "bonus":
             return Question(
                 id=str(_uuid.uuid4()),
                 type="bonus",
-                text_html="<p><br></p>",
+                text_html="<p>Znění bonusové otázky...</p>",
                 title="BONUS otázka",
                 points=0,
                 bonus_correct=1.0,
                 bonus_wrong=0.0,
                 created_at=now,
+                correct_answer="",
+                funny_answers=[]
             )
         return Question(
             id=str(_uuid.uuid4()),
             type="classic",
-            text_html="<p><br></p>",
+            text_html="<p>Znění otázky...</p>",
             title="Otázka",
             points=1,
             bonus_correct=0.0,
             bonus_wrong=0.0,
             created_at=now,
+            correct_answer="",
+            funny_answers=[]
         )
-
 
 @dataclass
 class Subgroup:
@@ -1417,7 +1432,6 @@ class MainWindow(QMainWindow):
             self.save_data()
             self.statusBar().showMessage("Otázka byla duplikována.", 3000)
 
-
     def _build_ui(self) -> None:
         self.splitter = QSplitter()
         self.splitter.setChildrenCollapsible(False)
@@ -1495,10 +1509,41 @@ class MainWindow(QMainWindow):
         self.form_layout.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
         self.form_layout.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
 
+        # --- NOVÉ: Správná odpověď ---
+        self.edit_correct_answer = QTextEdit()
+        self.edit_correct_answer.setPlaceholderText("Volitelný text správné odpovědi...")
+        self.edit_correct_answer.setFixedHeight(60) # Menší výška
+        self.form_layout.addRow("Správná odpověď:", self.edit_correct_answer)
+
+        # --- NOVÉ: Vtipné odpovědi (Tabulka + Tlačítka) ---
+        self.funny_container = QWidget()
+        fc_layout = QVBoxLayout(self.funny_container)
+        fc_layout.setContentsMargins(0,0,0,0)
+        
+        self.table_funny = QTableWidget(0, 3)
+        self.table_funny.setHorizontalHeaderLabels(["Odpověď", "Datum", "Jméno"])
+        self.table_funny.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch) # Odpověď se roztahuje
+        self.table_funny.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table_funny.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_funny.setFixedHeight(120)
+        self.table_funny.setSelectionBehavior(QAbstractItemView.SelectRows)
+        
+        btns_layout = QHBoxLayout()
+        self.btn_add_funny = QPushButton("Přidat vtipnou")
+        self.btn_rem_funny = QPushButton("Odebrat")
+        btns_layout.addWidget(self.btn_add_funny)
+        btns_layout.addWidget(self.btn_rem_funny)
+        btns_layout.addStretch()
+
+        fc_layout.addLayout(btns_layout)
+        fc_layout.addWidget(self.table_funny)
+
+        self.form_layout.addRow("Vtipné odpovědi:", self.funny_container)
+
         self.text_edit = QTextEdit()
         self.text_edit.setAcceptRichText(True)
         self.text_edit.setPlaceholderText("Sem napište znění otázky…\nPodporováno: tučné, kurzíva, podtržení, barva, odrážky, zarovnání.")
-        self.text_edit.setMinimumHeight(360)
+        self.text_edit.setMinimumHeight(200) # Zmenšeno kvůli novým polím
 
         self.btn_save_question = QPushButton("Uložit změny otázky"); self.btn_save_question.setDefault(True)
 
@@ -1543,6 +1588,7 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
 
+
     def _set_editor_enabled(self, enabled: bool) -> None:
         self.editor_toolbar.setEnabled(enabled)
         self.title_edit.setEnabled(enabled)
@@ -1555,45 +1601,75 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
+        self.tree.itemChanged.connect(self._on_tree_item_changed) # rename v tree
         self.btn_save_question.clicked.connect(self._on_save_question_clicked)
         self.btn_rename.clicked.connect(self._on_rename_clicked)
-        self.combo_type.currentIndexChanged.connect(self._on_type_changed_ui)
-
+        
+        # Tree actions context menu
+        self.act_add_group.triggered.connect(self._add_group)
+        self.act_add_subgroup.triggered.connect(self._add_subgroup)
+        self.act_add_question.triggered.connect(self._add_question)
+        self.act_delete.triggered.connect(self._delete_selected) # fallback key delete
+        self.btn_delete_selected.clicked.connect(self._bulk_delete_selected)
+        
+        # Autosave triggers
+        self.title_edit.textChanged.connect(self._autosave_schedule)
+        self.combo_type.currentIndexChanged.connect(self._on_type_changed_ui) # trigger save logic inside
+        self.spin_points.valueChanged.connect(self._autosave_schedule)
+        self.spin_bonus_correct.valueChanged.connect(self._autosave_schedule)
+        self.spin_bonus_wrong.valueChanged.connect(self._autosave_schedule)
+        self.text_edit.textChanged.connect(self._autosave_schedule)
+        
+        # NOVÉ Autosave triggers
+        self.edit_correct_answer.textChanged.connect(self._autosave_schedule)
+        self.table_funny.itemChanged.connect(self._autosave_schedule)
+        
+        # Formátování
         self.action_bold.triggered.connect(lambda: self._toggle_format("bold"))
         self.action_italic.triggered.connect(lambda: self._toggle_format("italic"))
         self.action_underline.triggered.connect(lambda: self._toggle_format("underline"))
         self.action_color.triggered.connect(self._choose_color)
         self.action_bullets.triggered.connect(self._toggle_bullets)
+        
         self.action_align_left.triggered.connect(lambda: self._apply_alignment(Qt.AlignLeft))
         self.action_align_center.triggered.connect(lambda: self._apply_alignment(Qt.AlignHCenter))
         self.action_align_right.triggered.connect(lambda: self._apply_alignment(Qt.AlignRight))
         self.action_align_justify.triggered.connect(lambda: self._apply_alignment(Qt.AlignJustify))
-
-        self.text_edit.cursorPositionChanged.connect(self._sync_toolbar_to_cursor)
-
-        self.text_edit.textChanged.connect(self._autosave_schedule)
-        self.title_edit.textChanged.connect(self._autosave_schedule)
-        self.combo_type.currentIndexChanged.connect(self._autosave_schedule)
-        self.spin_points.valueChanged.connect(self._autosave_schedule)
-        self.spin_bonus_correct.valueChanged.connect(self._autosave_schedule)
-        self.spin_bonus_wrong.valueChanged.connect(self._autosave_schedule)
-
-        self.act_add_group.triggered.connect(self._add_group)
-        self.act_add_subgroup.triggered.connect(self._add_subgroup)
-        self.act_add_question.triggered.connect(self._add_question)
         
-        # ZMĚNA: Sjednoceno mazání přes klávesu Delete na hromadné mazání
-        self.act_delete.triggered.connect(self._bulk_delete_selected)
-
+        self.text_edit.cursorPositionChanged.connect(self._sync_toolbar_to_cursor)
+        
+        # Filter
         self.filter_edit.textChanged.connect(self._apply_filter)
-        # Tlačítko "Smazat vybrané" také volá bulk metodu
-        self.btn_move_selected.clicked.connect(self._bulk_move_selected)
-        self.btn_delete_selected.clicked.connect(self._bulk_delete_selected)
+        
+        # Drag Drop Move (btn)
+        self.btn_move_selected.clicked.connect(self._move_selected_dialog)
 
+        # NOVÉ Tlačítka pro vtipné odpovědi
+        self.btn_add_funny.clicked.connect(self._add_funny_row)
+        self.btn_rem_funny.clicked.connect(self._remove_funny_row)
 
-        self.filter_edit.textChanged.connect(self._apply_filter)
-        self.btn_move_selected.clicked.connect(self._bulk_move_selected)
-        self.btn_delete_selected.clicked.connect(self._bulk_delete_selected)
+    def _add_funny_row(self) -> None:
+        row = self.table_funny.rowCount()
+        self.table_funny.insertRow(row)
+        
+        # Default values
+        item_text = QTableWidgetItem("Odpověď...")
+        item_date = QTableWidgetItem(datetime.now().strftime("%d.%m.%Y"))
+        item_name = QTableWidgetItem("Autor")
+        
+        self.table_funny.setItem(row, 0, item_text)
+        self.table_funny.setItem(row, 1, item_date)
+        self.table_funny.setItem(row, 2, item_name)
+        
+        self._autosave_schedule()
+
+    def _remove_funny_row(self) -> None:
+        rows = sorted(set(index.row() for index in self.table_funny.selectedIndexes()), reverse=True)
+        for r in rows:
+            self.table_funny.removeRow(r)
+        if rows:
+            self._autosave_schedule()
+
 
     def _build_menus(self) -> None:
         bar = self.menuBar()
@@ -2033,13 +2109,15 @@ class MainWindow(QMainWindow):
         self.btn_save_question.setVisible(visible)
         
         # Skrytí/Zobrazení prvků formuláře
-        # Pozn.: V QFormLayoutu musíme skrýt widget i jeho label
         widgets = [
             self.title_edit, 
             self.combo_type, 
             self.spin_points, 
             self.spin_bonus_correct, 
-            self.spin_bonus_wrong
+            self.spin_bonus_wrong,
+            # NOVÉ:
+            self.edit_correct_answer,
+            self.funny_container
         ]
         
         for w in widgets:
@@ -2048,20 +2126,9 @@ class MainWindow(QMainWindow):
             if lbl:
                 lbl.setVisible(visible)
         
-        # Pokud zobrazujeme, obnovíme viditelnost specifických polí podle typu otázky
         if visible:
             self._on_type_changed_ui()
 
-
-    def _clear_editor(self) -> None:
-        self._current_question_id = None
-        self.text_edit.clear()
-        self.spin_points.setValue(1)
-        self.spin_bonus_correct.setValue(1.00)
-        self.spin_bonus_wrong.setValue(0.00)
-        self.combo_type.setCurrentIndex(0)
-        self.title_edit.clear()
-        self._set_editor_enabled(False)
 
     def _load_question_to_editor(self, q: Question) -> None:
         self._current_question_id = q.id
@@ -2071,11 +2138,31 @@ class MainWindow(QMainWindow):
         self.spin_bonus_wrong.setValue(float(q.bonus_wrong))
         self.text_edit.setHtml(q.text_html or "<p><br></p>")
         self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
+        
+        # NOVÉ: Načtení správné odpovědi
+        self.edit_correct_answer.setPlainText(q.correct_answer or "")
+        
+        # NOVÉ: Načtení vtipných odpovědí
+        self.table_funny.setRowCount(0)
+        # Pojistka pro případ starého JSONu kde funny_answers může být None nebo chybět v __init__ (pokud by se nepoužil default)
+        f_answers = getattr(q, "funny_answers", []) or []
+        
+        for fa in f_answers:
+            # fa může být dict (z JSONu) nebo objekt FunnyAnswer
+            text = fa.text if isinstance(fa, FunnyAnswer) else fa.get("text", "")
+            date = fa.date if isinstance(fa, FunnyAnswer) else fa.get("date", "")
+            author = fa.author if isinstance(fa, FunnyAnswer) else fa.get("author", "")
+            
+            row = self.table_funny.rowCount()
+            self.table_funny.insertRow(row)
+            self.table_funny.setItem(row, 0, QTableWidgetItem(text))
+            self.table_funny.setItem(row, 1, QTableWidgetItem(date))
+            self.table_funny.setItem(row, 2, QTableWidgetItem(author))
+
         self._set_editor_enabled(True)
         
         # Synchronizace viditelnosti polí podle načteného typu
         self._on_type_changed_ui()
-
 
     def _apply_editor_to_current_question(self, silent: bool = False) -> None:
         if not self._current_question_id:
@@ -2087,27 +2174,47 @@ class MainWindow(QMainWindow):
                         q.type = "classic" if self.combo_type.currentIndex() == 0 else "bonus"
                         q.text_html = self.text_edit.toHtml()
                         q.title = (self.title_edit.text().strip() or self._derive_title_from_html(q.text_html, prefix=("BONUS: " if q.type == "bonus" else "")))
+                        
+                        # Uložení bodů
                         if q.type == "classic":
                             q.points = int(self.spin_points.value()); q.bonus_correct = 0.0; q.bonus_wrong = 0.0
                         else:
                             q.points = 0; q.bonus_correct = round(float(self.spin_bonus_correct.value()), 2); q.bonus_wrong = round(float(self.spin_bonus_wrong.value()), 2)
+                        
+                        # NOVÉ: Uložení správné odpovědi
+                        q.correct_answer = self.edit_correct_answer.toPlainText()
+                        
+                        # NOVÉ: Uložení vtipných odpovědí z tabulky
+                        new_funny = []
+                        for r in range(self.table_funny.rowCount()):
+                            t = self.table_funny.item(r, 0).text()
+                            d = self.table_funny.item(r, 1).text()
+                            a = self.table_funny.item(r, 2).text()
+                            new_funny.append(FunnyAnswer(text=t, date=d, author=a))
+                        q.funny_answers = new_funny
+
                         sg.questions[i] = q
+                        
                         label = "Klasická" if q.type == "classic" else "BONUS"
                         pts = q.points if q.type == "classic" else self._bonus_points_label(q)
                         self._update_selected_question_item_title(q.title)
                         self._update_selected_question_item_subtitle(f"{label} | {pts}")
+                        
                         items = self.tree.selectedItems()
                         if items:
                             self._apply_question_item_visuals(items[0], q.type)
+                            
                         if not silent:
                             self.statusBar().showMessage("Změny otázky uloženy (lokálně).", 1200)
                         return True
                 if apply_in(sg.subgroups):
                     return True
             return False
+
         for g in self.root.groups:
             if apply_in(g.subgroups):
                 break
+
 
     def _autosave_schedule(self) -> None:
         if not self._current_question_id:
