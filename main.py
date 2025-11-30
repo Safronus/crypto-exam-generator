@@ -13,6 +13,9 @@ Pozn.: Word numbering (numbering.xml) je mapováno pouze na výsledné vizuáln�
 """
 from __future__ import annotations
 
+import hashlib
+import secrets
+
 import json
 import sys
 import uuid as _uuid
@@ -808,7 +811,7 @@ class ExportWizard(QWizard):
         
         main_layout = QVBoxLayout(self.page3)
         
-        # Info Panel
+        # Info Panel (PŮVODNÍ KÓD OBNOVEN)
         self.info_box_p3 = QGroupBox("Kontext exportu")
         self.info_box_p3.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #555; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         l_info = QFormLayout(self.info_box_p3)
@@ -828,6 +831,12 @@ class ExportWizard(QWizard):
         self.preview_edit.setStyleSheet("QTextEdit { background-color: #252526; color: #e0e0e0; border: 1px solid #3e3e42; }")
         main_layout.addWidget(self.preview_edit)
 
+        # NOVÉ: Label pro kontrolní hash (PŘIDÁNO NA KONEC)
+        self.lbl_hash_preview = QLabel("Hash: -")
+        self.lbl_hash_preview.setWordWrap(True)
+        self.lbl_hash_preview.setStyleSheet("color: #555; font-family: Monospace; font-size: 10px; margin-top: 5px;")
+        self.lbl_hash_preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        main_layout.addWidget(self.lbl_hash_preview)
     # --- Helpers & Logic ---
 
     def _update_default_output(self):
@@ -1166,6 +1175,16 @@ class ExportWizard(QWizard):
 
     def _init_page3(self):
         try:
+            # 1. Generování hashe (NOVÉ)
+            ts = str(datetime.now().timestamp())
+            salt = secrets.token_hex(16)
+            data_to_hash = f"{ts}{salt}"
+            self._cached_hash = hashlib.sha3_256(data_to_hash.encode("utf-8")).hexdigest()
+            
+            # Zobrazení hashe v labelu (pokud existuje z _build_page3_content)
+            if hasattr(self, "lbl_hash_preview"):
+                self.lbl_hash_preview.setText(f"SHA3-512 Hash:\n{self._cached_hash}")
+
             t_name = self.template_path.name if self.template_path else "Nevybráno"
             o_name = self.output_path.name if self.output_path else "Nevybráno"
             self.lbl_templ_p3.setText(t_name)
@@ -1178,17 +1197,10 @@ class ExportWizard(QWizard):
             bg_color = "#252526"; text_color = "#e0e0e0"; border_color = "#555555"
             sec_q_bg = "#2d3845"; sec_b_bg = "#453d2d"; sec_s_bg = "#2d452d"
             
-            # Sestavení verze (CELÁ, bez zkracování)
+            # Sestavení verze (ZMĚNA: Bez UUID na konci)
             prefix = self.le_prefix.text().strip()
             today = datetime.now().strftime("%Y-%m-%d")
-            # Použijeme stejné UUID jako při exportu, ale zde pro náhled vygenerujeme nové nebo placeholder
-            # Aby to sedělo s exportem přesně, museli bychom UUID generovat dřív a uložit si ho.
-            # Pro náhled stačí ukázat formát.
-            # Zde zobrazíme celou délku.
-            
-            # Pokud chcete přesnou shodu, musíme UUID vygenerovat teď a uložit pro accept().
-            # Ale pro jednoduchost jen zobrazíme "Prefix YYYY-MM-DD_UUID"
-            verze_preview = f"{prefix} {today}_{str(_uuid.uuid4())[:8]}"
+            verze_preview = f"{prefix} {today}" 
             
             html = f"""
             <html>
@@ -1196,9 +1208,11 @@ class ExportWizard(QWizard):
             <h2 style='color: #61dafb; border-bottom: 2px solid #61dafb;'>Souhrn testu</h2>
             <table width='100%' style='margin-bottom: 20px; color: {text_color};'>
                 <tr>
-                    <!-- ZMĚNA: Zobrazujeme celou verzi -->
                     <td><b>Verze:</b> {verze_preview}</td>
                     <td align='right'><b>Datum:</b> {self.dt_edit.dateTime().toString("dd.MM.yyyy HH:mm")}</td>
+                </tr>
+                <tr>
+                    <td colspan='2' style='font-size: 10px; color: #888;'><b>Hash:</b> {self._cached_hash[:32]}...</td>
                 </tr>
             </table>
             """
@@ -1272,12 +1286,24 @@ class ExportWizard(QWizard):
         repl_plain["DatumCas"] = dt_str
         repl_plain["DATUMCAS"] = dt_str
         
-        # Verze
+        # Verze (ZMĚNA: Bez UUID)
         prefix = self.le_prefix.text().strip()
         today = datetime.now().strftime("%Y-%m-%d")
-        verze_str = f"{prefix} {today}_{str(_uuid.uuid4())[:8]}"
+        verze_str = f"{prefix} {today}"
         repl_plain["PoznamkaVerze"] = verze_str
         repl_plain["POZNAMKAVERZE"] = verze_str
+        
+        # NOVÉ: Kontrolní Hash (Použijeme ten z náhledu)
+        k_hash = getattr(self, "_cached_hash", "")
+        if not k_hash:
+            # Fallback, ale neměl by být potřeba, pokud prošel přes stranu 3
+            ts = str(datetime.now().timestamp())
+            salt = secrets.token_hex(16)
+            data_to_hash = f"{ts}{salt}"
+            k_hash = hashlib.sha3_256(data_to_hash.encode("utf-8")).hexdigest()
+
+        repl_plain["KontrolniHash"] = k_hash
+        repl_plain["KONTROLNIHASH"] = k_hash
         
         # Body (MaxBody = 10 + Bonusy)
         total_bonus = 0.0
@@ -3062,8 +3088,6 @@ class MainWindow(QMainWindow):
     def _generate_docx_from_template(self, template_path: Path, output_path: Path,
                                      simple_repl: Dict[str, str], rich_repl_html: Dict[str, str]) -> None:
         
-        print(f"DEBUG: Start exportu pomocí python-docx (v3.6 Inline). Template: {template_path}")
-        
         try:
             doc = docx.Document(template_path)
         except Exception as e:
@@ -3301,7 +3325,6 @@ class MainWindow(QMainWindow):
 
         try:
             doc.save(output_path)
-            print(f"DEBUG: Uloženo do {output_path}")
         except Exception as e:
             QMessageBox.critical(self, "Chyba uložení", f"Nelze uložit DOCX:\n{e}")
 
