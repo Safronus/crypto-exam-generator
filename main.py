@@ -1316,6 +1316,45 @@ class ExportWizard(QWizard):
 
 # --------------------------- Hlavní okno (UI + logika) ---------------------------
 
+class FunnyAnswerDialog(QDialog):
+    """Dialog pro přidání nové vtipné odpovědi."""
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Přidat vtipnou odpověď")
+        self.resize(500, 350)
+        
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlaceholderText("Znění vtipné odpovědi...")
+        
+        self.author_edit = QLineEdit()
+        self.author_edit.setPlaceholderText("Např. Student, Anonym...")
+        
+        self.date_edit = QDateTimeEdit(QDateTime.currentDateTime())
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setCalendarPopup(True)
+
+        form.addRow("Odpověď:", self.text_edit)
+        form.addRow("Autor:", self.author_edit)
+        form.addRow("Datum:", self.date_edit)
+        
+        layout.addLayout(form)
+        
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+
+    def get_data(self) -> tuple[str, str, str]:
+        return (
+            self.text_edit.toPlainText().strip(),
+            self.date_edit.text(),
+            self.author_edit.text().strip()
+        )
+
+
 class MainWindow(QMainWindow):
     """Hlavní okno aplikace."""
 
@@ -1601,7 +1640,8 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
-        self.tree.itemChanged.connect(self._on_tree_item_changed) # rename v tree
+        # self.tree.itemChanged.connect(self._on_tree_item_changed)  <-- TOTO BYLO CHYBNĚ, ODSTRANĚNO
+        
         self.btn_save_question.clicked.connect(self._on_save_question_clicked)
         self.btn_rename.clicked.connect(self._on_rename_clicked)
         
@@ -1649,19 +1689,19 @@ class MainWindow(QMainWindow):
         self.btn_rem_funny.clicked.connect(self._remove_funny_row)
 
     def _add_funny_row(self) -> None:
-        row = self.table_funny.rowCount()
-        self.table_funny.insertRow(row)
-        
-        # Default values
-        item_text = QTableWidgetItem("Odpověď...")
-        item_date = QTableWidgetItem(datetime.now().strftime("%d.%m.%Y"))
-        item_name = QTableWidgetItem("Autor")
-        
-        self.table_funny.setItem(row, 0, item_text)
-        self.table_funny.setItem(row, 1, item_date)
-        self.table_funny.setItem(row, 2, item_name)
-        
-        self._autosave_schedule()
+        dlg = FunnyAnswerDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            text, date_str, author = dlg.get_data()
+            
+            # I když je text prázdný, povolíme vložení, pokud uživatel chce
+            row = self.table_funny.rowCount()
+            self.table_funny.insertRow(row)
+            
+            self.table_funny.setItem(row, 0, QTableWidgetItem(text))
+            self.table_funny.setItem(row, 1, QTableWidgetItem(date_str))
+            self.table_funny.setItem(row, 2, QTableWidgetItem(author))
+            
+            self._autosave_schedule()
 
     def _remove_funny_row(self) -> None:
         rows = sorted(set(index.row() for index in self.table_funny.selectedIndexes()), reverse=True)
@@ -1699,6 +1739,75 @@ class MainWindow(QMainWindow):
         tb_import.setIconSize(QSize(18, 18))
         tb_import.addAction(self.act_import_docx)
         tb_import.addAction(self.act_export_docx)
+        
+    def _move_selected_dialog(self) -> None:
+        """Otevře dialog pro přesun vybraných otázek do jiné skupiny/podskupiny."""
+        ids = self._selected_question_ids()
+        if not ids:
+            QMessageBox.information(self, "Přesun", "Vyberte otázky k přesunu.")
+            return
+
+        # MoveTargetDialog musí být definován v souboru (byl vidět v původním výpisu)
+        dlg = MoveTargetDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        gid, sgid = dlg.selected_target()
+        if not gid:
+            return
+
+        # Nalezení cílové podskupiny
+        target_sg: Optional[Subgroup] = None
+        if sgid:
+            target_sg = self._find_subgroup(gid, sgid)
+        else:
+            # Cíl je skupina -> zkusíme najít první podskupinu nebo vytvoříme Default
+            g = self._find_group(gid)
+            if g:
+                if g.subgroups:
+                    target_sg = g.subgroups[0]
+                else:
+                    # Vytvoření defaultní podskupiny, pokud skupina žádnou nemá
+                    new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
+                    g.subgroups.append(new_sg)
+                    target_sg = new_sg
+
+        if not target_sg:
+            QMessageBox.warning(self, "Chyba", "Cílová skupina/podskupina nebyla nalezena.")
+            return
+
+        # PROVEDENÍ PŘESUNU
+        # 1. Najdeme a vyjmeme otázky z původních umístění
+        moved_questions: List[Question] = []
+
+        def remove_from_list(sgs: List[Subgroup]):
+            for sg in sgs:
+                # Ponecháme jen ty, které NEJSOU v seznamu k přesunu
+                # Ty co JSOU, si uložíme
+                to_keep = []
+                for q in sg.questions:
+                    if q.id in ids:
+                        moved_questions.append(q)
+                    else:
+                        to_keep.append(q)
+                sg.questions = to_keep
+                
+                # Rekurze
+                remove_from_list(sg.subgroups)
+
+        for g in self.root.groups:
+            remove_from_list(g.subgroups)
+
+        # 2. Vložíme je do cíle
+        # (Otázky se přidají na konec cílové podskupiny)
+        target_sg.questions.extend(moved_questions)
+
+        # 3. Uložit a obnovit
+        self._refresh_tree()
+        self._reselect_questions(ids) # Zkusíme znovu označit přesunuté
+        self.save_data()
+        self.statusBar().showMessage(f"Přesunuto {len(moved_questions)} otázek.", 3000)
+
 
     # -------------------- Práce s daty (JSON) --------------------
 
