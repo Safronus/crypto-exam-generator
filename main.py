@@ -89,7 +89,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.3.6"
+APP_VERSION = "6.3.7"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2313,6 +2313,11 @@ class MainWindow(QMainWindow):
         if root is None or not root.groups:
             return
 
+        # Předpřipravený styl pro řádek s otázkou
+        question_font = QFont()
+        question_font.setBold(True)
+        question_bg = QBrush(QColor(235, 240, 255))  # jemně modré pozadí
+
         def walk_subgroups(subgroups: List[Subgroup]) -> None:
             for sg in subgroups:
                 for q in sg.questions:
@@ -2321,11 +2326,16 @@ class MainWindow(QMainWindow):
                     if not f_list:
                         continue
 
-                    # 🔹 Top-level položka = JEN název otázky (bez skupin/podskupin)
+                    # 🔹 Top-level položka = JEN název otázky
                     q_title = q.title or "(bez názvu)"
                     q_item = QTreeWidgetItem()
                     q_item.setText(0, q_title)
-                    # ostatní sloupce necháme prázdné
+
+                    # barevné a typografické odlišení řádku otázky
+                    for col in range(4):
+                        q_item.setFont(col, question_font)
+                        q_item.setBackground(col, question_bg)
+
                     self.tree_funny.addTopLevelItem(q_item)
 
                     # 🔹 Podřízené položky = jednotlivé vtipné odpovědi, tabulkově
