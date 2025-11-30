@@ -79,7 +79,8 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
-    QTreeWidgetItemIterator
+    QTreeWidgetItemIterator,
+    QHeaderView
 )
 
 APP_NAME = "Crypto Exam Generator"
@@ -208,9 +209,18 @@ class DnDTree(QTreeWidget):
         super().__init__()
         self.owner = owner
         self.setHeaderLabels(["Název", "Typ / body"])
-        self.setColumnWidth(0, 300)
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        
+        # Nastavení chování hlavičky pro správné roztažení
+        header = self.header()
+        # 0. sloupec (Název) se roztáhne do zbytku
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        # 1. sloupec (Typ/body) se přizpůsobí obsahu
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        
+        # Důležité: StretchLastSection musí být False, jinak přebije naše nastavení
+        header.setStretchLastSection(False)
 
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -1351,6 +1361,10 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
+        
+        # Nové: Kontextové menu pro strom
+        self.tree.customContextMenuRequested.connect(self._on_context_menu)
+        
         self._build_menus()
         self.load_data()
         self._refresh_tree()
@@ -1358,6 +1372,51 @@ class MainWindow(QMainWindow):
         # ZMĚNA: Strom 60%, Editor 40% (cca 840px : 560px)
         # Nyní, když je self.splitter správně nastaven v _build_ui, můžeme přímo nastavit velikosti.
         self.splitter.setSizes([940, 860])
+
+    def _on_context_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+            
+        meta = item.data(0, Qt.UserRole) or {}
+        kind = meta.get("kind")
+        
+        if kind == "question":
+            menu = QMenu(self)
+            action_dup = QAction("Duplikovat otázku", self)
+            action_dup.triggered.connect(self._duplicate_question)
+            menu.addAction(action_dup)
+            menu.exec(self.tree.mapToGlobal(pos))
+
+    def _duplicate_question(self) -> None:
+        kind, meta = self._selected_node()
+        if kind != "question":
+            return
+
+        gid = meta.get("parent_group_id")
+        sgid = meta.get("parent_subgroup_id")
+        qid = meta.get("id")
+
+        q_orig = self._find_question(gid, sgid, qid)
+        if not q_orig:
+            return
+
+        # Vytvoření kopie
+        data = asdict(q_orig)
+        data["id"] = str(_uuid.uuid4())
+        data["title"] = (q_orig.title or "Otázka") + " (kopie)"
+        
+        new_q = Question(**data)
+
+        # Vložení do správné podskupiny
+        target_sg = self._find_subgroup(gid, sgid)
+        if target_sg:
+            target_sg.questions.append(new_q)
+            self._refresh_tree()
+            self._select_question(new_q.id)
+            self.save_data()
+            self.statusBar().showMessage("Otázka byla duplikována.", 3000)
+
 
     def _build_ui(self) -> None:
         self.splitter = QSplitter()
@@ -1522,7 +1581,15 @@ class MainWindow(QMainWindow):
         self.act_add_group.triggered.connect(self._add_group)
         self.act_add_subgroup.triggered.connect(self._add_subgroup)
         self.act_add_question.triggered.connect(self._add_question)
-        self.act_delete.triggered.connect(self._delete_selected)
+        
+        # ZMĚNA: Sjednoceno mazání přes klávesu Delete na hromadné mazání
+        self.act_delete.triggered.connect(self._bulk_delete_selected)
+
+        self.filter_edit.textChanged.connect(self._apply_filter)
+        # Tlačítko "Smazat vybrané" také volá bulk metodu
+        self.btn_move_selected.clicked.connect(self._bulk_move_selected)
+        self.btn_delete_selected.clicked.connect(self._bulk_delete_selected)
+
 
         self.filter_edit.textChanged.connect(self._apply_filter)
         self.btn_move_selected.clicked.connect(self._bulk_move_selected)
@@ -1647,19 +1714,27 @@ class MainWindow(QMainWindow):
     def _refresh_tree(self) -> None:
         self.tree.clear()
         for g in self.root.groups:
-            g_item = QTreeWidgetItem([g.name, "Skupina"])
+            g_item = QTreeWidgetItem([g.name, ""]) # Prázdný text ve sloupci 1
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
             g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
             f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
             self.tree.addTopLevelItem(g_item)
             self._add_subgroups_to_item(g_item, g.id, g.subgroups)
-        self.tree.expandAll(); self.tree.resizeColumnToContents(0)
+        
+        self.tree.expandAll()
+        
+        # Vynutíme přepočet šířky sloupce 1 podle obsahu
+        self.tree.resizeColumnToContents(1)
+
 
     def _add_subgroups_to_item(self, parent_item: QTreeWidgetItem, group_id: str, subgroups: List[Subgroup]) -> None:
         for sg in subgroups:
             parent_meta = parent_item.data(0, Qt.UserRole) or {}
             parent_sub_id = parent_meta.get("id") if parent_meta.get("kind") == "subgroup" else None
-            sg_item = QTreeWidgetItem([sg.name, "Podskupina"])
+            
+            # ZMĚNA: Druhý sloupec prázdný (místo "Podskupina")
+            sg_item = QTreeWidgetItem([sg.name, ""])
+            
             sg_item.setData(0, Qt.UserRole, {"kind": "subgroup", "id": sg.id, "parent_group_id": group_id, "parent_subgroup_id": parent_sub_id})
             sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirOpenIcon))
             parent_item.addChild(sg_item)
@@ -1672,6 +1747,7 @@ class MainWindow(QMainWindow):
                 sg_item.addChild(q_item)
             if sg.subgroups:
                 self._add_subgroups_to_item(sg_item, group_id, sg.subgroups)
+
 
     def _selected_node(self) -> Tuple[Optional[str], Optional[dict]]:
         items = self.tree.selectedItems()
@@ -1841,26 +1917,67 @@ class MainWindow(QMainWindow):
                 self.save_data()
 
     def _bulk_delete_selected(self) -> None:
-        items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get("kind") == "question"]
+        """Hromadné mazání vybraných položek (otázky, podskupiny, skupiny)."""
+        items = self.tree.selectedItems()
         if not items:
-            QMessageBox.information(self, "Smazat vybrané", "Vyberte ve stromu alespoň jednu otázku.")
+            QMessageBox.information(self, "Smazat", "Vyberte položky ke smazání.")
             return
-        if QMessageBox.question(self, "Smazat vybrané", f"Opravdu smazat {len(items)} vybraných otázek?") != QMessageBox.Yes:
+
+        count = len(items)
+        msg = f"Opravdu smazat {count} vybraných položek?\n(Včetně obsahu skupin/podskupin)"
+        if QMessageBox.question(self, "Smazat vybrané", msg) != QMessageBox.Yes:
             return
-        deleted = 0
+
+        # Seřadíme položky podle hloubky (nejhlubší nejdřív), abychom nemazali rodiče před dětmi (což by mohlo být jedno v modelu, ale pro jistotu)
+        # Nebo jednodušeji: projdeme a smažeme.
+        # Musíme si ale dát pozor, že když smažeme skupinu, smažou se i její podskupiny, které mohou být také ve `items`.
+        # Proto budeme mazat položky tak, že si nejprve posbíráme ID ke smazání a pak provedeme čistku v datech.
+        
+        to_delete_questions = [] # (gid, sgid, qid)
+        to_delete_subgroups = [] # (gid, parent_sgid, sgid)
+        to_delete_groups = []    # gid
+
         for it in items:
             meta = it.data(0, Qt.UserRole) or {}
-            gid = meta.get("parent_group_id")
-            sgid = meta.get("parent_subgroup_id")
-            qid = meta.get("id")
+            kind = meta.get("kind")
+            if kind == "question":
+                to_delete_questions.append((meta.get("parent_group_id"), meta.get("parent_subgroup_id"), meta.get("id")))
+            elif kind == "subgroup":
+                to_delete_subgroups.append((meta.get("parent_group_id"), meta.get("parent_subgroup_id"), meta.get("id")))
+            elif kind == "group":
+                to_delete_groups.append(meta.get("id"))
+
+        # 1. Smazat otázky
+        for gid, sgid, qid in to_delete_questions:
             sg = self._find_subgroup(gid, sgid)
             if sg:
                 sg.questions = [q for q in sg.questions if q.id != qid]
-                deleted += 1
+
+        # 2. Smazat podskupiny
+        # Pozor: pokud mažeme skupinu, nemusíme řešit její podskupiny. Ale pokud je vybraná jen podskupina...
+        for gid, parent_sgid, sgid in to_delete_subgroups:
+            # Pokud je rodičovská skupina taky na seznamu k smazání, nemusíme řešit
+            if gid in to_delete_groups:
+                continue
+            
+            # Pokud je to podskupina v podskupině (v budoucnu), zde řešíme jen flat nebo simple nesting
+            if parent_sgid:
+                parent = self._find_subgroup(gid, parent_sgid)
+                if parent:
+                    parent.subgroups = [s for s in parent.subgroups if s.id != sgid]
+            else:
+                g = self._find_group(gid)
+                if g:
+                    g.subgroups = [s for s in g.subgroups if s.id != sgid]
+
+        # 3. Smazat skupiny
+        self.root.groups = [g for g in self.root.groups if g.id not in to_delete_groups]
+
         self._refresh_tree()
         self._clear_editor()
         self.save_data()
-        self.statusBar().showMessage(f"Smazáno {deleted} otázek.", 4000)
+        self.statusBar().showMessage(f"Smazáno {count} položek.", 4000)
+
 
     def _on_rename_clicked(self) -> None:
         kind, meta = self._selected_node()
@@ -1883,23 +2000,58 @@ class MainWindow(QMainWindow):
     def _on_tree_selection_changed(self) -> None:
         kind, meta = self._selected_node()
         self._current_node_kind = kind
+        
         if kind == "question":
             q = self._find_question(meta["parent_group_id"], meta["parent_subgroup_id"], meta["id"])
             if q:
                 self._load_question_to_editor(q)
-                self._set_editor_enabled(True)
+                self._set_question_editor_visible(True)
                 self.rename_panel.hide()
+                self._set_editor_enabled(True)
         elif kind in ("group", "subgroup"):
             name = ""
             if kind == "group":
                 g = self._find_group(meta["id"]); name = g.name if g else ""
             else:
                 sg = self._find_subgroup(meta["parent_group_id"], meta["id"]); name = sg.name if sg else ""
+            
             self.rename_line.setText(name)
-            self._set_editor_enabled(False)
+            
+            # Skryjeme editor otázky, zobrazíme rename panel
+            self._set_question_editor_visible(False)
             self.rename_panel.show()
+            self._set_editor_enabled(False) 
         else:
-            self._clear_editor(); self.rename_panel.hide()
+            self._clear_editor()
+            self._set_question_editor_visible(False)
+            self.rename_panel.hide()
+
+    def _set_question_editor_visible(self, visible: bool) -> None:
+        """Zobrazí nebo skryje kompletní editor otázky (toolbar, formulář, text)."""
+        self.editor_toolbar.setVisible(visible)
+        self.text_edit.setVisible(visible)
+        self.btn_save_question.setVisible(visible)
+        
+        # Skrytí/Zobrazení prvků formuláře
+        # Pozn.: V QFormLayoutu musíme skrýt widget i jeho label
+        widgets = [
+            self.title_edit, 
+            self.combo_type, 
+            self.spin_points, 
+            self.spin_bonus_correct, 
+            self.spin_bonus_wrong
+        ]
+        
+        for w in widgets:
+            w.setVisible(visible)
+            lbl = self.form_layout.labelForField(w)
+            if lbl:
+                lbl.setVisible(visible)
+        
+        # Pokud zobrazujeme, obnovíme viditelnost specifických polí podle typu otázky
+        if visible:
+            self._on_type_changed_ui()
+
 
     def _clear_editor(self) -> None:
         self._current_question_id = None
@@ -2227,132 +2379,218 @@ class MainWindow(QMainWindow):
         return num_to_abstract, fmt_map
 
     def _extract_paragraphs_from_docx(self, path: Path) -> List[dict]:
-        with zipfile.ZipFile(path, "r") as z:
-            with z.open("word/document.xml") as f:
-                xml_bytes = f.read()
-            num_to_abs, fmt_map = self._read_numbering_map(z)
-        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-        root = ET.fromstring(xml_bytes)
-        out: List[dict] = []
-        for p in root.findall(".//w:p", ns):
-            ppr = p.find("w:pPr", ns)
-            is_num = False
-            num_fmt = None
-            ilvl = None
-            if ppr is not None:
-                numpr = ppr.find("w:numPr", ns)
-                if numpr is not None:
-                    is_num = True
-                    num_id_el = numpr.find("w:numId", ns)
-                    ilvl_el = numpr.find("w:ilvl", ns)
-                    if ilvl_el is not None and ilvl_el.get("{%s}val" % ns["w"]) is not None:
-                        try:
-                            ilvl = int(ilvl_el.get("{%s}val" % ns["w"]))
-                        except Exception:
-                            ilvl = 0
-                    if num_id_el is not None and num_id_el.get("{%s}val" % ns["w"]) is not None:
-                        try:
-                            num_id = int(num_id_el.get("{%s}val" % ns["w"]))
-                            abs_id = num_to_abs.get(num_id)
-                            if abs_id is not None:
-                                num_fmt = fmt_map.get((abs_id, ilvl or 0), None)
-                        except Exception:
-                            pass
-            texts = [t.text or "" for t in p.findall(".//w:t", ns)]
-            txt = "".join(texts).strip()
-            out.append({"text": txt, "is_numbered": is_num, "num_fmt": num_fmt, "ilvl": ilvl})
+        if 'docx' not in sys.modules:
+            QMessageBox.critical(self, "Chyba", "Knihovna python-docx není nainstalována.")
+            return []
+
+        doc = docx.Document(path)
+        out = []
+
+        # Cache pro numbering definitions
+        numbering_cache = {} # numId -> (abstractId, {ilvl: fmt})
+
+        # Přednačtení definic z XML, abychom to nemuseli lovit per paragraph
+        try:
+            numbering_part = doc.part.numbering_part
+            if numbering_part:
+                # Mapování abstractNumId -> {ilvl: fmt}
+                abstract_formats = {}
+                for abstract_id, abstract in numbering_part.numbering_definitions._abstract_nums.items():
+                    levels = {}
+                    for lvl in abstract.levels:
+                        levels[lvl.ilvl] = lvl.num_fmt
+                    abstract_formats[abstract_id] = levels
+                
+                # Mapování numId -> abstractNumId
+                for num_id, num in numbering_part.numbering_definitions._nums.items():
+                    if num.abstractNumId in abstract_formats:
+                        numbering_cache[num_id] = (num.abstractNumId, abstract_formats[num.abstractNumId])
+        except Exception:
+            pass # Pokud selže přístup k internals, pojedeme bez formátů
+
+        def get_numbering(p: Paragraph):
+            p_element = p._p
+            pPr = p_element.pPr
+            if pPr is None: return None, None, None
+            numPr = pPr.numPr
+            if numPr is None: return None, None, None
+            
+            val_ilvl = numPr.ilvl.val if numPr.ilvl is not None else 0
+            val_numId = numPr.numId.val if numPr.numId is not None else None
+            
+            fmt = "decimal" # default fallback
+            
+            if val_numId in numbering_cache:
+                _, levels = numbering_cache[val_numId]
+                if val_ilvl in levels:
+                    fmt = levels[val_ilvl]
+            
+            return val_numId, val_ilvl, fmt
+
+        for p in doc.paragraphs:
+            txt = p.text.strip()
+            numId, ilvl, fmt = get_numbering(p)
+            is_numbered = (numId is not None)
+            
+            out.append({
+                "text": txt,
+                "is_numbered": is_numbered,
+                "ilvl": ilvl,
+                "num_fmt": fmt,
+                "num_id": numId # Ukládáme si i ID seznamu pro detekci změny kontextu
+            })
+        
         return out
 
     def _parse_questions_from_paragraphs(self, paragraphs: List[dict]) -> List[Question]:
-        if paragraphs and isinstance(paragraphs[0], tuple):
-            paragraphs = [{'text': t[0], 'is_numbered': bool(t[1]), 'num_fmt': None, 'ilvl': None} for t in paragraphs]
         out: List[Question] = []
-        i = 0; n = len(paragraphs)
-        rx_scale = re.compile(r'^\s*[A-F]\s*->\s*<[^>]+>\s*bod', re.IGNORECASE)
-        rx_bonus_start = re.compile(r'^\s*Otázka\s+\d+', re.IGNORECASE)
-        rx_classic_numtxt = re.compile(r'^\s*\d+[\.)]\s')
-        rx_question_verb = re.compile(r'\b(Popište|Uveďte|Zašifrujte|Vysvětlete|Porovnejte|Jaký|Jak|Stručně|Lze|Kolik|Která|Co je)\b', re.IGNORECASE)
-        def is_noise(text_line: str) -> bool:
-            t0 = (text_line or "").strip().lower()
-            if not t0: return True
-            keys = ['datum:', 'jméno', 'podpis', 'na uvedené otázky', 'maximum bodů', 'klasifikační', 'stupnice', 'souhlasíte', 'cookies']
-            if any(k in t0 for k in keys): return True
-            if rx_scale.search(t0): return True
-            return False
-        def is_question_like(t: str) -> bool:
-            return ('?' in (t or "")) or bool(rx_question_verb.search(t or ""))
+        i = 0
+        n = len(paragraphs)
+
+        rx_bonus = re.compile(r'^\s*Otázka\s+\d+.*BONUS', re.IGNORECASE)
+        rx_question_start_text = re.compile(r'^[A-ZŽŠČŘĎŤŇ].*[\?\.]$') # Začíná velkým, končí ? nebo .
+        rx_not_question_start = re.compile(r'^(Slovník|Tabulka|Obrázek|Příklad|Body|Poznámka)', re.IGNORECASE)
+
         def html_escape(s: str) -> str:
             return _html.escape(s or "")
+
         def wrap_list(items: List[tuple[str, int, str]]) -> str:
             if not items: return ""
             fmt = items[0][2] or "decimal"
-            if fmt == "bullet":
-                tag_open, tag_close = "<ul>", "</ul>"
-            elif fmt == "lowerLetter":
-                tag_open, tag_close = '<ol type="a">', "</ol>"
-            elif fmt == "upperLetter":
-                tag_open, tag_close = '<ol type="A">', "</ol>"
-            else:
-                tag_open, tag_close = "<ol>", "</ol>"
-            lis = "".join(f"<li>{html_escape(t)}</li>" for (t, _lvl, _f) in items if t.strip())
+            is_bullet = (fmt == "bullet")
+            tag_open = "<ul>" if is_bullet else "<ol>"
+            tag_close = "</ul>" if is_bullet else "</ol>"
+            lis = "".join(f"<li>{html_escape(t)}</li>" for (t, _, _) in items if t.strip())
             return f"{tag_open}{lis}{tag_close}"
+
+        # Sledujeme poslední numId hlavní otázky, abychom poznali změnu seznamu
+        last_question_num_id = None
+
         while i < n:
-            para = paragraphs[i]
-            txt = para.get("text", "")
-            is_num = bool(para.get("is_numbered")); ilvl = para.get("ilvl")
-            if is_noise(txt):
+            p = paragraphs[i]
+            txt = p["text"]
+            if not txt: 
                 i += 1; continue
-            if rx_bonus_start.match(txt) or ("bonus" in (txt or "").lower()):
-                block_html = f"<p>{html_escape(txt)}</p>"
+
+            # 1. BONUS
+            if rx_bonus.search(txt):
+                block_html = f"<p><b>{html_escape(txt)}</b></p>"
                 j = i + 1
                 while j < n:
-                    nt = paragraphs[j].get("text", "")
-                    n_isnum = bool(paragraphs[j].get("is_numbered"))
-                    if not nt.strip() or is_noise(nt) or n_isnum or rx_bonus_start.match(nt) or rx_classic_numtxt.match(nt) or is_question_like(nt):
-                        break
-                    if len(nt.strip()) <= 120:
-                        block_html += f"<p>{html_escape(nt.strip())}</p>"; j += 1
-                    else:
-                        break
+                    next_p = paragraphs[j]
+                    next_txt = next_p["text"]
+                    if rx_bonus.search(next_txt): break
+                    # Pokud narazíme na HLAVNÍ otázku (číslovaná, level 0, decimal, a vypadá jako otázka)
+                    if next_p["is_numbered"] and next_p["ilvl"] == 0 and next_p["num_fmt"] != "bullet" and not rx_not_question_start.match(next_txt):
+                         break
+                    if next_txt: block_html += f"<p>{html_escape(next_txt)}</p>"
+                    j += 1
                 q = Question.new_default("bonus")
-                q.text_html = block_html; q.title = self._derive_title_from_html(block_html, prefix="BONUS: ")
+                q.title = self._derive_title_from_html(block_html, prefix="BONUS: ")
+                q.text_html = block_html
                 q.bonus_correct, q.bonus_wrong = 1.0, 0.0
                 out.append(q); i = j; continue
-            is_top_numbered = is_num and (ilvl is None or ilvl == 0)
-            if is_top_numbered or rx_classic_numtxt.match(txt) or is_question_like(txt):
+
+            # 2. KLASICKÁ
+            # Podmínky pro novou otázku:
+            # a) Je číslovaná
+            # b) Je na levelu 0
+            # c) Není to bullet
+            # d) Není to explicitně vyloučený text (Slovník...)
+            is_num = p["is_numbered"]
+            ilvl = p["ilvl"]
+            fmt = p["num_fmt"]
+            nid = p["num_id"]
+
+            is_potential_question = (is_num and (ilvl == 0 or ilvl is None) and fmt != "bullet")
+            
+            # Heuristika pro "Slovník" problém:
+            # Pokud se změnilo numId (oproti minulé otázce) a text nevypadá jako otázka (začíná na Slovník),
+            # tak to pravděpodobně NENÍ nová otázka, ale součást minulé (pokud nějaká byla).
+            if is_potential_question and nid != last_question_num_id and last_question_num_id is not None:
+                if rx_not_question_start.match(txt):
+                    is_potential_question = False
+
+            if is_potential_question:
+                last_question_num_id = nid # Uložíme si ID seznamu této otázky
+                
                 block_html = f"<p>{html_escape(txt)}</p>"
-                list_buffer: List[tuple[str, int, str]] = []
                 j = i + 1
+                list_buffer = []
+                
                 while j < n:
-                    next_txt = paragraphs[j].get("text", "")
-                    next_isnum = bool(paragraphs[j].get("is_numbered"))
-                    next_ilvl = paragraphs[j].get("ilvl")
-                    next_fmt = paragraphs[j].get("num_fmt") or "decimal"
-                    if not next_txt.strip() or is_noise(next_txt):
-                        j += 1; continue
-                    if (next_isnum and (next_ilvl is None or next_ilvl == 0)) or rx_bonus_start.match(next_txt) or rx_classic_numtxt.match(next_txt) or is_question_like(next_txt):
-                        break
-                    if next_isnum:
-                        list_buffer.append((next_txt.strip(), next_ilvl or 0, next_fmt)); j += 1; continue
-                    if len(next_txt.strip()) <= 120:
-                        block_html += f"<p>{html_escape(next_txt.strip())}</p>"; j += 1; continue
-                    break
+                    next_p = paragraphs[j]
+                    next_txt = next_p["text"]
+                    
+                    # Check start of new element (Bonus or New Question)
+                    if rx_bonus.search(next_txt): break
+                    
+                    next_is_num = next_p["is_numbered"]
+                    next_ilvl = next_p["ilvl"]
+                    next_fmt = next_p["num_fmt"]
+                    next_nid = next_p["num_id"]
+
+                    # Je to začátek další otázky?
+                    if next_is_num and (next_ilvl == 0 or next_ilvl is None) and next_fmt != "bullet":
+                        # Výjimka: Pokud je to "Slovník..." (tedy změna numId, ale textově to není otázka),
+                        # tak to NENÍ nová otázka, ale pokračování této.
+                        is_really_new = True
+                        if next_nid != last_question_num_id:
+                             if rx_not_question_start.match(next_txt):
+                                 is_really_new = False
+                        
+                        if is_really_new:
+                            break
+                    
+                    if not next_txt: j += 1; continue
+
+                    # Je to list item?
+                    # - Buď ilvl > 0
+                    # - Nebo fmt == bullet
+                    # - Nebo ilvl == 0, ale je to ten "Slovník" případ (is_really_new=False výše propadne sem)
+                    is_list_item = False
+                    if next_is_num:
+                        if next_ilvl > 0 or next_fmt == "bullet":
+                            is_list_item = True
+                        elif next_nid != last_question_num_id and rx_not_question_start.match(next_txt):
+                             # To je ten případ "Slovník" na levelu 0
+                             is_list_item = True
+
+                    if is_list_item:
+                        list_buffer.append((next_txt, next_ilvl, next_fmt))
+                    else:
+                        if list_buffer:
+                            block_html += wrap_list(list_buffer)
+                            list_buffer = []
+                        block_html += f"<p>{html_escape(next_txt)}</p>"
+                    j += 1
+                
                 if list_buffer:
                     block_html += wrap_list(list_buffer)
+                
                 q = Question.new_default("classic")
-                q.text_html = block_html; q.title = self._derive_title_from_html(block_html); q.points = 1
+                q.title = self._derive_title_from_html(block_html)
+                q.text_html = block_html
+                q.points = 1
                 out.append(q); i = j; continue
+
+            # Text, který není součástí žádné otázky (úvod atd.)
             i += 1
+
         return out
 
-    def _ensure_unassigned_group(self) -> tuple[str, str]:
+
+    def _ensure_unassigned_group(self) -> tuple[str, Optional[str]]:
+        """Zajistí existenci skupiny 'Neroztříděné'. Vrací (group_id, None)."""
         name = "Neroztříděné"
         g = next((g for g in self.root.groups if g.name == name), None)
         if not g:
-            g = Group(id=str(_uuid.uuid4()), name=name, subgroups=[]); self.root.groups.append(g)
-        if not g.subgroups:
-            g.subgroups.append(Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[]))
-        return g.id, g.subgroups[0].id
+            g = Group(id=str(_uuid.uuid4()), name=name, subgroups=[])
+            self.root.groups.append(g)
+        # Nevytváříme "Default" podskupinu automaticky, pokud není potřeba.
+        # V importu si vytvoříme "Klasické" a "Bonusové" specificky.
+        return g.id, None
+
 
     def _import_from_docx(self) -> None:
         # Výchozí složka pro import
@@ -2362,25 +2600,87 @@ class MainWindow(QMainWindow):
         paths, _ = QFileDialog.getOpenFileNames(self, "Import z DOCX", str(import_dir), "Word dokument (*.docx)")
         if not paths:
             return
-        g_id, sg_id = self._ensure_unassigned_group()
-        target_sg = self._find_subgroup(g_id, sg_id)
-        total = 0
+
+        # 1. Získání cílových podskupin v "Neroztříděné"
+        #    (Použijeme _ensure_unassigned_group pro získání/vytvoření hlavní skupiny,
+        #    ale pak si ručně najdeme/vytvoříme specifické podskupiny.)
+        g_id, _ = self._ensure_unassigned_group()
+        unassigned_group = self._find_group(g_id)
+        if not unassigned_group:
+            # Fallback, nemělo by nastat
+            return
+
+        def get_or_create_subgroup(g: Group, name: str) -> Subgroup:
+            sg = next((s for s in g.subgroups if s.name == name), None)
+            if not sg:
+                sg = Subgroup(id=str(_uuid.uuid4()), name=name, subgroups=[], questions=[])
+                g.subgroups.append(sg)
+            return sg
+
+        target_classic = get_or_create_subgroup(unassigned_group, "Klasické")
+        target_bonus = get_or_create_subgroup(unassigned_group, "Bonusové")
+
+        # 2. Vytvoření indexu existujících otázek pro kontrolu duplicit
+        #    Jako klíč použijeme ostripovaný HTML obsah.
+        existing_hashes = set()
+
+        def index_questions(node):
+            # Rekurzivně projít strom
+            if isinstance(node, RootData):
+                for gr in node.groups: index_questions(gr)
+            elif isinstance(node, Group):
+                for sgr in node.subgroups: index_questions(sgr)
+            elif isinstance(node, Subgroup):
+                for q in node.questions:
+                    if q.text_html:
+                        existing_hashes.add(q.text_html.strip())
+                for sub in node.subgroups:
+                    index_questions(sub)
+
+        index_questions(self.root)
+
+        total_imported = 0
+        total_duplicates = 0
+
         for p in paths:
             try:
                 paras = self._extract_paragraphs_from_docx(Path(p))
                 qs = self._parse_questions_from_paragraphs(paras)
+                
                 if not qs:
-                    QMessageBox.information(self, "Import", f"{p}\nNebyla nalezena žádná otázka.")
+                    # Info, ale nepovažujeme za chybu přerušující ostatní soubory
                     continue
-                if target_sg is not None:
-                    target_sg.questions.extend(qs)
-                total += len(qs)
+
+                file_imported_count = 0
+                
+                for q in qs:
+                    content_hash = (q.text_html or "").strip()
+                    
+                    # Kontrola duplicit
+                    if content_hash in existing_hashes:
+                        total_duplicates += 1
+                        continue
+                    
+                    # Pokud není duplicitní, přidáme do DB a aktualizujeme hashset (proti duplicitám v rámci jednoho importu)
+                    existing_hashes.add(content_hash)
+                    
+                    if q.type == "classic":
+                        target_classic.questions.append(q)
+                    else:
+                        target_bonus.questions.append(q)
+                    
+                    file_imported_count += 1
+
+                total_imported += file_imported_count
+
             except Exception as e:
                 QMessageBox.warning(self, "Import – chyba", f"Soubor: {p}\n{e}")
+
         self._refresh_tree()
         self.save_data()
-        if total:
-            self.statusBar().showMessage(f"Import hotov: {total} otázek do 'Neroztříděné'.", 6000)
+
+        msg = f"Import dokončen.\n\nÚspěšně importováno: {total_imported}\nDuplicitních (přeskočeno): {total_duplicates}"
+        QMessageBox.information(self, "Výsledek importu", msg)
 
 
     # -------------------- Přesun otázky --------------------
