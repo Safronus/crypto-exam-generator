@@ -89,7 +89,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.3.11"
+APP_VERSION = "6.3.12"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -948,43 +948,54 @@ class ExportWizard(QWizard):
     
     def _on_tree_selection(self):
         sel = self.tree_source.selectedItems()
-        if not sel:
+        # Náhled funguje jen pokud je vybrána přesně jedna položka
+        if not sel or len(sel) != 1:
             self.text_preview_q.clear()
             return
-            
+
         item = sel[0]
-        qid = item.data(0, Qt.UserRole)
-        
+        data = item.data(0, Qt.UserRole)
+
+        # Očekáváme buď přímo ID otázky, nebo dict s metadaty (kind/id/...)
+        if not data:
+            self.text_preview_q.setText("--- (Vyberte konkrétní otázku pro náhled) ---")
+            return
+
+        if isinstance(data, dict):
+            # Náhled má smysl jen pro položku typu 'question'
+            if data.get("kind") != "question":
+                self.text_preview_q.setText("--- (Vyberte konkrétní otázku pro náhled) ---")
+                return
+            qid = data.get("id")
+        else:
+            qid = data
+
         if not qid:
             self.text_preview_q.setText("--- (Vyberte konkrétní otázku pro náhled) ---")
             return
-            
+
         q = self.owner._find_question_by_id(qid)
         if q:
             import re
             import html
-            
+
             html_content = q.text_html or ""
-            
+
             # 1. Odstranění <style>...</style> a <head>...</head> i s obsahem
             # Flag re.DOTALL zajistí, že . matchuje i newlines
             clean = re.sub(r'<style.*?>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
             clean = re.sub(r'<head.*?>.*?</head>', '', clean, flags=re.DOTALL | re.IGNORECASE)
-            
+
             # 2. Odstranění všech ostatních tagů <...>
             clean = re.sub(r'<[^>]+>', ' ', clean)
-            
+
             # 3. Decode entities (&nbsp;, &lt;...)
             clean = html.unescape(clean)
-            
-            # 4. Squeeze whitespace (více mezer/tabulátorů na jednu mezeru, ale zachovat newlines pokud chceme, 
-            # nebo vše na jeden řádek. Pro náhled je asi lepší zachovat základní odstavce, 
-            # ale QTextEdit plain text to zvládne)
-            
-            # Zkusíme odstranit vícenásobné prázdné řádky
+
+            # 4. Squeeze whitespace – odstranění prázdných řádků
             lines = [line.strip() for line in clean.splitlines() if line.strip()]
             final_text = "\n".join(lines)
-            
+
             self.text_preview_q.setText(final_text)
         else:
             self.text_preview_q.clear()
