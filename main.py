@@ -2194,56 +2194,50 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Smazat vybrané", msg) != QMessageBox.Yes:
             return
 
-        # Seřadíme položky podle hloubky (nejhlubší nejdřív), abychom nemazali rodiče před dětmi (což by mohlo být jedno v modelu, ale pro jistotu)
-        # Nebo jednodušeji: projdeme a smažeme.
-        # Musíme si ale dát pozor, že když smažeme skupinu, smažou se i její podskupiny, které mohou být také ve `items`.
-        # Proto budeme mazat položky tak, že si nejprve posbíráme ID ke smazání a pak provedeme čistku v datech.
-        
-        to_delete_questions = [] # (gid, sgid, qid)
-        to_delete_subgroups = [] # (gid, parent_sgid, sgid)
-        to_delete_groups = []    # gid
+        # Sběr IDček k smazání
+        to_delete_q_ids = set()      # otázky
+        to_delete_sg_ids = set()     # podskupiny
+        to_delete_g_ids = set()      # skupiny
 
         for it in items:
             meta = it.data(0, Qt.UserRole) or {}
             kind = meta.get("kind")
             if kind == "question":
-                to_delete_questions.append((meta.get("parent_group_id"), meta.get("parent_subgroup_id"), meta.get("id")))
+                to_delete_q_ids.add(meta.get("id"))
             elif kind == "subgroup":
-                to_delete_subgroups.append((meta.get("parent_group_id"), meta.get("parent_subgroup_id"), meta.get("id")))
+                to_delete_sg_ids.add(meta.get("id"))
             elif kind == "group":
-                to_delete_groups.append(meta.get("id"))
+                to_delete_g_ids.add(meta.get("id"))
 
-        # 1. Smazat otázky
-        for gid, sgid, qid in to_delete_questions:
-            sg = self._find_subgroup(gid, sgid)
-            if sg:
-                sg.questions = [q for q in sg.questions if q.id != qid]
+        # 1. Filtrace skupin (nejvyšší úroveň)
+        # Pokud mažeme skupinu, zmizí vše pod ní, takže nemusíme řešit její podskupiny/otázky
+        self.root.groups = [g for g in self.root.groups if g.id not in to_delete_g_ids]
 
-        # 2. Smazat podskupiny
-        # Pozor: pokud mažeme skupinu, nemusíme řešit její podskupiny. Ale pokud je vybraná jen podskupina...
-        for gid, parent_sgid, sgid in to_delete_subgroups:
-            # Pokud je rodičovská skupina taky na seznamu k smazání, nemusíme řešit
-            if gid in to_delete_groups:
-                continue
+        # 2. Procházení zbytku a mazání podskupin a otázek
+        for g in self.root.groups:
+            # Filtrace podskupin v této skupině
+            g.subgroups = [sg for sg in g.subgroups if sg.id not in to_delete_sg_ids]
             
-            # Pokud je to podskupina v podskupině (v budoucnu), zde řešíme jen flat nebo simple nesting
-            if parent_sgid:
-                parent = self._find_subgroup(gid, parent_sgid)
-                if parent:
-                    parent.subgroups = [s for s in parent.subgroups if s.id != sgid]
-            else:
-                g = self._find_group(gid)
-                if g:
-                    g.subgroups = [s for s in g.subgroups if s.id != sgid]
-
-        # 3. Smazat skupiny
-        self.root.groups = [g for g in self.root.groups if g.id not in to_delete_groups]
+            # Rekurzivní čištění uvnitř podskupin (pro otázky a vnořené podskupiny)
+            self._clean_subgroups_recursive(g.subgroups, to_delete_sg_ids, to_delete_q_ids)
 
         self._refresh_tree()
         self._clear_editor()
         self.save_data()
         self.statusBar().showMessage(f"Smazáno {count} položek.", 4000)
 
+    def _clean_subgroups_recursive(self, subgroups: List[Subgroup], delete_sg_ids: set, delete_q_ids: set) -> None:
+        """Pomocná metoda pro rekurzivní čištění."""
+        for sg in subgroups:
+            # Smazání otázek v aktuální podskupině
+            if delete_q_ids:
+                sg.questions = [q for q in sg.questions if q.id not in delete_q_ids]
+            
+            # Filtrace vnořených podskupin (pokud existují)
+            if sg.subgroups:
+                sg.subgroups = [s for s in sg.subgroups if s.id not in delete_sg_ids]
+                # Rekurze do hloubky
+                self._clean_subgroups_recursive(sg.subgroups, delete_sg_ids, delete_q_ids)
 
     def _on_rename_clicked(self) -> None:
         kind, meta = self._selected_node()
