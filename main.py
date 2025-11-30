@@ -1704,7 +1704,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
-        # self.tree.itemChanged.connect(self._on_tree_item_changed)  <-- TOTO BYLO CHYBNĚ, ODSTRANĚNO
+        # self.tree.itemChanged.connect(self._on_tree_item_changed) # REMOVED previously
         
         self.btn_save_question.clicked.connect(self._on_save_question_clicked)
         self.btn_rename.clicked.connect(self._on_rename_clicked)
@@ -1713,12 +1713,15 @@ class MainWindow(QMainWindow):
         self.act_add_group.triggered.connect(self._add_group)
         self.act_add_subgroup.triggered.connect(self._add_subgroup)
         self.act_add_question.triggered.connect(self._add_question)
-        self.act_delete.triggered.connect(self._delete_selected) # fallback key delete
+        
+        # ZMĚNA: Klávesa Delete (act_delete) nyní volá hromadné mazání
+        self.act_delete.triggered.connect(self._bulk_delete_selected) 
+        
         self.btn_delete_selected.clicked.connect(self._bulk_delete_selected)
         
         # Autosave triggers
         self.title_edit.textChanged.connect(self._autosave_schedule)
-        self.combo_type.currentIndexChanged.connect(self._on_type_changed_ui) # trigger save logic inside
+        self.combo_type.currentIndexChanged.connect(self._on_type_changed_ui)
         self.spin_points.valueChanged.connect(self._autosave_schedule)
         self.spin_bonus_correct.valueChanged.connect(self._autosave_schedule)
         self.spin_bonus_wrong.valueChanged.connect(self._autosave_schedule)
@@ -1751,6 +1754,7 @@ class MainWindow(QMainWindow):
         # NOVÉ Tlačítka pro vtipné odpovědi
         self.btn_add_funny.clicked.connect(self._add_funny_row)
         self.btn_rem_funny.clicked.connect(self._remove_funny_row)
+
 
     def _add_funny_row(self) -> None:
         # Předáváme self.project_root pro vyhledání souborů
@@ -2144,43 +2148,8 @@ class MainWindow(QMainWindow):
         self.save_data()
 
     def _delete_selected(self) -> None:
-        kind, meta = self._selected_node()
-        if not kind:
-            return
-        if kind == "question":
-            qid = meta["id"]
-            gid = meta["parent_group_id"]
-            sgid = meta["parent_subgroup_id"]
-            if QMessageBox.question(self, "Smazat otázku", "Opravdu smazat vybranou otázku?") == QMessageBox.Yes:
-                sg = self._find_subgroup(gid, sgid)
-                if sg:
-                    sg.questions = [q for q in sg.questions if q.id != qid]
-                    self._refresh_tree()
-                    self._clear_editor()
-                    self.save_data()
-        elif kind == "subgroup":
-            gid = meta["parent_group_id"]
-            sgid = meta["id"]
-            if QMessageBox.question(self, "Smazat podskupinu", "Smazat podskupinu včetně podřízených podskupin a otázek?") == QMessageBox.Yes:
-                parent_sgid = meta.get("parent_subgroup_id")
-                if parent_sgid:
-                    parent = self._find_subgroup(gid, parent_sgid)
-                    if parent:
-                        parent.subgroups = [s for s in parent.subgroups if s.id != sgid]
-                else:
-                    g = self._find_group(gid)
-                    if g:
-                        g.subgroups = [s for s in g.subgroups if s.id != sgid]
-                self._refresh_tree()
-                self._clear_editor()
-                self.save_data()
-        elif kind == "group":
-            gid = meta["id"]
-            if QMessageBox.question(self, "Smazat skupinu", "Smazat celou skupinu včetně podskupin a otázek?") == QMessageBox.Yes:
-                self.root.groups = [g for g in self.root.groups if g.id != gid]
-                self._refresh_tree()
-                self._clear_editor()
-                self.save_data()
+        """Deprecated: Redirects to bulk delete."""
+        self._bulk_delete_selected()
 
     def _bulk_delete_selected(self) -> None:
         """Hromadné mazání vybraných položek (otázky, podskupiny, skupiny)."""
