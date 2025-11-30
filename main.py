@@ -47,7 +47,7 @@ from PySide6.QtGui import (
     QColor,
     QPalette,
     QFont,
-    QIcon, QBrush
+    QPixmap, QPainter, QIcon, QBrush
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -89,7 +89,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.3.7"
+APP_VERSION = "6.3.11"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2296,10 +2296,14 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
 
+        # 🔒 vypnout možnost výběru/označení
+        self.tree_funny.setSelectionMode(QAbstractItemView.NoSelection)
+        self.tree_funny.setFocusPolicy(Qt.NoFocus)
+
         layout.addWidget(self.tree_funny)
 
-        # DŮLEŽITÉ: přidáváme do left_tabs
-        self.left_tabs.addTab(self.tab_funny, "Seznam vtipných odpovědí")
+        # přidáváme do levého tab widgetu
+        self.left_tabs.addTab(self.tab_funny, "Hall of Shame - legendární odpovědi")
         
     def _refresh_funny_answers_tab(self) -> None:
         """Znovu vygeneruje strom 'Seznam vtipných odpovědí' ze struktury otázek."""
@@ -2313,10 +2317,30 @@ class MainWindow(QMainWindow):
         if root is None or not root.groups:
             return
 
-        # Předpřipravený styl pro řádek s otázkou
-        question_font = QFont()
-        question_font.setBold(True)
-        question_bg = QBrush(QColor(235, 240, 255))  # jemně modré pozadí
+        # Styl pro řádek otázky – bílá barva textu
+        question_brush = QBrush(QColor("white"))
+
+        # Vytvoříme vlastní ikonu otazníku, která je dobře vidět i na tmavém pozadí
+        pix = QPixmap(16, 16)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Barevná "bublina" pod otazníkem (například teal, dobře viditelná na tmavém pozadí)
+        painter.setBrush(QColor("teal"))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(1, 1, 14, 14)
+
+        # Bílý otazník uprostřed
+        painter.setPen(QColor("white"))
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSize(10)
+        painter.setFont(font)
+        painter.drawText(pix.rect(), Qt.AlignCenter, "?")
+        painter.end()
+
+        question_icon = QIcon(pix)
 
         def walk_subgroups(subgroups: List[Subgroup]) -> None:
             for sg in subgroups:
@@ -2330,11 +2354,11 @@ class MainWindow(QMainWindow):
                     q_title = q.title or "(bez názvu)"
                     q_item = QTreeWidgetItem()
                     q_item.setText(0, q_title)
+                    q_item.setIcon(0, question_icon)
 
-                    # barevné a typografické odlišení řádku otázky
+                    # bílá barva textu otázky ve všech sloupcích
                     for col in range(4):
-                        q_item.setFont(col, question_font)
-                        q_item.setBackground(col, question_bg)
+                        q_item.setForeground(col, question_brush)
 
                     self.tree_funny.addTopLevelItem(q_item)
 
