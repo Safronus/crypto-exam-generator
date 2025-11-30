@@ -84,7 +84,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "5.9.2"
+APP_VERSION = "6.1.0"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -1983,41 +1983,66 @@ class MainWindow(QMainWindow):
 
     def _refresh_tree(self) -> None:
         self.tree.clear()
+        
+        # Skupiny neřadíme, bereme jak jsou
         for g in self.root.groups:
             g_item = QTreeWidgetItem([g.name, ""]) # Prázdný text ve sloupci 1
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
             g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
             f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
             self.tree.addTopLevelItem(g_item)
-            self._add_subgroups_to_item(g_item, g.id, g.subgroups)
-        
+            
+            # Podskupiny seřadíme abecedně podle jména (case-insensitive)
+            sorted_subgroups = sorted(g.subgroups, key=lambda s: s.name.lower())
+            self._add_subgroups_to_item(g_item, g.id, sorted_subgroups)
+
         self.tree.expandAll()
-        
         # Vynutíme přepočet šířky sloupce 1 podle obsahu
         self.tree.resizeColumnToContents(1)
 
-
     def _add_subgroups_to_item(self, parent_item: QTreeWidgetItem, group_id: str, subgroups: List[Subgroup]) -> None:
+        # Pozn.: Vstupní 'subgroups' už může být seřazený z _refresh_tree, ale pro rekurzi (vnořené podskupiny)
+        # a pro otázky to musíme řešit zde.
+        
+        # Pokud bychom spoléhali na to, že 'subgroups' na vstupu je seřazené, je to OK pro první úroveň volání.
+        # Pro rekurzi si to raději pojistíme nebo seřadíme při volání.
+        # Zde iterujeme přes seznam, který nám byl předán.
+        
         for sg in subgroups:
             parent_meta = parent_item.data(0, Qt.UserRole) or {}
             parent_sub_id = parent_meta.get("id") if parent_meta.get("kind") == "subgroup" else None
             
-            # ZMĚNA: Druhý sloupec prázdný (místo "Podskupina")
             sg_item = QTreeWidgetItem([sg.name, ""])
-            
-            sg_item.setData(0, Qt.UserRole, {"kind": "subgroup", "id": sg.id, "parent_group_id": group_id, "parent_subgroup_id": parent_sub_id})
+            sg_item.setData(0, Qt.UserRole, {
+                "kind": "subgroup", 
+                "id": sg.id, 
+                "parent_group_id": group_id, 
+                "parent_subgroup_id": parent_sub_id
+            })
             sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirOpenIcon))
             parent_item.addChild(sg_item)
-            for q in sg.questions:
+            
+            # 1. Přidat Otázky (Seřazené abecedně podle titulku)
+            sorted_questions = sorted(sg.questions, key=lambda q: (q.title or "").lower())
+            
+            for q in sorted_questions:
                 label = "Klasická" if q.type == "classic" else "BONUS"
                 pts = q.points if q.type == "classic" else self._bonus_points_label(q)
+                
                 q_item = QTreeWidgetItem([q.title or "Otázka", f"{label} | {pts}"])
-                q_item.setData(0, Qt.UserRole, {"kind": "question", "id": q.id, "parent_group_id": group_id, "parent_subgroup_id": sg.id})
+                q_item.setData(0, Qt.UserRole, {
+                    "kind": "question", 
+                    "id": q.id, 
+                    "parent_group_id": group_id, 
+                    "parent_subgroup_id": sg.id
+                })
                 self._apply_question_item_visuals(q_item, q.type)
                 sg_item.addChild(q_item)
+            
+            # 2. Rekurze pro vnořené podskupiny (Seřazené)
             if sg.subgroups:
-                self._add_subgroups_to_item(sg_item, group_id, sg.subgroups)
-
+                sorted_nested_subgroups = sorted(sg.subgroups, key=lambda s: s.name.lower())
+                self._add_subgroups_to_item(sg_item, group_id, sorted_nested_subgroups)
 
     def _selected_node(self) -> Tuple[Optional[str], Optional[dict]]:
         items = self.tree.selectedItems()
