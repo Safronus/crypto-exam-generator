@@ -84,11 +84,12 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QTreeWidgetItemIterator,
-    QHeaderView, QMenu, QTabWidget
+    QHeaderView, QMenu, QTabWidget,
+    QTreeWidget, QTreeWidgetItem
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.3.3"
+APP_VERSION = "6.3.6"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -1933,7 +1934,8 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self.load_data()
         self._refresh_tree()
-        
+        self._refresh_funny_answers_tab()
+
         # ZMĚNA: Strom 60%, Editor 40% (cca 840px : 560px)
         # Nyní, když je self.splitter správně nastaven v _build_ui, můžeme přímo nastavit velikosti.
         self.splitter.setSizes([940, 860])
@@ -2042,6 +2044,8 @@ class MainWindow(QMainWindow):
         history_layout.addWidget(btn_refresh_hist)
 
         self.left_tabs.addTab(self.tab_history, "Historie")
+        
+        self._init_funny_answers_tab()
         
         left_container_layout.addWidget(self.left_tabs)
 
@@ -2271,6 +2275,91 @@ class MainWindow(QMainWindow):
 
         self._refresh_history_table()
 
+    def _init_funny_answers_tab(self) -> None:
+        """Inicializuje záložku s přehledem vtipných odpovědí."""
+        self.tab_funny = QWidget()
+        layout = QVBoxLayout(self.tab_funny)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        self.tree_funny = QTreeWidget()
+        # Tabulkový vzhled: odpověď, datum, jméno, zdroj
+        self.tree_funny.setColumnCount(4)
+        self.tree_funny.setHeaderLabels(["Otázka / vtipná odpověď", "Datum", "Jméno", "Zdroj"])
+        self.tree_funny.setRootIsDecorated(True)   # strom – otázky se dají rozbalit/sbalit
+        self.tree_funny.setIndentation(18)
+        self.tree_funny.setUniformRowHeights(True)
+        self.tree_funny.setAlternatingRowColors(True)
+
+        header = self.tree_funny.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+
+        layout.addWidget(self.tree_funny)
+
+        # DŮLEŽITÉ: přidáváme do left_tabs
+        self.left_tabs.addTab(self.tab_funny, "Seznam vtipných odpovědí")
+        
+    def _refresh_funny_answers_tab(self) -> None:
+        """Znovu vygeneruje strom 'Seznam vtipných odpovědí' ze struktury otázek."""
+        # Pokud záložka ještě není inicializovaná, nic neděláme
+        if not hasattr(self, "tree_funny"):
+            return
+
+        self.tree_funny.clear()
+
+        root = getattr(self, "root", None)
+        if root is None or not root.groups:
+            return
+
+        def walk_subgroups(subgroups: List[Subgroup]) -> None:
+            for sg in subgroups:
+                for q in sg.questions:
+                    # Sebereme vtipné odpovědi (může to být list dictů nebo FunnyAnswer)
+                    f_list = getattr(q, "funny_answers", []) or []
+                    if not f_list:
+                        continue
+
+                    # 🔹 Top-level položka = JEN název otázky (bez skupin/podskupin)
+                    q_title = q.title or "(bez názvu)"
+                    q_item = QTreeWidgetItem()
+                    q_item.setText(0, q_title)
+                    # ostatní sloupce necháme prázdné
+                    self.tree_funny.addTopLevelItem(q_item)
+
+                    # 🔹 Podřízené položky = jednotlivé vtipné odpovědi, tabulkově
+                    for fa in f_list:
+                        if isinstance(fa, FunnyAnswer):
+                            text = fa.text
+                            author = fa.author
+                            date = fa.date
+                            source_doc = getattr(fa, "source_doc", "")
+                        else:
+                            text = fa.get("text", "")
+                            author = fa.get("author", "")
+                            date = fa.get("date", "")
+                            source_doc = fa.get("source_doc", "")
+
+                        # Krátký náhled textu (1. sloupec)
+                        snippet = (text or "").replace("\n", " ")
+                        if len(snippet) > 120:
+                            snippet = snippet[:117] + "..."
+
+                        child = QTreeWidgetItem(q_item)
+                        child.setText(0, snippet)
+                        child.setText(1, date or "")
+                        child.setText(2, author or "")
+                        child.setText(3, os.path.basename(source_doc) if source_doc else "")
+
+                    # defaultně necháme otázku sbalenou – uživatel si rozbalí podle potřeby
+                    q_item.setExpanded(False)
+
+                # Rekurze do podskupin
+                walk_subgroups(sg.subgroups)
+
+        for g in root.groups:
+            walk_subgroups(g.subgroups)
 
     def register_export(self, filename: str, k_hash: str) -> None:
         """Zaznamená nový export a obnoví tabulku."""
@@ -3125,6 +3214,9 @@ class MainWindow(QMainWindow):
 
                         if not silent:
                             self.statusBar().showMessage("Změny otázky uloženy (lokálně).", 1200)
+
+                        # 🔁 po každé změně otázky obnovíme přehled vtipných odpovědí
+                        self._refresh_funny_answers_tab()
                         return True
 
                 if apply_in(sg.subgroups):
