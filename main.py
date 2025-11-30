@@ -83,7 +83,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QTreeWidgetItemIterator,
-    QHeaderView, QMenu
+    QHeaderView, QMenu, QTabWidget
 )
 
 APP_NAME = "Crypto Exam Generator"
@@ -1286,21 +1286,20 @@ class ExportWizard(QWizard):
         repl_plain["DatumCas"] = dt_str
         repl_plain["DATUMCAS"] = dt_str
         
-        # Verze (ZMĚNA: Bez UUID)
+        # Verze
         prefix = self.le_prefix.text().strip()
         today = datetime.now().strftime("%Y-%m-%d")
         verze_str = f"{prefix} {today}"
         repl_plain["PoznamkaVerze"] = verze_str
         repl_plain["POZNAMKAVERZE"] = verze_str
         
-        # NOVÉ: Kontrolní Hash (Použijeme ten z náhledu)
+        # Kontrolní Hash
         k_hash = getattr(self, "_cached_hash", "")
         if not k_hash:
-            # Fallback, ale neměl by být potřeba, pokud prošel přes stranu 3
             ts = str(datetime.now().timestamp())
             salt = secrets.token_hex(16)
             data_to_hash = f"{ts}{salt}"
-            k_hash = hashlib.sha3_256(data_to_hash.encode("utf-8")).hexdigest()
+            k_hash = hashlib.sha3_512(data_to_hash.encode("utf-8")).hexdigest()
 
         repl_plain["KontrolniHash"] = k_hash
         repl_plain["KONTROLNIHASH"] = k_hash
@@ -1336,6 +1335,9 @@ class ExportWizard(QWizard):
         except Exception as e:
             QMessageBox.critical(self, "Export", f"Chyba při exportu:\n{e}")
             return
+
+        # NOVÉ: Registrace exportu do historie
+        self.owner.register_export(self.output_path.name, k_hash)
 
         QMessageBox.information(self, "Export", f"Export dokončen.\nSoubor uložen:\n{self.output_path}")
         super().accept()
@@ -1566,14 +1568,22 @@ class MainWindow(QMainWindow):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(8)
 
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        # LEVÝ PANEL (nyní obsahuje záložky)
+        left_panel_container = QWidget()
+        left_container_layout = QVBoxLayout(left_panel_container)
+        left_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.left_tabs = QTabWidget()
+        
+        # --- ZÁLOŽKA 1: OTÁZKY (Původní obsah) ---
+        self.tab_questions = QWidget()
+        questions_layout = QVBoxLayout(self.tab_questions)
+        questions_layout.setContentsMargins(4, 4, 4, 4)
+        questions_layout.setSpacing(6)
 
         filter_bar = QWidget()
         filter_layout = QHBoxLayout(filter_bar)
-        filter_layout.setContentsMargins(6, 6, 6, 0)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
         filter_layout.setSpacing(6)
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Filtr: název / obsah otázky…")
@@ -1582,11 +1592,42 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.filter_edit, 1)
         filter_layout.addWidget(self.btn_move_selected)
         filter_layout.addWidget(self.btn_delete_selected)
-        left_layout.addWidget(filter_bar)
+        questions_layout.addWidget(filter_bar)
 
         self.tree = DnDTree(self)
-        left_layout.addWidget(self.tree, 1)
+        questions_layout.addWidget(self.tree, 1)
+        
+        self.left_tabs.addTab(self.tab_questions, "Otázky")
 
+        # --- ZÁLOŽKA 2: HISTORIE (Upraveno) ---
+        self.tab_history = QWidget()
+        history_layout = QVBoxLayout(self.tab_history)
+        history_layout.setContentsMargins(4, 4, 4, 4)
+        
+        self.table_history = QTableWidget(0, 2)
+        self.table_history.setHorizontalHeaderLabels(["Soubor", "Hash (SHA3-256)"])
+        self.table_history.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents) 
+        self.table_history.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table_history.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_history.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table_history.setSortingEnabled(True)
+        
+        # NOVÉ: Kontextové menu pro historii
+        self.table_history.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_history.customContextMenuRequested.connect(self._on_history_context_menu)
+
+        history_layout.addWidget(self.table_history)
+        
+        btn_refresh_hist = QPushButton("Obnovit historii")
+        btn_refresh_hist.clicked.connect(self._refresh_history_table)
+        history_layout.addWidget(btn_refresh_hist)
+
+        self.left_tabs.addTab(self.tab_history, "Historie")
+        
+        left_container_layout.addWidget(self.left_tabs)
+
+
+        # PRAVÝ PANEL (Detail / Editor)
         self.detail_stack = QWidget()
         self.detail_layout = QVBoxLayout(self.detail_stack)
         self.detail_layout.setContentsMargins(6, 6, 6, 6)
@@ -1641,7 +1682,7 @@ class MainWindow(QMainWindow):
         # --- NOVÉ: Správná odpověď ---
         self.edit_correct_answer = QTextEdit()
         self.edit_correct_answer.setPlaceholderText("Volitelný text správné odpovědi...")
-        self.edit_correct_answer.setFixedHeight(60) # Menší výška
+        self.edit_correct_answer.setFixedHeight(60)
         self.form_layout.addRow("Správná odpověď:", self.edit_correct_answer)
 
         # --- NOVÉ: Vtipné odpovědi (Tabulka + Tlačítka) ---
@@ -1651,14 +1692,14 @@ class MainWindow(QMainWindow):
         
         self.table_funny = QTableWidget(0, 3)
         self.table_funny.setHorizontalHeaderLabels(["Odpověď", "Datum", "Jméno"])
-        self.table_funny.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch) # Odpověď se roztahuje
+        self.table_funny.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table_funny.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table_funny.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table_funny.setFixedHeight(120)
         self.table_funny.setSelectionBehavior(QAbstractItemView.SelectRows)
         
         btns_layout = QHBoxLayout()
-        self.btn_add_funny = QPushButton("Přidat vtipnou")
+        self.btn_add_funny = QPushButton("Přidat vtipnou odpoveď")
         self.btn_rem_funny = QPushButton("Odebrat")
         btns_layout.addWidget(self.btn_add_funny)
         btns_layout.addWidget(self.btn_rem_funny)
@@ -1672,7 +1713,7 @@ class MainWindow(QMainWindow):
         self.text_edit = QTextEdit()
         self.text_edit.setAcceptRichText(True)
         self.text_edit.setPlaceholderText("Sem napište znění otázky…\nPodporováno: tučné, kurzíva, podtržení, barva, odrážky, zarovnání.")
-        self.text_edit.setMinimumHeight(200) # Zmenšeno kvůli novým polím
+        self.text_edit.setMinimumHeight(200)
 
         self.btn_save_question = QPushButton("Uložit změny otázky"); self.btn_save_question.setDefault(True)
 
@@ -1690,7 +1731,7 @@ class MainWindow(QMainWindow):
         self.detail_layout.addWidget(self.rename_panel)
         self._set_editor_enabled(False)
 
-        self.splitter.addWidget(left_panel)
+        self.splitter.addWidget(left_panel_container)
         self.splitter.addWidget(self.detail_stack)
         self.splitter.setStretchFactor(1, 1)
         self.setCentralWidget(self.splitter)
@@ -1716,6 +1757,126 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_delete)
 
         self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
+        
+        self._refresh_history_table()
+
+    def _refresh_history_table(self) -> None:
+        """Načte historii exportů z history.json a naplní tabulku."""
+        history_file = self.project_root / "data" / "history.json"
+        history = []
+        if history_file.exists():
+            try:
+                with open(history_file, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except Exception as e:
+                print(f"Chyba při čtení historie: {e}")
+        
+        self.table_history.setRowCount(0)
+        self.table_history.setSortingEnabled(False)
+        
+        for entry in history:
+            row = self.table_history.rowCount()
+            self.table_history.insertRow(row)
+            
+            fn = entry.get("filename", "")
+            h = entry.get("hash", "")
+            
+            self.table_history.setItem(row, 0, QTableWidgetItem(fn))
+            
+            h_item = QTableWidgetItem(h)
+            h_item.setTextAlignment(Qt.AlignCenter)
+            self.table_history.setItem(row, 1, h_item)
+            
+        self.table_history.setSortingEnabled(True)
+
+    def _on_history_context_menu(self, pos) -> None:
+        """Zobrazí kontextové menu pro tabulku historie."""
+        items = self.table_history.selectedItems()
+        if not items:
+            return
+            
+        menu = QMenu(self)
+        act_del = QAction("Smazat záznam(y)", self)
+        act_del.triggered.connect(self._delete_history_items)
+        menu.addAction(act_del)
+        menu.exec(self.table_history.mapToGlobal(pos))
+
+    def _delete_history_items(self) -> None:
+        """Smaže vybrané záznamy z historie."""
+        # Získáme unikátní řádky
+        rows = sorted(set(index.row() for index in self.table_history.selectedIndexes()), reverse=True)
+        if not rows:
+            return
+
+        if QMessageBox.question(self, "Smazat", f"Opravdu smazat {len(rows)} záznamů z historie?") != QMessageBox.Yes:
+            return
+
+        # Musíme smazat data z JSONu.
+        # Protože tabulka může být seřazená jinak než JSON, musíme identifikovat záznamy podle obsahu (filename + hash).
+        # Nebo jednodušeji: Načteme JSON, odstraníme ty, co odpovídají vybraným řádkům.
+        
+        to_remove = [] # List of (filename, hash)
+        for r in rows:
+            fn = self.table_history.item(r, 0).text()
+            h = self.table_history.item(r, 1).text()
+            to_remove.append((fn, h))
+
+        history_file = self.project_root / "data" / "history.json"
+        history = []
+        if history_file.exists():
+            try:
+                with open(history_file, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except Exception:
+                pass
+
+        # Filtrace (ponecháme ty, co nejsou v to_remove)
+        new_history = []
+        for entry in history:
+            match = False
+            for r_fn, r_h in to_remove:
+                if entry.get("filename") == r_fn and entry.get("hash") == r_h:
+                    match = True
+                    break
+            if not match:
+                new_history.append(entry)
+        
+        # Uložení
+        try:
+            with open(history_file, "w", encoding="utf-8") as f:
+                json.dump(new_history, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            QMessageBox.warning(self, "Chyba", f"Nelze uložit historii:\n{e}")
+
+        self._refresh_history_table()
+
+
+    def register_export(self, filename: str, k_hash: str) -> None:
+        """Zaznamená nový export a obnoví tabulku."""
+        history_file = self.project_root / "data" / "history.json"
+        history = []
+        if history_file.exists():
+            try:
+                with open(history_file, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except Exception:
+                pass # Ignorujeme chyby čtení, vytvoříme nový seznam
+        
+        # Přidání záznamu
+        history.append({
+            "filename": filename, 
+            "hash": k_hash, 
+            "date": datetime.now().isoformat()
+        })
+        
+        # Uložení
+        try:
+            with open(history_file, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            QMessageBox.warning(self, "Chyba historie", f"Nepodařilo se uložit historii exportu:\n{e}")
+            
+        self._refresh_history_table()
 
 
     def _set_editor_enabled(self, enabled: bool) -> None:
