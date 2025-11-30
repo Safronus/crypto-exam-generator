@@ -87,7 +87,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.3.0"
+APP_VERSION = "6.3.1"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -1830,6 +1830,22 @@ class FunnyAnswerDialog(QDialog):
             except Exception:
                 # Pokud parsování selže, neděláme nic (necháme aktuální)
                 pass
+            
+    def set_data(self, text: str, date_str: str, author: str) -> None:
+        """Naplní formulář daty pro editaci."""
+        self.text_edit.setText(text)
+        self.author_edit.setText(author)
+        
+        # Pokusíme se parsovat datum (očekáváme dd.MM.yyyy nebo dd.MM.yyyy HH:mm)
+        # Zkusíme s časem
+        dt = QDateTime.fromString(date_str, "dd.MM.yyyy HH:mm")
+        if not dt.isValid():
+            # Zkusíme bez času
+            dt = QDateTime.fromString(date_str, "dd.MM.yyyy")
+        
+        if dt.isValid():
+            self.date_edit.setDateTime(dt)
+
 
     def get_data(self) -> tuple[str, str, str]:
         # Vracíme datum ve formátu stringu, jak je zvykem v aplikaci (bez času, nebo s časem dle preference?)
@@ -2295,9 +2311,8 @@ class MainWindow(QMainWindow):
         self.act_add_subgroup.triggered.connect(self._add_subgroup)
         self.act_add_question.triggered.connect(self._add_question)
         
-        # ZMĚNA: Klávesa Delete (act_delete) nyní volá hromadné mazání
+        # Delete shortcut
         self.act_delete.triggered.connect(self._bulk_delete_selected) 
-        
         self.btn_delete_selected.clicked.connect(self._bulk_delete_selected)
         
         # Autosave triggers
@@ -2308,10 +2323,14 @@ class MainWindow(QMainWindow):
         self.spin_bonus_wrong.valueChanged.connect(self._autosave_schedule)
         self.text_edit.textChanged.connect(self._autosave_schedule)
         
-        # NOVÉ Autosave triggers
+        # Autosave triggers (New fields)
         self.edit_correct_answer.textChanged.connect(self._autosave_schedule)
         self.table_funny.itemChanged.connect(self._autosave_schedule)
         
+        # NOVÉ: Kontextové menu pro vtipné odpovědi (Editace)
+        self.table_funny.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_funny.customContextMenuRequested.connect(self._on_funny_context_menu)
+
         # Formátování
         self.action_bold.triggered.connect(lambda: self._toggle_format("bold"))
         self.action_italic.triggered.connect(lambda: self._toggle_format("italic"))
@@ -2332,10 +2351,9 @@ class MainWindow(QMainWindow):
         # Drag Drop Move (btn)
         self.btn_move_selected.clicked.connect(self._move_selected_dialog)
 
-        # NOVÉ Tlačítka pro vtipné odpovědi
+        # Tlačítka pro vtipné odpovědi
         self.btn_add_funny.clicked.connect(self._add_funny_row)
         self.btn_rem_funny.clicked.connect(self._remove_funny_row)
-
 
     def _add_funny_row(self) -> None:
         # Předáváme self.project_root pro vyhledání souborů
@@ -2359,6 +2377,52 @@ class MainWindow(QMainWindow):
         for r in rows:
             self.table_funny.removeRow(r)
         if rows:
+            self._autosave_schedule()
+
+    def _on_funny_context_menu(self, pos) -> None:
+        """Kontextové menu pro tabulku vtipných odpovědí."""
+        item = self.table_funny.itemAt(pos)
+        if not item:
+            return
+        
+        menu = QMenu(self)
+        act_edit = QAction("Upravit odpověď", self)
+        act_edit.triggered.connect(lambda: self._edit_funny_row(item.row()))
+        menu.addAction(act_edit)
+        
+        act_del = QAction("Smazat odpověď", self)
+        act_del.triggered.connect(self._remove_funny_row) # Použije selected items
+        menu.addAction(act_del)
+        
+        menu.exec(self.table_funny.mapToGlobal(pos))
+
+    def _edit_funny_row(self, row: int) -> None:
+        """Otevře dialog pro editaci vtipné odpovědi na daném řádku."""
+        # Načtení dat z tabulky
+        text_item = self.table_funny.item(row, 0)
+        date_item = self.table_funny.item(row, 1)
+        author_item = self.table_funny.item(row, 2)
+        
+        if not text_item or not date_item or not author_item:
+            return
+            
+        old_text = text_item.text()
+        old_date = date_item.text()
+        old_author = author_item.text()
+        
+        # Otevření dialogu
+        dlg = FunnyAnswerDialog(self, project_root=self.project_root)
+        dlg.setWindowTitle("Upravit vtipnou odpověď")
+        dlg.set_data(old_text, old_date, old_author)
+        
+        if dlg.exec() == QDialog.Accepted:
+            new_text, new_date, new_author = dlg.get_data()
+            
+            # Uložení zpět do tabulky
+            self.table_funny.setItem(row, 0, QTableWidgetItem(new_text))
+            self.table_funny.setItem(row, 1, QTableWidgetItem(new_date))
+            self.table_funny.setItem(row, 2, QTableWidgetItem(new_author))
+            
             self._autosave_schedule()
 
 
