@@ -20,6 +20,7 @@ import json
 import sys
 import uuid as _uuid
 import re
+import os
 import html as _html
 import zipfile
 from xml.etree import ElementTree as ET
@@ -87,7 +88,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.3.1"
+APP_VERSION = "6.3.3"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -132,6 +133,8 @@ class FunnyAnswer:
     text: str
     author: str
     date: str
+    # Nové pole – uložený zdrojový dokument (cesta k souboru, nebo prázdný string)
+    source_doc: str = ""
 
 @dataclass
 class Question:
@@ -1831,31 +1834,37 @@ class FunnyAnswerDialog(QDialog):
                 # Pokud parsování selže, neděláme nic (necháme aktuální)
                 pass
             
-    def set_data(self, text: str, date_str: str, author: str) -> None:
+    def set_data(self, text: str, date_str: str, author: str, source_doc: Optional[str] = None) -> None:
         """Naplní formulář daty pro editaci."""
         self.text_edit.setText(text)
         self.author_edit.setText(author)
-        
+
         # Pokusíme se parsovat datum (očekáváme dd.MM.yyyy nebo dd.MM.yyyy HH:mm)
-        # Zkusíme s časem
         dt = QDateTime.fromString(date_str, "dd.MM.yyyy HH:mm")
         if not dt.isValid():
-            # Zkusíme bez času
             dt = QDateTime.fromString(date_str, "dd.MM.yyyy")
-        
+
         if dt.isValid():
             self.date_edit.setDateTime(dt)
 
-
-    def get_data(self) -> tuple[str, str, str]:
-        # Vracíme datum ve formátu stringu, jak je zvykem v aplikaci (bez času, nebo s časem dle preference?)
-        # Původní kód používal dd.MM.yyyy, ale formát v tabulce FunnyAnswer je jen string.
-        # Pokud chceme zachovat čas získaný z názvu souboru, formátujeme ho.
-        return (
-            self.text_edit.toPlainText().strip(),
-            self.date_edit.dateTime().toString("dd.MM.yyyy HH:mm"), 
-            self.author_edit.text().strip()
-        )
+        # Nastavení zdrojového dokumentu v comboboxu
+        if source_doc:
+            idx = self.combo_source.findData(source_doc)
+            if idx >= 0:
+                self.combo_source.setCurrentIndex(idx)
+            else:
+                self.combo_source.setCurrentIndex(0)
+        else:
+            self.combo_source.setCurrentIndex(0)
+            
+    def get_data(self) -> tuple[str, str, str, str]:
+        # Vracíme text, datum, autora a (případně) cestu ke zdrojovému dokumentu
+        text = self.text_edit.toPlainText().strip()
+        date_str = self.date_edit.dateTime().toString("dd.MM.yyyy HH:mm")
+        author = self.author_edit.text().strip()
+        data = self.combo_source.currentData()
+        source_doc = str(data) if data is not None else ""
+        return text, date_str, author, source_doc
 
 class MainWindow(QMainWindow):
     """Hlavní okno aplikace."""
@@ -2100,11 +2109,13 @@ class MainWindow(QMainWindow):
         fc_layout = QVBoxLayout(self.funny_container)
         fc_layout.setContentsMargins(0,0,0,0)
         
-        self.table_funny = QTableWidget(0, 3)
-        self.table_funny.setHorizontalHeaderLabels(["Odpověď", "Datum", "Jméno"])
+        # NOVÉ: přidán 4. sloupec pro zdrojový dokument
+        self.table_funny = QTableWidget(0, 4)
+        self.table_funny.setHorizontalHeaderLabels(["Odpověď", "Datum", "Jméno", "Zdroj"])
         self.table_funny.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table_funny.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table_funny.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_funny.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table_funny.setFixedHeight(120)
         self.table_funny.setSelectionBehavior(QAbstractItemView.SelectRows)
         
@@ -2358,19 +2369,25 @@ class MainWindow(QMainWindow):
     def _add_funny_row(self) -> None:
         # Předáváme self.project_root pro vyhledání souborů
         dlg = FunnyAnswerDialog(self, project_root=self.project_root)
-        
+
         if dlg.exec() == QDialog.Accepted:
-            text, date_str, author = dlg.get_data()
-            
+            text, date_str, author, source_doc = dlg.get_data()
+
             row = self.table_funny.rowCount()
             self.table_funny.insertRow(row)
-            
+
             self.table_funny.setItem(row, 0, QTableWidgetItem(text))
             self.table_funny.setItem(row, 1, QTableWidgetItem(date_str))
             self.table_funny.setItem(row, 2, QTableWidgetItem(author))
-            
-            self._autosave_schedule()
 
+            # Ve sloupci "Zdroj" zobrazíme jen název souboru,
+            # ale do UserRole uložíme plnou cestu
+            display_source = os.path.basename(source_doc) if source_doc else ""
+            source_item = QTableWidgetItem(display_source)
+            source_item.setData(Qt.UserRole, source_doc)
+            self.table_funny.setItem(row, 3, source_item)
+
+            self._autosave_schedule()
 
     def _remove_funny_row(self) -> None:
         rows = sorted(set(index.row() for index in self.table_funny.selectedIndexes()), reverse=True)
@@ -2402,30 +2419,45 @@ class MainWindow(QMainWindow):
         text_item = self.table_funny.item(row, 0)
         date_item = self.table_funny.item(row, 1)
         author_item = self.table_funny.item(row, 2)
-        
+        source_item = self.table_funny.item(row, 3) if self.table_funny.columnCount() > 3 else None
+
         if not text_item or not date_item or not author_item:
             return
-            
+
         old_text = text_item.text()
         old_date = date_item.text()
         old_author = author_item.text()
-        
+
+        # Plná cesta je v UserRole, pokud není, použijeme text
+        if source_item is not None:
+            data = source_item.data(Qt.UserRole)
+            if isinstance(data, str) and data:
+                old_source = data
+            else:
+                old_source = source_item.text()
+        else:
+            old_source = ""
+
         # Otevření dialogu
         dlg = FunnyAnswerDialog(self, project_root=self.project_root)
         dlg.setWindowTitle("Upravit vtipnou odpověď")
-        dlg.set_data(old_text, old_date, old_author)
-        
+        dlg.set_data(old_text, old_date, old_author, old_source)
+
         if dlg.exec() == QDialog.Accepted:
-            new_text, new_date, new_author = dlg.get_data()
-            
+            new_text, new_date, new_author, new_source = dlg.get_data()
+
             # Uložení zpět do tabulky
             self.table_funny.setItem(row, 0, QTableWidgetItem(new_text))
             self.table_funny.setItem(row, 1, QTableWidgetItem(new_date))
             self.table_funny.setItem(row, 2, QTableWidgetItem(new_author))
-            
+
+            display_source = os.path.basename(new_source) if new_source else ""
+            new_source_item = QTableWidgetItem(display_source)
+            new_source_item.setData(Qt.UserRole, new_source)
+            self.table_funny.setItem(row, 3, new_source_item)
+
             self._autosave_schedule()
-
-
+            
     def _build_menus(self) -> None:
         bar = self.menuBar()
         self.file_menu = bar.addMenu("Soubor")
@@ -2569,7 +2601,10 @@ class MainWindow(QMainWindow):
         return Subgroup(id=sg["id"], name=sg["name"], subgroups=subgroups, questions=questions)
 
     def _parse_question(self, q: dict) -> Question:
-        title = q.get("title") or self._derive_title_from_html(q.get("text_html") or "<p></p>", prefix=("BONUS: " if q.get("type") == "bonus" else ""))
+        title = q.get("title") or self._derive_title_from_html(
+            q.get("text_html") or "<p></p>",
+            prefix=("BONUS: " if q.get("type") == "bonus" else ""),
+        )
         bc_default = 1.0 if q.get("type") == "bonus" else 0.0
         bw_default = 0.0
         try:
@@ -2580,18 +2615,21 @@ class MainWindow(QMainWindow):
             bw = round(float(q.get("bonus_wrong", bw_default)), 2)
         except Exception:
             bw = round(float(bw_default), 2)
-            
-        # NOVÉ: Deserializace vtipných odpovědí
+
+        # Deserializace vtipných odpovědí (včetně zdrojového dokumentu, pokud je uložen)
         f_answers_raw = q.get("funny_answers", [])
-        f_answers = []
+        f_answers: List[FunnyAnswer] = []
         for item in f_answers_raw:
             if isinstance(item, dict):
-                f_answers.append(FunnyAnswer(
-                    text=item.get("text", ""),
-                    date=item.get("date", ""),
-                    author=item.get("author", "")
-                ))
-                
+                f_answers.append(
+                    FunnyAnswer(
+                        text=item.get("text", ""),
+                        author=item.get("author", ""),
+                        date=item.get("date", ""),
+                        source_doc=item.get("source_doc", ""),
+                    )
+                )
+
         return Question(
             id=q.get("id", ""),
             type=q.get("type", "classic"),
@@ -2602,9 +2640,8 @@ class MainWindow(QMainWindow):
             bonus_wrong=bw,
             created_at=q.get("created_at", ""),
             correct_answer=q.get("correct_answer", ""),
-            funny_answers=f_answers
+            funny_answers=f_answers,
         )
-
 
     def _serialize_group(self, g: Group) -> dict:
         return {"id": g.id, "name": g.name, "subgroups": [self._serialize_subgroup(sg) for sg in g.subgroups]}
@@ -2965,7 +3002,6 @@ class MainWindow(QMainWindow):
         if visible:
             self._on_type_changed_ui()
 
-
     def _load_question_to_editor(self, q: Question) -> None:
         self._current_question_id = q.id
         self.combo_type.setCurrentIndex(0 if q.type == "classic" else 1)
@@ -2974,75 +3010,123 @@ class MainWindow(QMainWindow):
         self.spin_bonus_wrong.setValue(float(q.bonus_wrong))
         self.text_edit.setHtml(q.text_html or "<p><br></p>")
         self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
-        
-        # NOVÉ: Načtení správné odpovědi
+
+        # Načtení správné odpovědi
         self.edit_correct_answer.setPlainText(q.correct_answer or "")
-        
-        # NOVÉ: Načtení vtipných odpovědí
+
+        # Načtení vtipných odpovědí
         self.table_funny.setRowCount(0)
-        # Pojistka pro případ starého JSONu kde funny_answers může být None nebo chybět v __init__ (pokud by se nepoužil default)
+        # Pojistka pro případ starého JSONu kde funny_answers může být None
         f_answers = getattr(q, "funny_answers", []) or []
-        
+
         for fa in f_answers:
             # fa může být dict (z JSONu) nebo objekt FunnyAnswer
-            text = fa.text if isinstance(fa, FunnyAnswer) else fa.get("text", "")
-            date = fa.date if isinstance(fa, FunnyAnswer) else fa.get("date", "")
-            author = fa.author if isinstance(fa, FunnyAnswer) else fa.get("author", "")
-            
+            if isinstance(fa, FunnyAnswer):
+                text = fa.text
+                date = fa.date
+                author = fa.author
+                source_doc = fa.source_doc
+            else:
+                text = fa.get("text", "")
+                date = fa.get("date", "")
+                author = fa.get("author", "")
+                source_doc = fa.get("source_doc", "")
+
             row = self.table_funny.rowCount()
             self.table_funny.insertRow(row)
             self.table_funny.setItem(row, 0, QTableWidgetItem(text))
             self.table_funny.setItem(row, 1, QTableWidgetItem(date))
             self.table_funny.setItem(row, 2, QTableWidgetItem(author))
 
+            display_source = os.path.basename(source_doc) if source_doc else ""
+            source_item = QTableWidgetItem(display_source)
+            source_item.setData(Qt.UserRole, source_doc)
+            self.table_funny.setItem(row, 3, source_item)
+
         self._set_editor_enabled(True)
-        
+
         # Synchronizace viditelnosti polí podle načteného typu
         self._on_type_changed_ui()
 
     def _apply_editor_to_current_question(self, silent: bool = False) -> None:
         if not self._current_question_id:
             return
+
         def apply_in(sgs: List[Subgroup]) -> bool:
             for sg in sgs:
                 for i, q in enumerate(sg.questions):
                     if q.id == self._current_question_id:
                         q.type = "classic" if self.combo_type.currentIndex() == 0 else "bonus"
                         q.text_html = self.text_edit.toHtml()
-                        q.title = (self.title_edit.text().strip() or self._derive_title_from_html(q.text_html, prefix=("BONUS: " if q.type == "bonus" else "")))
-                        
+                        q.title = (
+                            self.title_edit.text().strip()
+                            or self._derive_title_from_html(
+                                q.text_html,
+                                prefix=("BONUS: " if q.type == "bonus" else ""),
+                            )
+                        )
+
                         # Uložení bodů
                         if q.type == "classic":
-                            q.points = int(self.spin_points.value()); q.bonus_correct = 0.0; q.bonus_wrong = 0.0
+                            q.points = int(self.spin_points.value())
+                            q.bonus_correct = 0.0
+                            q.bonus_wrong = 0.0
                         else:
-                            q.points = 0; q.bonus_correct = round(float(self.spin_bonus_correct.value()), 2); q.bonus_wrong = round(float(self.spin_bonus_wrong.value()), 2)
-                        
-                        # NOVÉ: Uložení správné odpovědi
+                            q.points = 0
+                            q.bonus_correct = round(float(self.spin_bonus_correct.value()), 2)
+                            q.bonus_wrong = round(float(self.spin_bonus_wrong.value()), 2)
+
+                        # Uložení správné odpovědi
                         q.correct_answer = self.edit_correct_answer.toPlainText()
-                        
-                        # NOVÉ: Uložení vtipných odpovědí z tabulky
-                        new_funny = []
+
+                        # Uložení vtipných odpovědí z tabulky (včetně zdrojového dokumentu)
+                        new_funny: List[FunnyAnswer] = []
                         for r in range(self.table_funny.rowCount()):
-                            t = self.table_funny.item(r, 0).text()
-                            d = self.table_funny.item(r, 1).text()
-                            a = self.table_funny.item(r, 2).text()
-                            new_funny.append(FunnyAnswer(text=t, date=d, author=a))
+                            t_item = self.table_funny.item(r, 0)
+                            if not t_item:
+                                continue
+                            d_item = self.table_funny.item(r, 1)
+                            a_item = self.table_funny.item(r, 2)
+                            s_item = self.table_funny.item(r, 3) if self.table_funny.columnCount() > 3 else None
+
+                            text = t_item.text()
+                            date = d_item.text() if d_item else ""
+                            author = a_item.text() if a_item else ""
+
+                            if s_item is not None:
+                                data = s_item.data(Qt.UserRole)
+                                if isinstance(data, str) and data:
+                                    source_doc = data
+                                else:
+                                    source_doc = s_item.text()
+                            else:
+                                source_doc = ""
+
+                            new_funny.append(
+                                FunnyAnswer(
+                                    text=text,
+                                    author=author,
+                                    date=date,
+                                    source_doc=source_doc,
+                                )
+                            )
                         q.funny_answers = new_funny
 
                         sg.questions[i] = q
-                        
+
                         label = "Klasická" if q.type == "classic" else "BONUS"
                         pts = q.points if q.type == "classic" else self._bonus_points_label(q)
                         self._update_selected_question_item_title(q.title)
                         self._update_selected_question_item_subtitle(f"{label} | {pts}")
-                        
+
                         items = self.tree.selectedItems()
                         if items:
                             self._apply_question_item_visuals(items[0], q.type)
-                            
+
                         if not silent:
                             self.statusBar().showMessage("Změny otázky uloženy (lokálně).", 1200)
                         return True
+
                 if apply_in(sg.subgroups):
                     return True
             return False
@@ -3050,8 +3134,7 @@ class MainWindow(QMainWindow):
         for g in self.root.groups:
             if apply_in(g.subgroups):
                 break
-
-
+            
     def _autosave_schedule(self) -> None:
         if not self._current_question_id:
             return
