@@ -2282,15 +2282,28 @@ class MainWindow(QMainWindow):
                 sg = self._find_subgroup(meta["parent_group_id"], meta["id"]); name = sg.name if sg else ""
             
             self.rename_line.setText(name)
-            
-            # Skryjeme editor otázky, zobrazíme rename panel
             self._set_question_editor_visible(False)
             self.rename_panel.show()
             self._set_editor_enabled(False) 
         else:
+            # Pokud metoda _clear_editor existuje, zavoláme ji. 
+            # Pokud ne, implementujte ji viz výše.
             self._clear_editor()
             self._set_question_editor_visible(False)
             self.rename_panel.hide()
+
+    def _clear_editor(self) -> None:
+        self._current_question_id = None
+        self.text_edit.clear()
+        self.spin_points.setValue(1)
+        self.spin_bonus_correct.setValue(1.00)
+        self.spin_bonus_wrong.setValue(0.00)
+        self.combo_type.setCurrentIndex(0)
+        self.title_edit.clear()
+        self.edit_correct_answer.clear() # NOVÉ: vymazat i toto
+        self.table_funny.setRowCount(0) # NOVÉ: vymazat i toto
+        self._set_editor_enabled(False)
+
 
     def _set_question_editor_visible(self, visible: bool) -> None:
         """Zobrazí nebo skryje kompletní editor otázky (toolbar, formulář, text)."""
