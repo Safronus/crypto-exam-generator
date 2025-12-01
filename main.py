@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.5.14"
+APP_VERSION = "6.6.2"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2674,63 +2674,129 @@ class MainWindow(QMainWindow):
 
         self._refresh_history_table()
 
-    def _init_funny_answers_tab(self) -> None:
-        """Inicializuje záložku s přehledem vtipných odpovědí."""
+    def _init_funny_answers_tab(self):
+        """Inicializuje záložku 'Hall of Shame' s detailním náhledem."""
         self.tab_funny = QWidget()
         layout = QVBoxLayout(self.tab_funny)
         layout.setContentsMargins(4, 4, 4, 4)
-
-        self.tree_funny = QTreeWidget()
-        # Tabulkový vzhled: odpověď, datum, jméno, zdroj
-        self.tree_funny.setColumnCount(4)
-        self.tree_funny.setHeaderLabels(["Otázka / vtipná odpověď", "Datum", "Jméno", "Zdroj"])
-        self.tree_funny.setRootIsDecorated(True)   # strom – otázky se dají rozbalit/sbalit
-        self.tree_funny.setIndentation(18)
-        self.tree_funny.setUniformRowHeights(True)
-        self.tree_funny.setAlternatingRowColors(True)
-
-        header = self.tree_funny.header()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-
-        # 🔒 vypnout možnost výběru/označení
-        self.tree_funny.setSelectionMode(QAbstractItemView.NoSelection)
-        self.tree_funny.setFocusPolicy(Qt.NoFocus)
-
-        layout.addWidget(self.tree_funny)
-
-        # přidáváme do levého tab widgetu
-        self.left_tabs.addTab(self.tab_funny, "Hall of Shame - legendární odpovědi")
         
+        # Filtr a tlačítka
+        top_bar = QHBoxLayout()
+        self.le_funny_filter = QLineEdit()
+        self.le_funny_filter.setPlaceholderText("Hledat v odpovědích...")
+        self.le_funny_filter.textChanged.connect(self._filter_funny_answers)
+        
+        btn_refresh = QPushButton("Obnovit")
+        btn_refresh.clicked.connect(self._refresh_funny_answers_tab)
+        
+        top_bar.addWidget(self.le_funny_filter)
+        top_bar.addWidget(btn_refresh)
+        layout.addLayout(top_bar)
+        
+        # Splitter pro Strom a Detail
+        splitter = QSplitter(Qt.Vertical)
+        
+        # Strom odpovědí (TreeWidget)
+        self.tree_funny = QTreeWidget()
+        self.tree_funny.setHeaderLabels(["Odpověď / Otázka", "Datum", "Jméno", "Zdroj"])
+        self.tree_funny.setColumnWidth(0, 400)
+        self.tree_funny.itemSelectionChanged.connect(self._on_funny_tree_select) # Signál výběru
+        
+        splitter.addWidget(self.tree_funny)
+        
+        # Detail odpovědi
+        detail_container = QWidget()
+        detail_layout = QVBoxLayout(detail_container)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.addWidget(QLabel("<b>Celé znění odpovědi:</b>"))
+        
+        self.text_funny_detail = QTextEdit()
+        self.text_funny_detail.setReadOnly(True)
+        self.text_funny_detail.setPlaceholderText("Vyberte odpověď pro zobrazení detailu...")
+        detail_layout.addWidget(self.text_funny_detail)
+        
+        splitter.addWidget(detail_container)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        
+        layout.addWidget(splitter)
+        
+        self.left_tabs.addTab(self.tab_funny, "Hall of Shame")
+
+    def _on_funny_tree_select(self):
+        """Zobrazí detail vybrané vtipné odpovědi ze stromu."""
+        selected = self.tree_funny.selectedItems()
+        if not selected:
+            self.text_funny_detail.clear()
+            return
+            
+        item = selected[0]
+        # Pokud je to top-level item (otázka), nic nezobrazujeme (nebo název otázky)
+        if item.parent() is None:
+            self.text_funny_detail.clear()
+            return
+            
+        # Získáme plný text z UserRole
+        full_text = item.data(0, Qt.UserRole)
+        if full_text:
+            self.text_funny_detail.setText(full_text)
+        else:
+            # Fallback na text položky, pokud data chybí
+            self.text_funny_detail.setText(item.text(0))
+
+    def _filter_funny_answers(self, text: str):
+        """Filtruje položky ve stromu vtipných odpovědí."""
+        search_text = text.lower()
+        
+        # Projdeme všechny top-level položky (otázky)
+        root = self.tree_funny.invisibleRootItem()
+        for i in range(root.childCount()):
+            q_item = root.child(i)
+            
+            # Projdeme odpovědi (děti)
+            has_visible_child = False
+            for j in range(q_item.childCount()):
+                child = q_item.child(j)
+                child_text = child.text(0).lower()
+                
+                if not search_text or search_text in child_text:
+                    child.setHidden(False)
+                    has_visible_child = True
+                else:
+                    child.setHidden(True)
+            
+            # Pokud otázka nemá viditelné odpovědi a sama neodpovídá filtru, skryjeme ji
+            # (Zde pro jednoduchost filtrujeme jen podle obsahu odpovědí)
+            q_item.setHidden(not has_visible_child)
+            
+            # Pokud filtr není prázdný a našli jsme shodu, rozbalíme
+            if search_text and has_visible_child:
+                q_item.setExpanded(True)
+            elif not search_text:
+                q_item.setExpanded(False)
+
     def _refresh_funny_answers_tab(self) -> None:
         """Znovu vygeneruje strom 'Seznam vtipných odpovědí' ze struktury otázek."""
-        # Pokud záložka ještě není inicializovaná, nic neděláme
         if not hasattr(self, "tree_funny"):
             return
 
         self.tree_funny.clear()
+        self.text_funny_detail.clear()
 
         root = getattr(self, "root", None)
         if root is None or not root.groups:
             return
 
-        # Styl pro řádek otázky – bílá barva textu
         question_brush = QBrush(QColor("white"))
 
-        # Vytvoříme vlastní ikonu otazníku, která je dobře vidět i na tmavém pozadí
+        # Ikona otazníku
         pix = QPixmap(16, 16)
         pix.fill(Qt.transparent)
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        # Barevná "bublina" pod otazníkem (například teal, dobře viditelná na tmavém pozadí)
         painter.setBrush(QColor("teal"))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(1, 1, 14, 14)
-
-        # Bílý otazník uprostřed
         painter.setPen(QColor("white"))
         font = painter.font()
         font.setBold(True)
@@ -2738,30 +2804,25 @@ class MainWindow(QMainWindow):
         painter.setFont(font)
         painter.drawText(pix.rect(), Qt.AlignCenter, "?")
         painter.end()
-
         question_icon = QIcon(pix)
 
         def walk_subgroups(subgroups: List[Subgroup]) -> None:
             for sg in subgroups:
                 for q in sg.questions:
-                    # Sebereme vtipné odpovědi (může to být list dictů nebo FunnyAnswer)
                     f_list = getattr(q, "funny_answers", []) or []
                     if not f_list:
                         continue
 
-                    # 🔹 Top-level položka = JEN název otázky
                     q_title = q.title or "(bez názvu)"
                     q_item = QTreeWidgetItem()
                     q_item.setText(0, q_title)
                     q_item.setIcon(0, question_icon)
 
-                    # bílá barva textu otázky ve všech sloupcích
                     for col in range(4):
                         q_item.setForeground(col, question_brush)
 
                     self.tree_funny.addTopLevelItem(q_item)
 
-                    # 🔹 Podřízené položky = jednotlivé vtipné odpovědi, tabulkově
                     for fa in f_list:
                         if isinstance(fa, FunnyAnswer):
                             text = fa.text
@@ -2774,7 +2835,6 @@ class MainWindow(QMainWindow):
                             date = fa.get("date", "")
                             source_doc = fa.get("source_doc", "")
 
-                        # Krátký náhled textu (1. sloupec)
                         snippet = (text or "").replace("\n", " ")
                         if len(snippet) > 120:
                             snippet = snippet[:117] + "..."
@@ -2784,15 +2844,20 @@ class MainWindow(QMainWindow):
                         child.setText(1, date or "")
                         child.setText(2, author or "")
                         child.setText(3, os.path.basename(source_doc) if source_doc else "")
+                        
+                        child.setData(0, Qt.UserRole, text) 
 
-                    # defaultně necháme otázku sbalenou – uživatel si rozbalí podle potřeby
-                    q_item.setExpanded(False)
+                    # Defaultně rozbaleno (změna z False na True)
+                    q_item.setExpanded(True)
 
-                # Rekurze do podskupin
                 walk_subgroups(sg.subgroups)
 
         for g in root.groups:
             walk_subgroups(g.subgroups)
+            
+        # Fit sloupců podle obsahu
+        for i in range(4):
+            self.tree_funny.resizeColumnToContents(i)
 
     def register_export(self, filename: str, k_hash: str) -> None:
         """Zaznamená nový export a obnoví tabulku."""
