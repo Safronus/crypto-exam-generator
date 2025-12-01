@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.5.2"
+APP_VERSION = "6.5.3"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -983,7 +983,6 @@ class ExportWizard(QWizard):
         
         self._update_slots_visuals(is_multi)
 
-
     def _update_slots_visuals(self, is_multi: bool):
         """Aktualizuje vzhled slotů podle režimu."""
         # Projdeme všechny widgety ve slot layoutu
@@ -996,21 +995,25 @@ class ExportWizard(QWizard):
             if not ph: continue # Není to slot (např. nadpis)
             
             # Získáme reference na tlačítka uvnitř slotu
-            # Layout: [Label, ButtonAssign, ButtonClear]
             row_layout = w.layout()
             if not row_layout or row_layout.count() < 3: continue
             
             btn_assign = row_layout.itemAt(1).widget()
             btn_clear = row_layout.itemAt(2).widget()
             
-            # Logika pro Otázka1-10 v Multi režimu
-            if is_multi and re.match(r"^Otázka([1-9]|10)$", ph):
+            # Logika pro MULTI: Zamknout VŠECHNY klasické otázky (OtázkaX)
+            # Pokud je placeholder v seznamu klasických otázek
+            if is_multi and ph in self.placeholders_q:
                 btn_assign.setText("🎲 NÁHODNĚ Z VARIANT")
                 btn_assign.setStyleSheet("color: #ffcc00; font-weight: bold; border: 1px dashed #ffcc00;")
                 btn_assign.setEnabled(False)
                 btn_clear.setEnabled(False)
             else:
-                # Obnovíme standardní stav
+                # Obnovíme standardní stav (nebo pro Bonusy v multi režimu - ty zůstávají manuální/prázdné?)
+                # Požadavek byl jen na "počet otázek", předpokládám že Bonusy se negenerují náhodně (nebo ano?)
+                # Zadání: "počet klasických otázek se i pro tento režim bude odvíjet od šablony"
+                # Takže jen self.placeholders_q
+                
                 btn_assign.setEnabled(True)
                 btn_clear.setEnabled(True)
                 btn_assign.setStyleSheet("")
@@ -1024,7 +1027,6 @@ class ExportWizard(QWizard):
                         btn_assign.setText("???")
                 else:
                     btn_assign.setText("Vybrat...")
-
 
     def _clear_all_assignments(self) -> None:
         """Vymaže všechna přiřazení otázek ve slotech."""
@@ -1863,7 +1865,6 @@ class ExportWizard(QWizard):
             data_to_hash = f"{ts}{salt}"
             self._cached_hash = hashlib.sha3_256(data_to_hash.encode("utf-8")).hexdigest()
             
-            # Zobrazení hashe
             if hasattr(self, "lbl_hash_preview"):
                 self.lbl_hash_preview.setText(f"SHA3-256 Hash:\n{self._cached_hash}")
 
@@ -1875,16 +1876,13 @@ class ExportWizard(QWizard):
             total_bonus_points = 0.0
             min_loss = 0.0
             
-            # Barvy
             bg_color = "#252526"; text_color = "#e0e0e0"; border_color = "#555555"
             sec_q_bg = "#2d3845"; sec_b_bg = "#453d2d"; sec_s_bg = "#2d452d"
             
-            # Sestavení verze
             prefix = self.le_prefix.text().strip()
             today = datetime.now().strftime("%Y-%m-%d")
             verze_preview = f"{prefix} {today}" 
             
-            # OPRAVA: Použití mode_group místo group_multi
             is_multi = (self.mode_group.checkedId() == 1)
             
             multi_info = ""
@@ -1919,7 +1917,8 @@ class ExportWizard(QWizard):
                         title_clean = re.sub(r'<[^>]+>', '', q.title)
                         html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right'>({q.points} b)</td></tr>"
                 else:
-                    if is_multi and re.match(r"^Otázka([1-9]|10)$", ph):
+                    # Pokud je multi a placeholder je v seznamu klasických otázek -> Náhodný
+                    if is_multi and ph in self.placeholders_q:
                         html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td colspan='2' style='color:#ffcc00;'>[Náhodný výběr pro každou verzi]</td></tr>"
                     else:
                         html += f"<tr><td width='100' style='color:#ff5555;'>{ph}:</td><td colspan='2' style='color:#ff5555;'>--- NEVYPLNĚNO ---</td></tr>"
@@ -1968,13 +1967,8 @@ class ExportWizard(QWizard):
             self.preview_edit.setText(f"Chyba při generování náhledu: {e}")
 
     def accept(self) -> None:
-        # Uložení nastavení před exportem
         self._save_settings()
         
-        # ... zbytek metody accept zůstává stejný jako v předchozím kroku (v6.4.7)
-        # (Zde nevkládám celý kód accept znovu, protože se mění jen začátek, ale 
-        # uživatel má již správnou verzi accept z minulého kroku. 
-        # Nicméně, pro úplnost a funkčnost 'Copy-Paste' vložím celou metodu s tímto přídavkem)
         if not self.template_path or not self.output_path:
             return
 
@@ -2025,8 +2019,7 @@ class ExportWizard(QWizard):
         generated_docx_files = []
         generated_pdf_files = []
 
-        # Příprava složky pro tisk
-        print_folder = self.owner.project_root / "data" / "Tisk"
+        print_folder = self.print_dir
         if do_pdf_export:
             print_folder.mkdir(parents=True, exist_ok=True)
 
@@ -2036,8 +2029,10 @@ class ExportWizard(QWizard):
             
             if is_multi and question_pool:
                 import random
-                targets = [ph for ph in self.placeholders_q if re.match(r"^Otázka([1-9]|10)$", ph)]
+                # ZMĚNA: Cílem jsou VŠECHNY klasické placeholdery ze šablony
+                targets = self.placeholders_q
                 needed = len(targets)
+                
                 if len(question_pool) >= needed:
                     picked = random.sample(question_pool, needed)
                     for idx, ph in enumerate(targets):
@@ -2109,23 +2104,19 @@ class ExportWizard(QWizard):
         pdf_success_msg = ""
         if do_pdf_export and generated_docx_files:
             try:
-                # 1. Konverze všech DOCX na PDF
                 for docx_file in generated_docx_files:
                     pdf_file = self.owner._convert_docx_to_pdf(docx_file)
                     if pdf_file and pdf_file.exists():
                         generated_pdf_files.append(pdf_file)
                 
-                # 2. Slučování / Přesun
                 if generated_pdf_files:
                     if is_multi and len(generated_pdf_files) > 1:
-                        # HROMADNÝ REŽIM: Slučit do jednoho
                         merged_name = f"{base_output_path.stem}_merged.pdf"
                         final_pdf = print_folder / merged_name
                         
                         if self.owner._merge_pdfs(generated_pdf_files, final_pdf, cleanup=True):
                             pdf_success_msg = f"\n\nPDF pro tisk (sloučené) uloženo do:\n{final_pdf}"
                         else:
-                            # Merge selhalo - přesuneme jednotlivé do Tisk
                             pdf_success_msg = f"\n\nPOZOR: Slučování selhalo. Jednotlivá PDF jsou v:\n{print_folder}"
                             import shutil
                             for tmp_pdf in generated_pdf_files:
@@ -2133,10 +2124,8 @@ class ExportWizard(QWizard):
                                     try:
                                         dest = print_folder / tmp_pdf.name
                                         shutil.move(str(tmp_pdf), str(dest))
-                                    except:
-                                        pass
+                                    except: pass
                     else:
-                        # JEDNOTLIVÝ REŽIM: Přesunout jediné PDF
                         import shutil
                         final_pdf = print_folder / generated_pdf_files[0].name
                         shutil.move(str(generated_pdf_files[0]), str(final_pdf))
@@ -2147,7 +2136,6 @@ class ExportWizard(QWizard):
                 import traceback
                 traceback.print_exc()
         
-        # Výsledná zpráva
         if is_multi:
             msg = f"Hromadný export dokončen.\nVygenerováno {success_count} souborů DOCX.{pdf_success_msg}"
             QMessageBox.information(self, "Export", msg)
@@ -2156,7 +2144,6 @@ class ExportWizard(QWizard):
             QMessageBox.information(self, "Export", msg)
             
         super().accept()
-
 
 # --------------------------- Hlavní okno (UI + logika) ---------------------------
 
