@@ -2583,6 +2583,43 @@ class MainWindow(QMainWindow):
         
         self._refresh_history_table()
 
+    def _on_format_bullets(self, checked: bool) -> None:
+        """Přepne aktuální výběr na odrážky s lepším odsazením."""
+        cursor = self.text_edit.textCursor()
+        cursor.beginEditBlock()
+        
+        if checked:
+            # Vytvoříme formát seznamu
+            list_fmt = QTextListFormat()
+            list_fmt.setStyle(QTextListFormat.ListDisc)
+            list_fmt.setIndent(1) # Level 1
+            
+            # Nastavení odsazení (v pixelech/bodech) pro vizuální úpravu
+            # NumberSuffix = mezera za odrážkou
+            list_fmt.setNumberPrefix("")
+            list_fmt.setNumberSuffix(" ") 
+            
+            cursor.createList(list_fmt)
+            
+            # Vynucení odsazení bloku (pro celý list item)
+            block_fmt = cursor.blockFormat()
+            block_fmt.setLeftMargin(15)  # Odsazení celého bloku zleva
+            block_fmt.setTextIndent(-10) # Předsazení odrážky (aby byla vlevo od textu)
+            cursor.setBlockFormat(block_fmt)
+        else:
+            # Zrušit list
+            # Standardní blok bez listu
+            block_fmt = QTextBlockFormat()
+            block_fmt.setObjectIndex(-1) # Not a list
+            cursor.setBlockFormat(block_fmt)
+            
+            # Reset odsazení
+            cursor.setBlockFormat(QTextBlockFormat())
+
+        cursor.endEditBlock()
+        # Synchronizace stavu tlačítka (pokud by cursor change změnil stav zpět)
+        self.text_edit.setFocus()
+
 
     def _refresh_history_table(self) -> None:
         """Načte historii exportů z history.json a naplní tabulku."""
@@ -4480,7 +4517,6 @@ class MainWindow(QMainWindow):
             print(f"Ghostscript error: {e}")
             return False
 
-
     def _generate_docx_from_template(self, template_path: Path, output_path: Path,
                                      simple_repl: Dict[str, str], rich_repl_html: Dict[str, str]) -> None:
         
@@ -4507,32 +4543,22 @@ class MainWindow(QMainWindow):
                     p_insert.addnext(new_p._p)
                     p_insert = new_p._p
 
-                # -- ZAROVNÁNÍ --
                 align = p_data.get('align', 'left')
                 if align == 'center': new_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 elif align == 'right': new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                 elif align == 'justify': new_p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 else: new_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 
-                # -- MEZEROVÁNÍ (Spacing) --
-                # Nastavíme minimální mezery, aby to vypadalo jako v editoru
                 new_p.paragraph_format.space_before = Pt(0)
                 new_p.paragraph_format.space_after = Pt(0)
-                # Případně line_spacing_rule (single)
-                # new_p.paragraph_format.line_spacing = 1.0 
 
-                # Prefix
                 if p_data.get('prefix'):
                     new_p.paragraph_format.left_indent = Pt(48)
                     new_p.paragraph_format.first_line_indent = Pt(-24)
                     new_p.add_run(p_data['prefix'])
                 
-                # Runs
                 for r_data in p_data['runs']:
                     text_content = r_data['text']
-                    
-                    # Řešení <br> -> \n
-                    # Pokud text obsahuje \n, musíme ho rozdělit a vložit breaky
                     parts = text_content.split('\n')
                     for idx, part in enumerate(parts):
                         if part:
@@ -4546,20 +4572,16 @@ class MainWindow(QMainWindow):
                                     run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
                                 except: pass
                         
-                        # Pokud to není poslední část, znamená to, že následoval \n -> Soft Break
                         if idx < len(parts) - 1:
                             run = new_p.add_run()
-                            run.add_break() # Shift+Enter ve Wordu
-
+                            run.add_break()
 
         # -- Helper: Zpracování jednoho odstavce (Inline i Block) --
         def process_paragraph(p):
             full_text = p.text
-            # Ignorujeme prázdné (pokud neobsahují obrázky, ale my řešíme text)
             if not full_text.strip(): return
 
-            # 1. BLOCK CHECK (Je odstavec POUZE placeholderem?)
-            # Ořízneme whitespace pro porovnání
+            # 1. BLOCK CHECK
             txt_clean = full_text.strip()
             matched_rich = None
             for ph, html in rich_repl_html.items():
@@ -4571,17 +4593,11 @@ class MainWindow(QMainWindow):
                 insert_rich_question_block(p, matched_rich[1])
                 return
 
-            # 2. INLINE CHECK (Obsahuje odstavec placeholder uvnitř textu?)
-            # Kombinace Simple (Plain) a Rich (Formatted) nahrazování
-            
-            # Zjistíme, zda odstavec obsahuje nějaký klíč
+            # 2. INLINE CHECK
             keys_found = []
-            
-            # Simple keys
             for k in simple_repl.keys():
                 if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
                     keys_found.append(k)
-            # Rich keys (Bonusy)
             for k in rich_repl_html.keys():
                 if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
                     keys_found.append(k)
@@ -4589,90 +4605,119 @@ class MainWindow(QMainWindow):
             if not keys_found:
                 return
 
-            # Pokud jsme něco našli, musíme odstavec "přeskládat".
-            # Text rozdělíme na segmenty.
-            # Segment je buď string (zachovat) nebo dict (nahradit).
+            # --- OPRAVA: ZACHOVÁNÍ FORMÁTU A SYMBOLŮ ---
+            # Pokud odstavec obsahuje klíč, musíme ho přepsat.
+            # Abychom zachovali symboly (např. šipky) ve fontech jako Wingdings,
+            # musíme pracovat s původními runy, pokud to jde.
+            # Ale protože nahrazujeme text uvnitř runu, je to složité.
+            # Strategie: Zkusíme najít run, který obsahuje placeholder, a nahradit text JEN v něm.
+            
+            # Zjednodušená implementace pro Simple Replacements (MinBody, MaxBody)
+            # která se snaží nemazat celý odstavec, pokud to není nutné.
+            
+            # Pokud máme jen simple replacements a žádné rich replacements v odstavci:
+            has_rich = any(k in rich_repl_html for k in keys_found)
+            
+            if not has_rich:
+                # Projdeme runy a zkusíme nahradit text in-place
+                replacements_made = False
+                for run in p.runs:
+                    original_text = run.text
+                    new_text = original_text
+                    
+                    for k in keys_found:
+                        if k in simple_repl:
+                            val = simple_repl[k]
+                            # Replace both <Key> and {Key}
+                            new_text = new_text.replace(f"<{k}>", val).replace(f"{{{k}}}", val)
+                    
+                    if new_text != original_text:
+                        run.text = new_text
+                        replacements_made = True
+                
+                # Pokud se podařilo nahradit vše (kontrolujeme, zda v textu nezbyl placeholder)
+                # Někdy je placeholder rozdělen do více runů (např. "<" v jednom, "Klic" ve druhém).
+                # Pak simple replace selže.
+                final_text = p.text
+                still_has_keys = any((f"<{k}>" in final_text or f"{{{k}}}" in final_text) for k in keys_found)
+                
+                if replacements_made and not still_has_keys:
+                    return # Hotovo, zachovali jsme formátování i symboly v jiných runech
+            
+            # Pokud in-place replace nezafungoval (rozbité runy) nebo máme rich text,
+            # musíme provést rekonstrukci (stará metoda), ale vylepšenou o kopírování stylu runů.
             
             segments = [full_text]
-            
-            # Aplikujeme rozdělení pro všechny nalezené klíče
             all_repl_data = {}
-            # Simple data
-            for k, v in simple_repl.items(): 
-                all_repl_data[k] = {'type': 'simple', 'val': v}
-            # Rich data
-            for k, html in rich_repl_html.items(): 
-                all_repl_data[k] = {'type': 'rich', 'val': html}
+            for k, v in simple_repl.items(): all_repl_data[k] = {'type': 'simple', 'val': v}
+            for k, html in rich_repl_html.items(): all_repl_data[k] = {'type': 'rich', 'val': html}
             
             for k in keys_found:
                 info = all_repl_data[k]
-                # Hledáme <Klic> i {Klic}
                 tokens = [f"<{k}>", f"{{{k}}}"]
-                
                 for token in tokens:
                     new_segments = []
                     for seg in segments:
                         if isinstance(seg, str):
-                            # Split string by token
                             parts = seg.split(token)
                             for i, part in enumerate(parts):
-                                if part: new_segments.append(part) # Zachováme text
+                                if part: new_segments.append(part)
                                 if i < len(parts) - 1:
-                                    # Vložíme placeholder pro nahrazení
                                     new_segments.append(info)
                         else:
-                            new_segments.append(seg) # Už zpracovaný segment
+                            new_segments.append(seg)
                     segments = new_segments
 
-            # -- APLIKACE ZMĚN --
-            # Uchováme styl prvního runu pro "dědění" stylu (font, size)
-            base_font_name = None
-            base_font_size = None
-            base_bold = None
-            
+            # Uchováme styl PŮVODNÍHO prvního runu jako fallback
+            base_props = {}
             if p.runs:
                 r0 = p.runs[0]
-                base_font_name = r0.font.name
-                base_font_size = r0.font.size
-                base_bold = r0.bold # Použijeme jen pro simple text
+                base_props = {
+                    'name': r0.font.name,
+                    'size': r0.font.size,
+                    'bold': r0.bold,
+                    'italic': r0.italic,
+                    'underline': r0.underline,
+                    'color': r0.font.color.rgb if r0.font.color else None
+                }
 
-            p.clear() # Smažeme starý obsah
+            p.clear()
             
             for seg in segments:
                 if isinstance(seg, str):
                     run = p.add_run(seg)
-                    if base_font_name: run.font.name = base_font_name
-                    if base_font_size: run.font.size = base_font_size
-                    # run.bold = base_bold # Nechceme vynucovat bold na okolní text, pokud nebyl
+                    # Aplikace base stylu
+                    if base_props.get('name'): run.font.name = base_props['name']
+                    if base_props.get('size'): run.font.size = base_props['size']
+                    # Zachovat i další styly pro okolní text
+                    run.bold = base_props.get('bold')
+                    run.italic = base_props.get('italic')
                     
                 elif isinstance(seg, dict):
                     val = seg['val']
                     if seg['type'] == 'simple':
-                        # Simple text (Datum)
                         run = p.add_run(val)
-                        if base_font_name: run.font.name = base_font_name
-                        if base_font_size: run.font.size = base_font_size
-                        if base_bold is not None: run.bold = base_bold # Datum zdědí tučnost
+                        # Simple replacement dědí styl
+                        if base_props.get('name'): run.font.name = base_props['name']
+                        if base_props.get('size'): run.font.size = base_props['size']
+                        run.bold = base_props.get('bold')
+                        run.italic = base_props.get('italic')
+                        run.underline = base_props.get('underline')
+                        if base_props.get('color'): run.font.color.rgb = base_props['color']
                         
                     elif seg['type'] == 'rich':
-                        # Inline Rich Text (Bonus)
-                        # Rozparsujeme HTML na runy
                         paras = parse_html_to_paragraphs(val)
-                        
-                        # Vložíme runy.
                         for p_idx, p_data in enumerate(paras):
-                            # Pokud to není první "odstavec" z HTML, vložíme zalomení řádku (Soft Break)
                             if p_idx > 0:
                                 run_break = p.add_run()
                                 run_break.add_break()
-                            
                             for r_data in p_data['runs']:
                                 text_content = r_data['text']
-                                # I uvnitř runu může být \n (z <br>)
                                 parts = text_content.split('\n')
                                 for idx_part, part in enumerate(parts):
                                     if part:
                                         run = p.add_run(part)
+                                        # Styl z HTML
                                         if r_data.get('b'): run.bold = True
                                         if r_data.get('i'): run.italic = True
                                         if r_data.get('u'): run.underline = True
@@ -4682,14 +4727,12 @@ class MainWindow(QMainWindow):
                                                 run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
                                             except: pass
                                         
-                                        # Base style
-                                        if base_font_name: run.font.name = base_font_name
-                                        if base_font_size: run.font.size = base_font_size
+                                        # Fallback styl (pokud HTML neurčuje)
+                                        if not r_data.get('b') and base_props.get('name'): run.font.name = base_props['name']
+                                        if not r_data.get('b') and base_props.get('size'): run.font.size = base_props['size']
                                     
                                     if idx_part < len(parts) - 1:
                                         p.add_run().add_break()
-
-
 
         # 1. Body
         for p in doc.paragraphs:
@@ -4723,8 +4766,6 @@ class MainWindow(QMainWindow):
             doc.save(output_path)
         except Exception as e:
             QMessageBox.critical(self, "Chyba uložení", f"Nelze uložit DOCX:\n{e}")
-
-
 
     # -------------------- Pomocné --------------------
 
