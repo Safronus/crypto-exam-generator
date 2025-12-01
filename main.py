@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.6.2"
+APP_VERSION = "6.6.8"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -1028,13 +1028,14 @@ class ExportWizard(QWizard):
         prefix = re.sub(r'[\\/*?:"<>|]', "_", prefix)
         
         dt = self.dt_edit.dateTime()
-        date_str = dt.toString("yyyy-MM-dd")
+        # 2. část: YYYY-MM-DD_HHMM
+        date_time_str = dt.toString("yyyy-MM-dd_HHmm")
         
-        # Použití Timestamp (sekundy od epochy) místo HH-MM
-        timestamp = str(int(dt.toSecsSinceEpoch()))
+        # 3. část: Timestamp (aktuální čas v sekundách)
+        timestamp = str(int(datetime.now().timestamp()))
         
-        # Defaultní název
-        filename = f"{prefix}_{date_str}_{timestamp}.docx"
+        # Sestavení názvu: PREFIX_DATETIME_TIMESTAMP.docx
+        filename = f"{prefix}_{date_time_str}_{timestamp}.docx"
         
         self.output_path = self.output_dir / filename
         
@@ -1044,7 +1045,6 @@ class ExportWizard(QWizard):
         self.le_output.blockSignals(False)
         
         self.page1.completeChanged.emit()
-
 
     def _on_output_text_changed(self, text):
         self.output_changed_manually = True
@@ -2389,6 +2389,8 @@ class MainWindow(QMainWindow):
         self.action_underline = QAction("Podtržení", self); self.action_underline.setCheckable(True); self.action_underline.setShortcut(QKeySequence.Underline)
         self.action_color = QAction("Barva", self)
         self.action_bullets = QAction("Odrážky", self); self.action_bullets.setCheckable(True)
+        self.action_indent_dec = QAction("< Odsadit", self); self.action_indent_dec.setToolTip("Zmenšit odsazení")
+        self.action_indent_inc = QAction("> Odsadit", self); self.action_indent_inc.setToolTip("Zvětšit odsazení")
         self.action_align_left = QAction("Vlevo", self)
         self.action_align_center = QAction("Na střed", self)
         self.action_align_right = QAction("Vpravo", self)
@@ -2403,10 +2405,9 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.addAction(self.action_color)
         self.editor_toolbar.addSeparator()
         self.editor_toolbar.addAction(self.action_bullets)
-        
         self.editor_toolbar.addSeparator()
-        self.editor_toolbar.addAction(self.action_align_left)
-        
+        self.editor_toolbar.addAction(self.action_indent_dec)
+        self.editor_toolbar.addAction(self.action_indent_inc)
         self.editor_toolbar.addSeparator()
         self.editor_toolbar.addAction(self.action_align_left)
         self.editor_toolbar.addAction(self.action_align_center)
@@ -2470,23 +2471,23 @@ class MainWindow(QMainWindow):
         rename_layout.addRow("Název:", self.rename_line)
         rename_layout.addRow(self.btn_rename)
 
-        # SKLÁDÁNÍ LAYOUTU (ZMĚNA POŘADÍ)
+        # SKLÁDÁNÍ LAYOUTU
         self.detail_layout.addWidget(self.editor_toolbar)
         self.detail_layout.addLayout(self.form_layout)
         
-        # 1. Obsah otázky (nyní dříve)
-        lbl_content = QLabel("<b>Obsah otázky:</b>")
-        self.detail_layout.addWidget(lbl_content)
-        self.detail_layout.addWidget(self.text_edit, 1) # Stretch 1
+        # 1. Obsah otázky (uložíme label do self pro skrývání)
+        self.lbl_content = QLabel("<b>Obsah otázky:</b>")
+        self.detail_layout.addWidget(self.lbl_content)
+        self.detail_layout.addWidget(self.text_edit, 1) 
         
-        # 2. Správná odpověď (nyní pod obsahem)
-        lbl_correct = QLabel("<b>Správná odpověď:</b>")
-        self.detail_layout.addWidget(lbl_correct)
+        # 2. Správná odpověď
+        self.lbl_correct = QLabel("<b>Správná odpověď:</b>")
+        self.detail_layout.addWidget(self.lbl_correct)
         self.detail_layout.addWidget(self.edit_correct_answer)
         
-        # 3. Vtipné odpovědi (nyní pod správnou odpovědí)
-        lbl_funny = QLabel("<b>Vtipné odpovědi:</b>")
-        self.detail_layout.addWidget(lbl_funny)
+        # 3. Vtipné odpovědi
+        self.lbl_funny = QLabel("<b>Vtipné odpovědi:</b>")
+        self.detail_layout.addWidget(self.lbl_funny)
         self.detail_layout.addWidget(self.funny_container)
         
         # Tlačítko uložit
@@ -2805,67 +2806,83 @@ class MainWindow(QMainWindow):
         painter.end()
         question_icon = QIcon(pix)
 
-        def walk_subgroups(subgroups: List[Subgroup]) -> None:
+        all_questions = []
+
+        def collect_questions(subgroups: List[Subgroup]) -> None:
             for sg in subgroups:
                 for q in sg.questions:
                     f_list = getattr(q, "funny_answers", []) or []
-                    if not f_list:
-                        continue
-
-                    # Spacer mezi skupinami (pokud už nějaká existuje)
-                    if self.tree_funny.topLevelItemCount() > 0:
-                        spacer = QTreeWidgetItem()
-                        spacer.setFlags(Qt.NoItemFlags)
-                        spacer.setSizeHint(0, QSize(0, 15)) # 15px mezera
-                        self.tree_funny.addTopLevelItem(spacer)
-
-                    q_title = q.title or "(bez názvu)"
-                    q_item = QTreeWidgetItem()
-                    q_item.setText(0, q_title)
-                    q_item.setIcon(0, question_icon)
-                    
-                    # Revert: Odstraněno zvětšení samotného itemu
-                    # q_item.setSizeHint(0, QSize(0, 36)) 
-
-                    for col in range(4):
-                        q_item.setForeground(col, question_brush)
-
-                    self.tree_funny.addTopLevelItem(q_item)
-
-                    for fa in f_list:
-                        if isinstance(fa, FunnyAnswer):
-                            text = fa.text
-                            author = fa.author
-                            date = fa.date
-                            source_doc = getattr(fa, "source_doc", "")
-                        else:
-                            text = fa.get("text", "")
-                            author = fa.get("author", "")
-                            date = fa.get("date", "")
-                            source_doc = fa.get("source_doc", "")
-
-                        snippet = (text or "").replace("\n", " ")
-                        if len(snippet) > 120:
-                            snippet = snippet[:117] + "..."
-
-                        child = QTreeWidgetItem(q_item)
-                        child.setText(0, snippet)
-                        child.setText(1, date or "")
-                        child.setText(2, author or "")
-                        child.setText(3, os.path.basename(source_doc) if source_doc else "")
-                        
-                        child.setData(0, Qt.UserRole, text) 
-
-                    q_item.setExpanded(True)
-
-                walk_subgroups(sg.subgroups)
+                    if f_list:
+                        all_questions.append(q)
+                collect_questions(sg.subgroups)
 
         for g in root.groups:
-            walk_subgroups(g.subgroups)
+            collect_questions(g.subgroups)
+
+        # Sort questions alphabetically
+        all_questions.sort(key=lambda q: (q.title or "").lower())
+
+        # Helper pro parsování data
+        def parse_date_safe(date_str):
+            if not date_str: return datetime.min
+            # Formáty: dd.mm.yyyy, yyyy-mm-dd
+            for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M"):
+                try:
+                    return datetime.strptime(str(date_str).strip(), fmt)
+                except ValueError:
+                    pass
+            return datetime.min
+
+        for q in all_questions:
+            if self.tree_funny.topLevelItemCount() > 0:
+                spacer = QTreeWidgetItem()
+                spacer.setFlags(Qt.NoItemFlags)
+                spacer.setSizeHint(0, QSize(0, 15))
+                self.tree_funny.addTopLevelItem(spacer)
+
+            q_title = q.title or "(bez názvu)"
+            q_item = QTreeWidgetItem()
+            q_item.setText(0, q_title)
+            q_item.setIcon(0, question_icon)
             
+            for col in range(4):
+                q_item.setForeground(col, question_brush)
+
+            self.tree_funny.addTopLevelItem(q_item)
+
+            f_list = getattr(q, "funny_answers", [])
+            
+            # Sort answers by parsed date (Descending = Newest first)
+            f_list_sorted = sorted(f_list, key=lambda x: parse_date_safe(x.date if isinstance(x, FunnyAnswer) else x.get('date')), reverse=True)
+
+            for fa in f_list_sorted:
+                if isinstance(fa, FunnyAnswer):
+                    text = fa.text
+                    author = fa.author
+                    date = fa.date
+                    source_doc = getattr(fa, "source_doc", "")
+                else:
+                    text = fa.get("text", "")
+                    author = fa.get("author", "")
+                    date = fa.get("date", "")
+                    source_doc = fa.get("source_doc", "")
+
+                snippet = (text or "").replace("\n", " ")
+                if len(snippet) > 120:
+                    snippet = snippet[:117] + "..."
+
+                child = QTreeWidgetItem(q_item)
+                child.setText(0, snippet)
+                child.setText(1, date or "")
+                child.setText(2, author or "")
+                child.setText(3, os.path.basename(source_doc) if source_doc else "")
+                
+                child.setData(0, Qt.UserRole, text) 
+
+            q_item.setExpanded(True)
+
         for i in range(4):
             self.tree_funny.resizeColumnToContents(i)
-
 
     def register_export(self, filename: str, k_hash: str) -> None:
         """Zaznamená nový export a obnoví tabulku."""
@@ -3570,7 +3587,6 @@ class MainWindow(QMainWindow):
         self.table_funny.setRowCount(0) # NOVÉ: vymazat i toto
         self._set_editor_enabled(False)
 
-
     def _set_question_editor_visible(self, visible: bool) -> None:
         """Zobrazí nebo skryje kompletní editor otázky (toolbar, formulář, text)."""
         self.editor_toolbar.setVisible(visible)
@@ -3584,19 +3600,31 @@ class MainWindow(QMainWindow):
             self.spin_points, 
             self.spin_bonus_correct, 
             self.spin_bonus_wrong,
-            # NOVÉ:
+            # NOVÉ: Widgety a jejich labely
             self.edit_correct_answer,
-            self.funny_container
+            self.funny_container,
+            # NOVÉ: Samostatné labely sekcí
+            self.lbl_content,
+            self.lbl_correct,
+            self.lbl_funny
         ]
         
         for w in widgets:
-            w.setVisible(visible)
-            lbl = self.form_layout.labelForField(w)
-            if lbl:
-                lbl.setVisible(visible)
+            if hasattr(self, w.objectName()) or w in widgets: # Check existence
+                w.setVisible(visible)
+            
+        # Skrytí labelů ve form layoutu
+        for i in range(self.form_layout.rowCount()):
+            item = self.form_layout.itemAt(i, QFormLayout.LabelRole)
+            if item and item.widget():
+                item.widget().setVisible(visible)
+            item = self.form_layout.itemAt(i, QFormLayout.FieldRole)
+            if item and item.widget():
+                item.widget().setVisible(visible)
         
         if visible:
             self._on_type_changed_ui()
+
 
     def _load_question_to_editor(self, q: Question) -> None:
         self._current_question_id = q.id
