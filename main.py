@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.5.4"
+APP_VERSION = "6.5.7"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2471,6 +2471,20 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.addAction(self.action_color)
         self.editor_toolbar.addSeparator()
         self.editor_toolbar.addAction(self.action_bullets)
+        
+        # NOVÉ: Tlačítka pro odsazení
+        self.action_indent_dec = QAction("< Odsadit", self)
+        self.action_indent_dec.setToolTip("Zmenšit odsazení")
+        self.action_indent_inc = QAction("> Odsadit", self)
+        self.action_indent_inc.setToolTip("Zvětšit odsazení")
+        
+        self.editor_toolbar.addSeparator()
+        self.editor_toolbar.addAction(self.action_indent_dec)
+        self.editor_toolbar.addAction(self.action_indent_inc)
+        
+        self.editor_toolbar.addSeparator()
+        self.editor_toolbar.addAction(self.action_align_left)
+        
         self.editor_toolbar.addSeparator()
         self.editor_toolbar.addAction(self.action_align_left)
         self.editor_toolbar.addAction(self.action_align_center)
@@ -2582,6 +2596,33 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
         
         self._refresh_history_table()
+
+    def _change_indent(self, steps: int) -> None:
+        """Změní odsazení aktuálního bloku nebo listu."""
+        cursor = self.text_edit.textCursor()
+        cursor.beginEditBlock()
+        
+        current_list = cursor.currentList()
+        if current_list:
+            # Pokud jsme v listu, měníme level (odsazení formátu listu)
+            fmt = current_list.format()
+            current_indent = fmt.indent()
+            new_indent = max(1, current_indent + steps)
+            fmt.setIndent(new_indent)
+            current_list.setFormat(fmt)
+        else:
+            # Pokud je to běžný text, měníme margin bloku
+            block_fmt = cursor.blockFormat()
+            current_margin = block_fmt.leftMargin()
+            # Krok odsazení např. 20px
+            new_margin = max(0, current_margin + (steps * 20))
+            block_fmt.setLeftMargin(new_margin)
+            cursor.setBlockFormat(block_fmt)
+            
+        cursor.endEditBlock()
+        self._autosave_schedule()
+        self.text_edit.setFocus()
+
 
     def _on_format_bullets(self, checked: bool) -> None:
         """Přepne aktuální výběr na odrážky s lepším odsazením."""
@@ -2907,6 +2948,10 @@ class MainWindow(QMainWindow):
         self.action_underline.triggered.connect(lambda: self._toggle_format("underline"))
         self.action_color.triggered.connect(self._choose_color)
         self.action_bullets.triggered.connect(self._toggle_bullets)
+        
+        # NOVÉ: Propojení odsazení
+        self.action_indent_inc.triggered.connect(lambda: self._change_indent(1))
+        self.action_indent_dec.triggered.connect(lambda: self._change_indent(-1))
         
         self.action_align_left.triggered.connect(lambda: self._apply_alignment(Qt.AlignLeft))
         self.action_align_center.triggered.connect(lambda: self._apply_alignment(Qt.AlignHCenter))
