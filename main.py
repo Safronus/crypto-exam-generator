@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.5.7"
+APP_VERSION = "6.5.14"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -4513,7 +4513,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export chyba", f"Nelze otevřít šablonu pomocí python-docx:\n{e}")
             return
 
-        def insert_rich_question_block(paragraph, html_content):
+        # Helper function updated to accept style info
+        def insert_rich_question_block(paragraph, html_content, base_style=None, base_font=None):
             paras_data = parse_html_to_paragraphs(html_content)
             if not paras_data: 
                 paragraph.clear()
@@ -4525,11 +4526,18 @@ class MainWindow(QMainWindow):
                 if i == 0:
                     new_p = paragraph
                     new_p.clear()
+                    # Restore base style for the first paragraph (reused)
+                    if base_style: new_p.style = base_style
                 else:
+                    # Create new paragraph
                     new_p = doc.add_paragraph()
+                    # Apply base style from template
+                    if base_style: new_p.style = base_style
+                    
                     p_insert.addnext(new_p._p)
                     p_insert = new_p._p
 
+                # Apply formatting from HTML
                 align = p_data.get('align', 'left')
                 if align == 'center': new_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 elif align == 'right': new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -4542,15 +4550,17 @@ class MainWindow(QMainWindow):
                 indent_lvl = p_data.get('indent', 0)
                 
                 if p_data.get('prefix'):
-                    # Seznam (List Item)
-                    # ZVĚTŠENO: Base indent 36pt (0.5 inch), krok 36pt
-                    base_indent = 36
+                    # Seznam
+                    base_indent_pt = 36
                     level_indent = indent_lvl * 36
-                    
-                    new_p.paragraph_format.left_indent = Pt(base_indent + level_indent)
-                    # Hanging indent -18pt (0.25 inch) - odrážka uprostřed
+                    new_p.paragraph_format.left_indent = Pt(base_indent_pt + level_indent)
                     new_p.paragraph_format.first_line_indent = Pt(-18)
-                    new_p.add_run(p_data['prefix'])
+                    
+                    # Prefix run (bullet/number) - inherits font too
+                    r_prefix = new_p.add_run(p_data['prefix'])
+                    if base_font:
+                        if base_font.get('name'): r_prefix.font.name = base_font['name']
+                        if base_font.get('size'): r_prefix.font.size = base_font['size']
                 else:
                     # Běžný odstavec
                     if indent_lvl > 0:
@@ -4562,6 +4572,14 @@ class MainWindow(QMainWindow):
                     for idx, part in enumerate(parts):
                         if part:
                             run = new_p.add_run(part)
+                            # 1. Apply base font from template (if exists)
+                            if base_font:
+                                if base_font.get('name'): run.font.name = base_font['name']
+                                if base_font.get('size'): run.font.size = base_font['size']
+                                # We don't enforce bold/italic from template if HTML has its own, 
+                                # but we could use it as fallback. Here we prioritize HTML format.
+
+                            # 2. Apply HTML format overrides
                             if r_data.get('b'): run.bold = True
                             if r_data.get('i'): run.italic = True
                             if r_data.get('u'): run.underline = True
@@ -4570,6 +4588,7 @@ class MainWindow(QMainWindow):
                                     rgb = r_data['color']
                                     run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
                                 except: pass
+                        
                         if idx < len(parts) - 1:
                             run = new_p.add_run()
                             run.add_break()
@@ -4578,18 +4597,35 @@ class MainWindow(QMainWindow):
             full_text = p.text
             if not full_text.strip(): return
 
-            # 1. Rich Check
+            # Extract Base Style & Font BEFORE modification
+            base_style = p.style
+            base_font = {}
+            if p.runs:
+                # Use the first run as reference for font properties
+                r0 = p.runs[0]
+                base_font = {
+                    'name': r0.font.name,
+                    'size': r0.font.size,
+                    'bold': r0.bold,
+                    'italic': r0.italic,
+                    'underline': r0.underline,
+                    'color': r0.font.color.rgb if r0.font.color else None
+                }
+
+            # 1. Rich Check (Block Replacement)
             txt_clean = full_text.strip()
             matched_rich = None
             for ph, html in rich_repl_html.items():
                 if txt_clean == f"<{ph}>" or txt_clean == f"{{{ph}}}":
                     matched_rich = (ph, html)
                     break
+            
             if matched_rich:
-                insert_rich_question_block(p, matched_rich[1])
+                # Pass style info to insertion function
+                insert_rich_question_block(p, matched_rich[1], base_style=base_style, base_font=base_font)
                 return
 
-            # 2. Inline Check (Simple + Safe Rich)
+            # 2. Inline Check
             keys_found = []
             for k in simple_repl.keys():
                 if f"<{k}>" in full_text or f"{{{k}}}" in full_text: keys_found.append(k)
@@ -4600,7 +4636,7 @@ class MainWindow(QMainWindow):
 
             has_rich_key = any(k in rich_repl_html for k in keys_found)
 
-            # Safe replacement pro Simple keys (zachová symboly a formát)
+            # Safe Replacement (Simple)
             if not has_rich_key:
                 replacements_done = 0
                 for run in p.runs:
@@ -4619,7 +4655,7 @@ class MainWindow(QMainWindow):
                 if replacements_done > 0 and not still_has_keys:
                     return 
 
-            # Fallback: Rekonstrukce (pro Rich nebo complex split)
+            # Fallback Reconstruction (Rich/Complex)
             segments = [full_text]
             all_repl_data = {}
             for k, v in simple_repl.items(): all_repl_data[k] = {'type': 'simple', 'val': v}
@@ -4640,36 +4676,32 @@ class MainWindow(QMainWindow):
                             new_segments.append(seg)
                     segments = new_segments
 
-            base_props = {}
-            if p.runs:
-                r0 = p.runs[0]
-                base_props = {
-                    'name': r0.font.name, 'size': r0.font.size,
-                    'bold': r0.bold, 'italic': r0.italic, 'underline': r0.underline,
-                    'color': r0.font.color.rgb if r0.font.color else None
-                }
-
+            # For inline reconstruction, we rely on base_font captured earlier
             p.clear()
             
             for seg in segments:
                 if isinstance(seg, str):
                     run = p.add_run(seg)
-                    if base_props.get('name'): run.font.name = base_props['name']
-                    if base_props.get('size'): run.font.size = base_props['size']
-                    run.bold = base_props.get('bold')
-                    run.italic = base_props.get('italic')
+                    # Apply base font
+                    if base_font.get('name'): run.font.name = base_font['name']
+                    if base_font.get('size'): run.font.size = base_font['size']
+                    run.bold = base_font.get('bold')
+                    run.italic = base_font.get('italic')
+                    
                 elif isinstance(seg, dict):
                     val = seg['val']
                     if seg['type'] == 'simple':
                         run = p.add_run(val)
-                        if base_props.get('name'): run.font.name = base_props['name']
-                        if base_props.get('size'): run.font.size = base_props['size']
-                        run.bold = base_props.get('bold')
-                        run.italic = base_props.get('italic')
-                        run.underline = base_props.get('underline')
-                        if base_props.get('color'): run.font.color.rgb = base_props['color']
+                        # Inherit base font
+                        if base_font.get('name'): run.font.name = base_font['name']
+                        if base_font.get('size'): run.font.size = base_font['size']
+                        run.bold = base_font.get('bold')
+                        run.italic = base_font.get('italic')
+                        run.underline = base_font.get('underline')
+                        if base_font.get('color'): run.font.color.rgb = base_font['color']
+                        
                     elif seg['type'] == 'rich':
-                        # Rich vložení inline (zjednodušené)
+                        # Inline rich text
                         paras = parse_html_to_paragraphs(val)
                         for p_idx, p_data in enumerate(paras):
                             if p_idx > 0: p.add_run().add_break()
@@ -4679,6 +4711,7 @@ class MainWindow(QMainWindow):
                                 for idx_part, part in enumerate(parts):
                                     if part:
                                         run = p.add_run(part)
+                                        # Apply formatting
                                         if r_data.get('b'): run.bold = True
                                         if r_data.get('i'): run.italic = True
                                         if r_data.get('u'): run.underline = True
@@ -4687,8 +4720,11 @@ class MainWindow(QMainWindow):
                                                 rgb = r_data['color']
                                                 run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
                                             except: pass
-                                        if not r_data.get('b') and base_props.get('name'): run.font.name = base_props['name']
-                                        if not r_data.get('b') and base_props.get('size'): run.font.size = base_props['size']
+                                        
+                                        # Fallback to base font if not overridden
+                                        if not r_data.get('b') and base_font.get('name'): run.font.name = base_font['name']
+                                        if not r_data.get('b') and base_font.get('size'): run.font.size = base_font['size']
+                                        
                                     if idx_part < len(parts) - 1: p.add_run().add_break()
 
         for p in doc.paragraphs: process_paragraph(p)
@@ -4716,6 +4752,7 @@ class MainWindow(QMainWindow):
             doc.save(output_path)
         except Exception as e:
             QMessageBox.critical(self, "Chyba uložení", f"Nelze uložit DOCX:\n{e}")
+
 
     # -------------------- Pomocné --------------------
 
