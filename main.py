@@ -84,14 +84,14 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QTableWidget,
     QTableWidgetItem,
-    QHeaderView, QCheckBox,
+    QHeaderView, QCheckBox, QGridLayout,
     QTreeWidgetItemIterator, QButtonGroup,
     QHeaderView, QMenu, QTabWidget, QRadioButton,
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.4.7"
+APP_VERSION = "6.5.2"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -649,17 +649,32 @@ class ExportWizard(QWizard):
         self.output_changed_manually = False
         self.placeholders_q = []
         self.placeholders_b = []
-        self.selection_map = {}
+        self.selection_map = {}        
+        # Načtení uložených cest
+        self.settings_file = self.owner.project_root / "data" / "export_settings.json"
+        self.stored_settings = self._load_settings()
 
         # Cesty (Default)
-        self.templates_dir = self.owner.project_root / "data" / "Šablony"
-        self.output_dir = self.owner.project_root / "data" / "Vygenerované testy"
-        self.templates_dir.mkdir(parents=True, exist_ok=True)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        default_templates_dir = self.owner.project_root / "data" / "Šablony"
+        default_output_dir = self.owner.project_root / "data" / "Vygenerované testy"
+        default_print_dir = self.owner.project_root / "data" / "Tisk"
         
-        self.default_template = self.templates_dir / "template_AK3KR_předtermín.docx"
-        # Inicializace default_output (aby nepadal dialog)
-        self.default_output = self.output_dir / "export.docx" 
+        # Vytvoření složek, pokud neexistují
+        default_templates_dir.mkdir(parents=True, exist_ok=True)
+        default_output_dir.mkdir(parents=True, exist_ok=True)
+        default_print_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Aplikace uložených nebo defaultních cest
+        self.templates_dir = Path(self.stored_settings.get("templates_dir", default_templates_dir))
+        self.output_dir = Path(self.stored_settings.get("output_dir", default_output_dir))
+        self.print_dir = Path(self.stored_settings.get("print_dir", default_print_dir))
+        
+        # Šablona
+        last_template = self.stored_settings.get("last_template")
+        if last_template and Path(last_template).exists():
+            self.default_template = Path(last_template)
+        else:
+            self.default_template = self.templates_dir / "template.docx"
 
         # --- INIT STRÁNEK ---
         self.page1 = QWizardPage()
@@ -681,16 +696,69 @@ class ExportWizard(QWizard):
             self.le_template.setText(str(self.default_template))
             self.template_path = self.default_template
             QTimer.singleShot(100, self._scan_placeholders)
+        else:
+            self.le_template.setText(str(self.default_template))
+            self._update_path_indicators()
         
-        # Auto-generate Output Name (Hned teď!)
-        # Toto nastaví self.output_path a text v QLineEdit
+        # Auto-generate Output Name
         self._update_default_output()
+        
+        # Update indikátorů
+        self._update_path_indicators()
+        
+    def _load_settings(self) -> dict:
+        if self.settings_file.exists():
+            try:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                pass
+        return {}
+
+    def _save_settings(self):
+        data = {
+            "templates_dir": str(self.templates_dir),
+            "output_dir": str(self.output_dir),
+            "print_dir": str(self.print_dir),
+            "last_template": self.le_template.text()
+        }
+        try:
+            with open(self.settings_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Chyba ukládání nastavení exportu: {e}")
+
+    def _update_path_indicators(self):
+        # Šablona
+        t_path = Path(self.le_template.text())
+        if t_path.exists() and t_path.is_file():
+            self.lbl_status_template.setText("✅ OK")
+            self.lbl_status_template.setStyleSheet("color: #81c784; font-weight: bold;")
+        else:
+            self.lbl_status_template.setText("❌ Chybí")
+            self.lbl_status_template.setStyleSheet("color: #ef5350; font-weight: bold;")
+            
+        # Výstupní složka
+        if self.output_dir.exists() and self.output_dir.is_dir():
+            self.lbl_status_out_dir.setText("✅ OK")
+            self.lbl_status_out_dir.setStyleSheet("color: #81c784; font-weight: bold;")
+        else:
+            self.lbl_status_out_dir.setText("❌ Chybí")
+            self.lbl_status_out_dir.setStyleSheet("color: #ef5350; font-weight: bold;")
+
+        # Tisková složka
+        if self.print_dir.exists() and self.print_dir.is_dir():
+            self.lbl_status_print_dir.setText("✅ OK")
+            self.lbl_status_print_dir.setStyleSheet("color: #81c784; font-weight: bold;")
+        else:
+            self.lbl_status_print_dir.setText("❌ Chybí")
+            self.lbl_status_print_dir.setStyleSheet("color: #ef5350; font-weight: bold;")
 
 
     # --- Build Content Methods ---
 
     def _build_page1_content(self):
-        self.page1.setTitle("Krok 1: Výběr šablony a globální nastavení")
+        self.page1.setTitle("Krok 1: Výběr šablony a nastavení cest")
         l1 = QVBoxLayout(self.page1)
         
         # GroupBox: Parametry
@@ -710,30 +778,64 @@ class ExportWizard(QWizard):
         gb_params.setLayout(form_params)
         l1.addWidget(gb_params)
 
-        # GroupBox: Soubory
-        gb_files = QGroupBox("Soubory")
-        form_files = QFormLayout()
+        # GroupBox: Soubory a složky
+        gb_files = QGroupBox("Cesty k souborům")
+        grid_files = QGridLayout()
+        grid_files.setColumnStretch(1, 1) # Input stretch
         
+        # 1. Šablona
+        grid_files.addWidget(QLabel("Šablona:"), 0, 0)
         self.le_template = QLineEdit()
         self.le_template.textChanged.connect(self._on_templ_change)
-        btn_t = QPushButton("Vybrat šablonu...")
-        btn_t.clicked.connect(self._choose_template)
-        h_t = QHBoxLayout(); h_t.addWidget(self.le_template); h_t.addWidget(btn_t)
-        form_files.addRow("Šablona:", h_t)
+        grid_files.addWidget(self.le_template, 0, 1)
         
+        btn_t = QPushButton("Vybrat...")
+        btn_t.clicked.connect(self._choose_template)
+        grid_files.addWidget(btn_t, 0, 2)
+        
+        self.lbl_status_template = QLabel("?")
+        self.lbl_status_template.setFixedWidth(80)
+        grid_files.addWidget(self.lbl_status_template, 0, 3)
+
+        # 2. Výstup DOCX (Složka)
+        grid_files.addWidget(QLabel("Složka pro testy:"), 1, 0)
+        self.le_out_dir = QLineEdit(str(self.output_dir))
+        self.le_out_dir.setReadOnly(True) # Editace jen přes dialog pro bezpečí
+        grid_files.addWidget(self.le_out_dir, 1, 1)
+        
+        btn_od = QPushButton("Změnit...")
+        btn_od.clicked.connect(self._choose_output_dir)
+        grid_files.addWidget(btn_od, 1, 2)
+        
+        self.lbl_status_out_dir = QLabel("?")
+        grid_files.addWidget(self.lbl_status_out_dir, 1, 3)
+        
+        # 3. Výstup PDF Tisk (Složka)
+        grid_files.addWidget(QLabel("Složka pro tisk:"), 2, 0)
+        self.le_print_dir = QLineEdit(str(self.print_dir))
+        self.le_print_dir.setReadOnly(True)
+        grid_files.addWidget(self.le_print_dir, 2, 1)
+        
+        btn_pd = QPushButton("Změnit...")
+        btn_pd.clicked.connect(self._choose_print_dir)
+        grid_files.addWidget(btn_pd, 2, 2)
+        
+        self.lbl_status_print_dir = QLabel("?")
+        grid_files.addWidget(self.lbl_status_print_dir, 2, 3)
+        
+        # 4. Konkrétní soubor (náhled názvu)
+        grid_files.addWidget(QLabel("Název souboru:"), 3, 0)
         self.le_output = QLineEdit()
         self.le_output.textChanged.connect(self._on_output_text_changed)
-        btn_o = QPushButton("Cíl exportu...")
-        btn_o.clicked.connect(self._choose_output)
-        h_o = QHBoxLayout(); h_o.addWidget(self.le_output); h_o.addWidget(btn_o)
-        form_files.addRow("Výstup:", h_o)
+        grid_files.addWidget(self.le_output, 3, 1, 1, 2) # Span 2 sloupce
         
-        gb_files.setLayout(form_files)
+        gb_files.setLayout(grid_files)
         l1.addWidget(gb_files)
         
         self.lbl_scan_info = QLabel("Info: Čekám na načtení šablony...")
-        self.lbl_scan_info.setStyleSheet("color: gray; font-style: italic;")
+        self.lbl_scan_info.setStyleSheet("color: gray; font-style: italic; margin-top: 10px;")
         l1.addWidget(self.lbl_scan_info)
+
 
     def _build_page2_content(self):
         self.page2.setTitle("Krok 2: Přiřazení otázek do šablony")
@@ -985,40 +1087,84 @@ class ExportWizard(QWizard):
     # --- Helpers & Logic ---
 
     def _update_default_output(self):
-        if self.output_changed_manually:
+        if self.output_changed_manually and self.sender() == self.le_output:
+            # Pokud uživatel edituje ručně celou cestu, necháme ho
+            self.output_path = Path(self.le_output.text())
             return
-        prefix = self.le_prefix.text().strip() or "Test"
-        dt = self.dt_edit.dateTime()
-        filename = f"{prefix}_{dt.toString('yyyy-MM-dd_HHmm')}.docx"
-        new_path = self.output_dir / filename
+
+        prefix = self.le_prefix.text().strip()
+        # Nahrazení nepovolených znaků
+        prefix = re.sub(r'[\\/*?:"<>|]', "_", prefix)
         
+        dt = self.dt_edit.dateTime()
+        date_str = dt.toString("yyyy-MM-dd")
+        
+        # Defaultní název
+        filename = f"{prefix}_{date_str}.docx"
+        
+        self.output_path = self.output_dir / filename
+        
+        # Blokujeme signál, abychom necyklili přes _on_output_text_changed
         self.le_output.blockSignals(True)
-        self.le_output.setText(str(new_path))
+        self.le_output.setText(str(self.output_path))
         self.le_output.blockSignals(False)
-        self.output_path = new_path
+        
+        # OPRAVA: Signál se musí emitovat ze stránky
+        self.page1.completeChanged.emit()
 
     def _on_output_text_changed(self, text):
         self.output_changed_manually = True
         self.output_path = Path(text)
 
     def _choose_template(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Vybrat šablonu", str(self.templates_dir), "*.docx")
+        start_dir = str(self.templates_dir) if self.templates_dir.exists() else str(self.owner.project_root)
+        path, _ = QFileDialog.getOpenFileName(self, "Vybrat šablonu", start_dir, "*.docx")
         if path:
             self.le_template.setText(path)
+            self.templates_dir = Path(path).parent
+            # Uložit nastavení ihned
+            self._save_settings()
 
     def _choose_output(self):
         path, _ = QFileDialog.getSaveFileName(self, "Cíl exportu", str(self.default_output), "*.docx")
         if path:
             self.le_output.setText(path)
+            
+    def _choose_output_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Vybrat složku pro testy", str(self.output_dir))
+        if d:
+            self.output_dir = Path(d)
+            self.le_out_dir.setText(d)
+            # Uložit nastavení ihned
+            self._save_settings()
+            
+            self._update_path_indicators()
+            self._update_default_output() # Přegenerovat cestu k souboru
 
-    def _on_templ_change(self, text):
-        path = Path(text)
-        if path.exists() and path.suffix == '.docx':
-            self.template_path = path
-            self._scan_placeholders()
+    def _choose_print_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Vybrat složku pro tisk", str(self.print_dir))
+        if d:
+            self.print_dir = Path(d)
+            self.le_print_dir.setText(d)
+            # Uložit nastavení ihned
+            self._save_settings()
+            
+            self._update_path_indicators()
+
+    def _on_templ_change(self, text: str):
+        self.template_path = Path(text)
+        self._update_path_indicators()
+        
+        # Uložit nastavení ihned
+        self._save_settings()
+        
+        if self.template_path.exists() and self.template_path.suffix.lower() == '.docx':
+             self._scan_placeholders()
         else:
-            self.template_path = None
-            self.lbl_scan_info.setText("Šablona neexistuje nebo není platná.")
+             self.lbl_scan_info.setText("Šablona nenalezena nebo není .docx")
+        
+        self.page1.completeChanged.emit()
+
 
     def _scan_placeholders(self):
         if not self.template_path or not self.template_path.exists():
@@ -1822,6 +1968,13 @@ class ExportWizard(QWizard):
             self.preview_edit.setText(f"Chyba při generování náhledu: {e}")
 
     def accept(self) -> None:
+        # Uložení nastavení před exportem
+        self._save_settings()
+        
+        # ... zbytek metody accept zůstává stejný jako v předchozím kroku (v6.4.7)
+        # (Zde nevkládám celý kód accept znovu, protože se mění jen začátek, ale 
+        # uživatel má již správnou verzi accept z minulého kroku. 
+        # Nicméně, pro úplnost a funkčnost 'Copy-Paste' vložím celou metodu s tímto přídavkem)
         if not self.template_path or not self.output_path:
             return
 
