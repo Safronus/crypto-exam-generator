@@ -83,13 +83,13 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
-    QTreeWidgetItemIterator,
-    QHeaderView, QMenu, QTabWidget,
+    QTreeWidgetItemIterator, QButtonGroup,
+    QHeaderView, QMenu, QTabWidget, QRadioButton,
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.3.13"
+APP_VERSION = "6.4.1"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -749,13 +749,35 @@ class ExportWizard(QWizard):
         l_info.addRow("Výstupní soubor:", self.lbl_out_p2)
         main_layout.addWidget(self.info_box_p2)
 
-        # NOVÉ: Hromadné generování
-        self.group_multi = QGroupBox("Hromadné generování variant")
-        self.group_multi.setCheckable(True)
-        self.group_multi.setChecked(False)
-        self.group_multi.setStyleSheet("QGroupBox::indicator { width: 14px; height: 14px; } QGroupBox { font-weight: bold; margin-top: 6px; }")
+        # 2. Volba režimu
+        self.mode_box = QGroupBox("Režim exportu")
+        self.mode_box.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        l_mode = QHBoxLayout(self.mode_box)
         
-        l_multi = QHBoxLayout(self.group_multi)
+        self.rb_mode_single = QRadioButton("Jednotlivý export (Standardní)")
+        self.rb_mode_single.setToolTip("Vytvoří jeden soubor s ručně vybranými otázkami.")
+        self.rb_mode_single.setChecked(True)
+        
+        self.rb_mode_multi = QRadioButton("Hromadný export (Generátor variant)")
+        self.rb_mode_multi.setToolTip("Vytvoří více kopií testu. Otázky 1-10 budou vybrány náhodně pro každou kopii.")
+        
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.rb_mode_single, 0)
+        self.mode_group.addButton(self.rb_mode_multi, 1)
+        self.mode_group.buttonToggled.connect(self._on_mode_toggled)
+        
+        l_mode.addWidget(self.rb_mode_single)
+        l_mode.addWidget(self.rb_mode_multi)
+        l_mode.addStretch()
+        main_layout.addWidget(self.mode_box)
+
+        # 3. Nastavení pro hromadný export (Skryté by default)
+        self.widget_multi_options = QWidget()
+        self.widget_multi_options.setVisible(False)
+        self.widget_multi_options.setStyleSheet("background-color: #2d2d30; border-radius: 4px; padding: 4px;")
+        l_multi = QHBoxLayout(self.widget_multi_options)
+        l_multi.setContentsMargins(5, 5, 5, 5)
+        
         l_multi.addWidget(QLabel("Počet kopií:"))
         self.spin_multi_count = QSpinBox()
         self.spin_multi_count.setRange(2, 50)
@@ -767,13 +789,16 @@ class ExportWizard(QWizard):
         self.combo_multi_source.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         l_multi.addWidget(self.combo_multi_source, 1)
         
-        main_layout.addWidget(self.group_multi)
+        main_layout.addWidget(self.widget_multi_options)
 
-        # 2. Hlavní obsah (Dva sloupce: Strom | Sloty)
+        # 4. Hlavní obsah (Dva sloupce: Strom | Sloty)
         columns_layout = QHBoxLayout()
         
-        # Levý panel: Strom
-        left_layout = QVBoxLayout()
+        # Levý panel: Strom (NOVÉ: Obaleno ve widgetu pro skrývání)
+        self.widget_left_panel = QWidget()
+        left_layout = QVBoxLayout(self.widget_left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
         left_layout.addWidget(QLabel("<b>Dostupné otázky:</b>"))
         self.tree_source = QTreeWidget()
         self.tree_source.setHeaderLabels(["Struktura otázek"])
@@ -793,7 +818,7 @@ class ExportWizard(QWizard):
         self.btn_assign_multi.clicked.connect(self._assign_selected_multi)
         left_layout.addWidget(self.btn_assign_multi)
         
-        columns_layout.addLayout(left_layout, 4)
+        columns_layout.addWidget(self.widget_left_panel, 4)
         
         # Pravý panel: Sloty
         right_layout = QVBoxLayout()
@@ -821,7 +846,7 @@ class ExportWizard(QWizard):
         
         main_layout.addLayout(columns_layout, 3)
 
-        # 3. Náhled
+        # 5. Náhled
         preview_box = QGroupBox("Náhled vybrané otázky")
         preview_layout = QVBoxLayout(preview_box)
         preview_layout.setContentsMargins(5,5,5,5)
@@ -841,6 +866,61 @@ class ExportWizard(QWizard):
         preview_layout.addWidget(self.text_preview_q)
         
         main_layout.addWidget(preview_box, 1)
+
+    def _on_mode_toggled(self, btn, checked):
+        """Reaguje na změnu režimu exportu (Single vs Multi)."""
+        if not checked: return
+        
+        is_multi = (self.mode_group.checkedId() == 1)
+        self.widget_multi_options.setVisible(is_multi)
+        
+        # NOVÉ: Skrytí levého panelu s otázkami při multi režimu
+        self.widget_left_panel.setVisible(not is_multi)
+        
+        self._update_slots_visuals(is_multi)
+
+
+    def _update_slots_visuals(self, is_multi: bool):
+        """Aktualizuje vzhled slotů podle režimu."""
+        # Projdeme všechny widgety ve slot layoutu
+        for i in range(self.layout_slots.count()):
+            item = self.layout_slots.itemAt(i)
+            w = item.widget()
+            if not w: continue
+            
+            ph = w.property("placeholder")
+            if not ph: continue # Není to slot (např. nadpis)
+            
+            # Získáme reference na tlačítka uvnitř slotu
+            # Layout: [Label, ButtonAssign, ButtonClear]
+            row_layout = w.layout()
+            if not row_layout or row_layout.count() < 3: continue
+            
+            btn_assign = row_layout.itemAt(1).widget()
+            btn_clear = row_layout.itemAt(2).widget()
+            
+            # Logika pro Otázka1-10 v Multi režimu
+            if is_multi and re.match(r"^Otázka([1-9]|10)$", ph):
+                btn_assign.setText("🎲 NÁHODNĚ Z VARIANT")
+                btn_assign.setStyleSheet("color: #ffcc00; font-weight: bold; border: 1px dashed #ffcc00;")
+                btn_assign.setEnabled(False)
+                btn_clear.setEnabled(False)
+            else:
+                # Obnovíme standardní stav
+                btn_assign.setEnabled(True)
+                btn_clear.setEnabled(True)
+                btn_assign.setStyleSheet("")
+                
+                qid = self.selection_map.get(ph)
+                if qid:
+                    q = self.owner._find_question_by_id(qid)
+                    if q:
+                        btn_assign.setText(q.title)
+                    else:
+                        btn_assign.setText("???")
+                else:
+                    btn_assign.setText("Vybrat...")
+
 
     def _clear_all_assignments(self) -> None:
         """Vymaže všechna přiřazení otázek ve slotech."""
@@ -1144,6 +1224,10 @@ class ExportWizard(QWizard):
                 for ph in self.placeholders_b:
                     create_slot_row(ph, True)
             
+            # Aplikovat vizuální stav podle aktuálního režimu
+            is_multi = (self.mode_group.checkedId() == 1)
+            self._update_slots_visuals(is_multi)
+            
             # DŮLEŽITÉ: Aktualizace vizuálů stromu na konci
             self._refresh_tree_visuals()
                     
@@ -1151,6 +1235,7 @@ class ExportWizard(QWizard):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Chyba", f"Chyba při inicializaci stránky 2:\n{e}")
+
 
     def _on_slot_assign_clicked(self, ph: str) -> None:
         # Jednoduchý výběr: Otevře dialog se seznamem dostupných otázek
@@ -1611,13 +1696,13 @@ class ExportWizard(QWizard):
 
     def _init_page3(self):
         try:
-            # 1. Generování hashe (NOVÉ)
+            # 1. Generování hashe
             ts = str(datetime.now().timestamp())
             salt = secrets.token_hex(16)
             data_to_hash = f"{ts}{salt}"
             self._cached_hash = hashlib.sha3_256(data_to_hash.encode("utf-8")).hexdigest()
             
-            # Zobrazení hashe v labelu
+            # Zobrazení hashe
             if hasattr(self, "lbl_hash_preview"):
                 self.lbl_hash_preview.setText(f"SHA3-256 Hash:\n{self._cached_hash}")
 
@@ -1638,11 +1723,12 @@ class ExportWizard(QWizard):
             today = datetime.now().strftime("%Y-%m-%d")
             verze_preview = f"{prefix} {today}" 
             
-            # NOVÉ: Info o hromadném exportu
-            is_multi = self.group_multi.isChecked()
-            multi_count = self.spin_multi_count.value()
+            # OPRAVA: Použití mode_group místo group_multi
+            is_multi = (self.mode_group.checkedId() == 1)
+            
             multi_info = ""
             if is_multi:
+                multi_count = self.spin_multi_count.value()
                 multi_info = f"<tr><td colspan='2' style='color: #ffcc00; font-weight: bold;'>⚡ Hromadný export: {multi_count} verzí (stejný hash)</td></tr>"
 
             html = f"""
@@ -1720,6 +1806,7 @@ class ExportWizard(QWizard):
             traceback.print_exc()
             self.preview_edit.setText(f"Chyba při generování náhledu: {e}")
 
+
     def accept(self) -> None:
         if not self.template_path or not self.output_path:
             return
@@ -1732,7 +1819,7 @@ class ExportWizard(QWizard):
             data_to_hash = f"{ts}{salt}"
             k_hash = hashlib.sha3_256(data_to_hash.encode("utf-8")).hexdigest()
 
-        is_multi = self.group_multi.isChecked()
+        is_multi = (self.mode_group.checkedId() == 1)
         count = self.spin_multi_count.value() if is_multi else 1
         
         # Příprava poolu otázek pro náhodný výběr
@@ -1750,14 +1837,11 @@ class ExportWizard(QWizard):
                     # BFS/DFS pro nalezení uzlu
                     while nodes_to_visit:
                         curr = nodes_to_visit.pop(0)
-                        # Group nemá 'questions', jen 'subgroups'. Subgroup má obojí.
                         
-                        # Kontrola ID
                         if curr.id == group_id:
                             target_node = curr
                             break
                         
-                        # Přidání podskupin do fronty
                         if hasattr(curr, "subgroups") and curr.subgroups:
                             nodes_to_visit.extend(curr.subgroups)
                     
@@ -1765,11 +1849,9 @@ class ExportWizard(QWizard):
                         # Rekurzivně sebrat otázky z tohoto uzlu a poduzlů
                         def extract_q(node):
                             valid_qs = []
-                            # OPRAVA: Group nemá attribute 'questions', musíme ověřit existenci
                             if hasattr(node, "questions"):
                                 valid_qs.extend([q.id for q in node.questions if q.type == 'classic'])
                             
-                            # Rekurze do podskupin (mají ji Group i Subgroup)
                             if hasattr(node, "subgroups") and node.subgroups:
                                 for sub in node.subgroups:
                                     valid_qs.extend(extract_q(sub))
@@ -1796,13 +1878,11 @@ class ExportWizard(QWizard):
                 # Zamíchat pool a vzít potřebný počet
                 needed = len(targets)
                 
-                # Pokud máme dost otázek, vybereme unikátní
                 if len(question_pool) >= needed:
                     picked = random.sample(question_pool, needed)
                     for idx, ph in enumerate(targets):
                         current_selection[ph] = picked[idx]
                 else:
-                    # Fallback - opakování (náhodný výběr s vracením), pokud je pool menší než počet slotů
                     if len(question_pool) > 0:
                         for ph in targets:
                             current_selection[ph] = random.choice(question_pool)
@@ -1876,6 +1956,7 @@ class ExportWizard(QWizard):
             QMessageBox.information(self, "Export", f"Export dokončen.\nSoubor uložen:\n{base_output_path}")
             
         super().accept()
+
 
 # --------------------------- Hlavní okno (UI + logika) ---------------------------
 
