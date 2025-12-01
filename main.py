@@ -85,11 +85,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QTreeWidgetItemIterator,
     QHeaderView, QMenu, QTabWidget,
-    QTreeWidget, QTreeWidgetItem
+    QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.3.12"
+APP_VERSION = "6.3.13"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -749,6 +749,26 @@ class ExportWizard(QWizard):
         l_info.addRow("Výstupní soubor:", self.lbl_out_p2)
         main_layout.addWidget(self.info_box_p2)
 
+        # NOVÉ: Hromadné generování
+        self.group_multi = QGroupBox("Hromadné generování variant")
+        self.group_multi.setCheckable(True)
+        self.group_multi.setChecked(False)
+        self.group_multi.setStyleSheet("QGroupBox::indicator { width: 14px; height: 14px; } QGroupBox { font-weight: bold; margin-top: 6px; }")
+        
+        l_multi = QHBoxLayout(self.group_multi)
+        l_multi.addWidget(QLabel("Počet kopií:"))
+        self.spin_multi_count = QSpinBox()
+        self.spin_multi_count.setRange(2, 50)
+        self.spin_multi_count.setValue(2)
+        l_multi.addWidget(self.spin_multi_count)
+        
+        l_multi.addWidget(QLabel("Zdroj otázek (pro <Otázka1-10>):"))
+        self.combo_multi_source = QComboBox()
+        self.combo_multi_source.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        l_multi.addWidget(self.combo_multi_source, 1)
+        
+        main_layout.addWidget(self.group_multi)
+
         # 2. Hlavní obsah (Dva sloupce: Strom | Sloty)
         columns_layout = QHBoxLayout()
         
@@ -763,8 +783,6 @@ class ExportWizard(QWizard):
         self.tree_source.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_source.customContextMenuRequested.connect(self._on_tree_source_context_menu)
         
-        # OPRAVA: Vrácení signálu pro výběr (náhled a single selection logic)
-        # Pokud metoda _on_tree_selection v původním kódu existuje (což asi ano), musíme ji zapojit.
         if hasattr(self, "_on_tree_selection"):
             self.tree_source.itemSelectionChanged.connect(self._on_tree_selection)
         
@@ -823,7 +841,6 @@ class ExportWizard(QWizard):
         preview_layout.addWidget(self.text_preview_q)
         
         main_layout.addWidget(preview_box, 1)
-
 
     def _clear_all_assignments(self) -> None:
         """Vymaže všechna přiřazení otázek ve slotech."""
@@ -1012,9 +1029,10 @@ class ExportWizard(QWizard):
             if not self.placeholders_q and not self.placeholders_b:
                 self._scan_placeholders()
 
-            # 1. Clear Tree
+            # 1. Clear Tree & Combo
             self.tree_source.blockSignals(True)
             self.tree_source.clear()
+            self.combo_multi_source.clear()
             
             # 2. Clear Slots
             while self.layout_slots.count():
@@ -1022,9 +1040,10 @@ class ExportWizard(QWizard):
                 if item.widget(): item.widget().deleteLater()
             self.layout_slots.addStretch()
             
-            # 4. Populate Tree
-            def add_subgroup_recursive(parent_item, subgroup_list, parent_gid):
+            # 4. Populate Tree and Combo
+            def add_subgroup_recursive(parent_item, subgroup_list, parent_gid, level=1):
                 for sg in subgroup_list:
+                    # Tree Item
                     sg_item = QTreeWidgetItem([sg.name])
                     sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
                     sg_item.setData(0, Qt.UserRole, {
@@ -1033,6 +1052,10 @@ class ExportWizard(QWizard):
                         "parent_group_id": parent_gid
                     })
                     parent_item.addChild(sg_item)
+                    
+                    # Combo Item
+                    indent = "  " * level
+                    self.combo_multi_source.addItem(f"{indent}📂 {sg.name}", {"type": "subgroup", "id": sg.id})
                     
                     for q in sg.questions:
                         info = f"({q.points} b)" if q.type == 'classic' else f"(Bonus: {q.bonus_correct})"
@@ -1050,10 +1073,11 @@ class ExportWizard(QWizard):
                         sg_item.addChild(q_item)
                     
                     if sg.subgroups:
-                        add_subgroup_recursive(sg_item, sg.subgroups, parent_gid)
+                        add_subgroup_recursive(sg_item, sg.subgroups, parent_gid, level + 1)
 
             groups = self.owner.root.groups
             for g in groups:
+                # Tree
                 g_item = QTreeWidgetItem([g.name])
                 g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
                 f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
@@ -1062,6 +1086,10 @@ class ExportWizard(QWizard):
                     "id": g.id
                 })
                 self.tree_source.addTopLevelItem(g_item)
+                
+                # Combo
+                self.combo_multi_source.addItem(f"📁 {g.name}", {"type": "group", "id": g.id})
+                
                 add_subgroup_recursive(g_item, g.subgroups, g.id)
                 
             self.tree_source.expandAll()
@@ -1123,7 +1151,6 @@ class ExportWizard(QWizard):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Chyba", f"Chyba při inicializaci stránky 2:\n{e}")
-
 
     def _on_slot_assign_clicked(self, ph: str) -> None:
         # Jednoduchý výběr: Otevře dialog se seznamem dostupných otázek
@@ -1590,9 +1617,9 @@ class ExportWizard(QWizard):
             data_to_hash = f"{ts}{salt}"
             self._cached_hash = hashlib.sha3_256(data_to_hash.encode("utf-8")).hexdigest()
             
-            # Zobrazení hashe v labelu (pokud existuje z _build_page3_content)
+            # Zobrazení hashe v labelu
             if hasattr(self, "lbl_hash_preview"):
-                self.lbl_hash_preview.setText(f"SHA3-512 Hash:\n{self._cached_hash}")
+                self.lbl_hash_preview.setText(f"SHA3-256 Hash:\n{self._cached_hash}")
 
             t_name = self.template_path.name if self.template_path else "Nevybráno"
             o_name = self.output_path.name if self.output_path else "Nevybráno"
@@ -1606,11 +1633,18 @@ class ExportWizard(QWizard):
             bg_color = "#252526"; text_color = "#e0e0e0"; border_color = "#555555"
             sec_q_bg = "#2d3845"; sec_b_bg = "#453d2d"; sec_s_bg = "#2d452d"
             
-            # Sestavení verze (ZMĚNA: Bez UUID na konci)
+            # Sestavení verze
             prefix = self.le_prefix.text().strip()
             today = datetime.now().strftime("%Y-%m-%d")
             verze_preview = f"{prefix} {today}" 
             
+            # NOVÉ: Info o hromadném exportu
+            is_multi = self.group_multi.isChecked()
+            multi_count = self.spin_multi_count.value()
+            multi_info = ""
+            if is_multi:
+                multi_info = f"<tr><td colspan='2' style='color: #ffcc00; font-weight: bold;'>⚡ Hromadný export: {multi_count} verzí (stejný hash)</td></tr>"
+
             html = f"""
             <html>
             <body style='font-family: Arial, sans-serif; background-color: {bg_color}; color: {text_color};'>
@@ -1620,6 +1654,7 @@ class ExportWizard(QWizard):
                     <td><b>Verze:</b> {verze_preview}</td>
                     <td align='right'><b>Datum:</b> {self.dt_edit.dateTime().toString("dd.MM.yyyy HH:mm")}</td>
                 </tr>
+                {multi_info}
                 <tr>
                     <td colspan='2' style='font-size: 10px; color: #888;'><b>Hash:</b> {self._cached_hash[:32]}...</td>
                 </tr>
@@ -1637,7 +1672,10 @@ class ExportWizard(QWizard):
                         title_clean = re.sub(r'<[^>]+>', '', q.title)
                         html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right'>({q.points} b)</td></tr>"
                 else:
-                    html += f"<tr><td width='100' style='color:#ff5555;'>{ph}:</td><td colspan='2' style='color:#ff5555;'>--- NEVYPLNĚNO ---</td></tr>"
+                    if is_multi and re.match(r"^Otázka([1-9]|10)$", ph):
+                        html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td colspan='2' style='color:#ffcc00;'>[Náhodný výběr pro každou verzi]</td></tr>"
+                    else:
+                        html += f"<tr><td width='100' style='color:#ff5555;'>{ph}:</td><td colspan='2' style='color:#ff5555;'>--- NEVYPLNĚNO ---</td></tr>"
             html += "</table>"
 
             # Bonusy
@@ -1686,69 +1724,157 @@ class ExportWizard(QWizard):
         if not self.template_path or not self.output_path:
             return
 
-        repl_plain: Dict[str, str] = {}
-        
-        # Datum
-        dt = round_dt_to_10m(self.dt_edit.dateTime())
-        dt_str = f"{cz_day_of_week(dt.toPython())} {dt.toString('dd.MM.yyyy HH:mm')}"
-        repl_plain["DatumČas"] = dt_str
-        repl_plain["DatumCas"] = dt_str
-        repl_plain["DATUMCAS"] = dt_str
-        
-        # Verze
-        prefix = self.le_prefix.text().strip()
-        today = datetime.now().strftime("%Y-%m-%d")
-        verze_str = f"{prefix} {today}"
-        repl_plain["PoznamkaVerze"] = verze_str
-        repl_plain["POZNAMKAVERZE"] = verze_str
-        
-        # Kontrolní Hash
+        # Kontrolní Hash - jeden společný pro všechny
         k_hash = getattr(self, "_cached_hash", "")
         if not k_hash:
             ts = str(datetime.now().timestamp())
             salt = secrets.token_hex(16)
             data_to_hash = f"{ts}{salt}"
-            k_hash = hashlib.sha3_512(data_to_hash.encode("utf-8")).hexdigest()
+            k_hash = hashlib.sha3_256(data_to_hash.encode("utf-8")).hexdigest()
 
-        repl_plain["KontrolniHash"] = k_hash
-        repl_plain["KONTROLNIHASH"] = k_hash
+        is_multi = self.group_multi.isChecked()
+        count = self.spin_multi_count.value() if is_multi else 1
         
-        # Body (MaxBody = 10 + Bonusy)
-        total_bonus = 0.0
-        min_loss = 0.0
+        # Příprava poolu otázek pro náhodný výběr
+        question_pool = []
+        if is_multi:
+            data = self.combo_multi_source.currentData()
+            if data:
+                # Helper pro rekurzivní zisk otázek
+                def collect_questions(group_id, is_subgroup):
+                    qs = []
+                    # Najít skupinu/podskupinu v root
+                    nodes_to_visit = list(self.owner.root.groups)
+                    target_node = None
+                    
+                    # BFS/DFS pro nalezení uzlu
+                    while nodes_to_visit:
+                        curr = nodes_to_visit.pop(0)
+                        # Group nemá 'questions', jen 'subgroups'. Subgroup má obojí.
+                        
+                        # Kontrola ID
+                        if curr.id == group_id:
+                            target_node = curr
+                            break
+                        
+                        # Přidání podskupin do fronty
+                        if hasattr(curr, "subgroups") and curr.subgroups:
+                            nodes_to_visit.extend(curr.subgroups)
+                    
+                    if target_node:
+                        # Rekurzivně sebrat otázky z tohoto uzlu a poduzlů
+                        def extract_q(node):
+                            valid_qs = []
+                            # OPRAVA: Group nemá attribute 'questions', musíme ověřit existenci
+                            if hasattr(node, "questions"):
+                                valid_qs.extend([q.id for q in node.questions if q.type == 'classic'])
+                            
+                            # Rekurze do podskupin (mají ji Group i Subgroup)
+                            if hasattr(node, "subgroups") and node.subgroups:
+                                for sub in node.subgroups:
+                                    valid_qs.extend(extract_q(sub))
+                            return valid_qs
+                        
+                        qs = extract_q(target_node)
+                    return qs
+
+                is_sub = (data["type"] == "subgroup")
+                question_pool = collect_questions(data["id"], is_sub)
         
-        for qid in self.selection_map.values():
-            q = self.owner._find_question_by_id(qid)
-            if not q: continue
+        base_output_path = self.output_path
+        success_count = 0
+
+        # Loop generování
+        for i in range(count):
+            current_selection = self.selection_map.copy()
             
-            if q.type == 'bonus':
-                total_bonus += float(q.bonus_correct)
-                min_loss += float(q.bonus_wrong)
-        
-        max_body = 10.0 + total_bonus
-        
-        repl_plain["MaxBody"] = f"{max_body:.2f}"
-        repl_plain["MAXBODY"] = f"{max_body:.2f}"
-        repl_plain["MinBody"] = f"{min_loss:.2f}"
-        repl_plain["MINBODY"] = f"{min_loss:.2f}"
+            # Náhodný výběr pro Otázka1-10
+            if is_multi and question_pool:
+                import random
+                # Najít placeholdery
+                targets = [ph for ph in self.placeholders_q if re.match(r"^Otázka([1-9]|10)$", ph)]
+                # Zamíchat pool a vzít potřebný počet
+                needed = len(targets)
+                
+                # Pokud máme dost otázek, vybereme unikátní
+                if len(question_pool) >= needed:
+                    picked = random.sample(question_pool, needed)
+                    for idx, ph in enumerate(targets):
+                        current_selection[ph] = picked[idx]
+                else:
+                    # Fallback - opakování (náhodný výběr s vracením), pokud je pool menší než počet slotů
+                    if len(question_pool) > 0:
+                        for ph in targets:
+                            current_selection[ph] = random.choice(question_pool)
+            
+            # Generování pro tuto iteraci
+            repl_plain: Dict[str, str] = {}
+            
+            # Datum
+            dt = round_dt_to_10m(self.dt_edit.dateTime())
+            dt_str = f"{cz_day_of_week(dt.toPython())} {dt.toString('dd.MM.yyyy HH:mm')}"
+            repl_plain["DatumČas"] = dt_str
+            repl_plain["DatumCas"] = dt_str
+            repl_plain["DATUMCAS"] = dt_str
+            
+            # Verze
+            prefix = self.le_prefix.text().strip()
+            today = datetime.now().strftime("%Y-%m-%d")
+            verze_str = f"{prefix} {today}"
+            repl_plain["PoznamkaVerze"] = verze_str
+            repl_plain["POZNAMKAVERZE"] = verze_str
+            
+            repl_plain["KontrolniHash"] = k_hash
+            repl_plain["KONTROLNIHASH"] = k_hash
+            
+            # Body
+            total_bonus = 0.0
+            min_loss = 0.0
+            
+            for qid in current_selection.values():
+                q = self.owner._find_question_by_id(qid)
+                if not q: continue
+                if q.type == 'bonus':
+                    total_bonus += float(q.bonus_correct)
+                    min_loss += float(q.bonus_wrong)
+            
+            max_body = 10.0 + total_bonus
+            repl_plain["MaxBody"] = f"{max_body:.2f}"
+            repl_plain["MAXBODY"] = f"{max_body:.2f}"
+            repl_plain["MinBody"] = f"{min_loss:.2f}"
+            repl_plain["MINBODY"] = f"{min_loss:.2f}"
 
-        # Rich text map
-        rich_map: Dict[str, str] = {}
-        for ph, qid in self.selection_map.items():
-            q = self.owner._find_question_by_id(qid)
-            if q:
-                rich_map[ph] = q.text_html
+            # Rich text map
+            rich_map: Dict[str, str] = {}
+            for ph, qid in current_selection.items():
+                q = self.owner._find_question_by_id(qid)
+                if q:
+                    rich_map[ph] = q.text_html
 
-        try:
-            self.owner._generate_docx_from_template(self.template_path, self.output_path, repl_plain, rich_map)
-        except Exception as e:
-            QMessageBox.critical(self, "Export", f"Chyba při exportu:\n{e}")
-            return
+            # Název souboru
+            if is_multi:
+                p = Path(base_output_path)
+                new_name = f"{p.stem}_v{i+1}{p.suffix}"
+                target_path = p.parent / new_name
+            else:
+                target_path = base_output_path
 
-        # NOVÉ: Registrace exportu do historie
-        self.owner.register_export(self.output_path.name, k_hash)
+            try:
+                self.owner._generate_docx_from_template(self.template_path, target_path, repl_plain, rich_map)
+                success_count += 1
+            except Exception as e:
+                QMessageBox.critical(self, "Export", f"Chyba při exportu verze {i+1}:\n{e}")
+                if not is_multi: return
 
-        QMessageBox.information(self, "Export", f"Export dokončen.\nSoubor uložen:\n{self.output_path}")
+        # Zápis do historie (jen jednou jako balík, nebo single)
+        if is_multi:
+            record_name = f"Balík {count} verzí: {base_output_path.name}"
+            self.owner.register_export(record_name, k_hash)
+            QMessageBox.information(self, "Export", f"Hromadný export dokončen.\nVygenerováno {success_count} souborů.")
+        else:
+            self.owner.register_export(base_output_path.name, k_hash)
+            QMessageBox.information(self, "Export", f"Export dokončen.\nSoubor uložen:\n{base_output_path}")
+            
         super().accept()
 
 # --------------------------- Hlavní okno (UI + logika) ---------------------------
