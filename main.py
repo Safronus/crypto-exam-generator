@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.5.3"
+APP_VERSION = "6.5.4"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2394,19 +2394,17 @@ class MainWindow(QMainWindow):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(8)
 
-        # LEVÝ PANEL (nyní obsahuje záložky)
+        # LEVÝ PANEL
         left_panel_container = QWidget()
         left_container_layout = QVBoxLayout(left_panel_container)
         left_container_layout.setContentsMargins(0, 0, 0, 0)
-
         self.left_tabs = QTabWidget()
         
-        # --- ZÁLOŽKA 1: OTÁZKY (Původní obsah) ---
+        # ZÁLOŽKA 1: OTÁZKY
         self.tab_questions = QWidget()
         questions_layout = QVBoxLayout(self.tab_questions)
         questions_layout.setContentsMargins(4, 4, 4, 4)
         questions_layout.setSpacing(6)
-
         filter_bar = QWidget()
         filter_layout = QHBoxLayout(filter_bar)
         filter_layout.setContentsMargins(0, 0, 0, 0)
@@ -2419,17 +2417,14 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.btn_move_selected)
         filter_layout.addWidget(self.btn_delete_selected)
         questions_layout.addWidget(filter_bar)
-
         self.tree = DnDTree(self)
         questions_layout.addWidget(self.tree, 1)
-        
         self.left_tabs.addTab(self.tab_questions, "Otázky")
 
-        # --- ZÁLOŽKA 2: HISTORIE (Upraveno) ---
+        # ZÁLOŽKA 2: HISTORIE
         self.tab_history = QWidget()
         history_layout = QVBoxLayout(self.tab_history)
         history_layout.setContentsMargins(4, 4, 4, 4)
-        
         self.table_history = QTableWidget(0, 2)
         self.table_history.setHorizontalHeaderLabels(["Soubor", "Hash (SHA3-256)"])
         self.table_history.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents) 
@@ -2437,23 +2432,16 @@ class MainWindow(QMainWindow):
         self.table_history.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_history.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table_history.setSortingEnabled(True)
-        
-        # NOVÉ: Kontextové menu pro historii
         self.table_history.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_history.customContextMenuRequested.connect(self._on_history_context_menu)
-
         history_layout.addWidget(self.table_history)
-        
         btn_refresh_hist = QPushButton("Obnovit historii")
         btn_refresh_hist.clicked.connect(self._refresh_history_table)
         history_layout.addWidget(btn_refresh_hist)
-
         self.left_tabs.addTab(self.tab_history, "Historie")
         
         self._init_funny_answers_tab()
-        
         left_container_layout.addWidget(self.left_tabs)
-
 
         # PRAVÝ PANEL (Detail / Editor)
         self.detail_stack = QWidget()
@@ -2461,6 +2449,7 @@ class MainWindow(QMainWindow):
         self.detail_layout.setContentsMargins(6, 6, 6, 6)
         self.detail_layout.setSpacing(8)
 
+        # Toolbar
         self.editor_toolbar = QToolBar("Formát")
         self.editor_toolbar.setIconSize(QSize(18, 18))
         self.action_bold = QAction("Tučné", self); self.action_bold.setCheckable(True); self.action_bold.setShortcut(QKeySequence.Bold)
@@ -2468,7 +2457,6 @@ class MainWindow(QMainWindow):
         self.action_underline = QAction("Podtržení", self); self.action_underline.setCheckable(True); self.action_underline.setShortcut(QKeySequence.Underline)
         self.action_color = QAction("Barva", self)
         self.action_bullets = QAction("Odrážky", self); self.action_bullets.setCheckable(True)
-
         self.action_align_left = QAction("Vlevo", self)
         self.action_align_center = QAction("Na střed", self)
         self.action_align_right = QAction("Vpravo", self)
@@ -2476,7 +2464,6 @@ class MainWindow(QMainWindow):
         self.align_group = QActionGroup(self)
         for a in (self.action_align_left, self.action_align_center, self.action_align_right, self.action_align_justify):
             a.setCheckable(True); self.align_group.addAction(a)
-
         self.editor_toolbar.addAction(self.action_bold)
         self.editor_toolbar.addAction(self.action_italic)
         self.editor_toolbar.addAction(self.action_underline)
@@ -2490,35 +2477,31 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.addAction(self.action_align_right)
         self.editor_toolbar.addAction(self.action_align_justify)
 
+        # Horní formulář (Název, Typ, Body)
         self.form_layout = QFormLayout()
         self.form_layout.setLabelAlignment(Qt.AlignLeft)
-
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("Krátký název otázky…")
-
         self.combo_type = QComboBox(); self.combo_type.addItems(["Klasická", "BONUS"])
         self.spin_points = QSpinBox(); self.spin_points.setRange(-999, 999); self.spin_points.setValue(1)
         self.spin_bonus_correct = QDoubleSpinBox(); self.spin_bonus_correct.setDecimals(2); self.spin_bonus_correct.setSingleStep(0.01); self.spin_bonus_correct.setRange(-999.99, 999.99); self.spin_bonus_correct.setValue(1.00)
         self.spin_bonus_wrong = QDoubleSpinBox(); self.spin_bonus_wrong.setDecimals(2); self.spin_bonus_wrong.setSingleStep(0.01); self.spin_bonus_wrong.setRange(-999.99, 999.99); self.spin_bonus_wrong.setValue(0.00)
-
+        
         self.form_layout.addRow("Název otázky:", self.title_edit)
         self.form_layout.addRow("Typ otázky:", self.combo_type)
         self.form_layout.addRow("Body (klasická):", self.spin_points)
         self.form_layout.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
         self.form_layout.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
 
-        # --- NOVÉ: Správná odpověď ---
+        # Správná odpověď (přesunuto dolů, definice zůstává zde)
         self.edit_correct_answer = QTextEdit()
         self.edit_correct_answer.setPlaceholderText("Volitelný text správné odpovědi...")
         self.edit_correct_answer.setFixedHeight(60)
-        self.form_layout.addRow("Správná odpověď:", self.edit_correct_answer)
-
-        # --- NOVÉ: Vtipné odpovědi (Tabulka + Tlačítka) ---
+        
+        # Vtipné odpovědi (přesunuto dolů, definice zůstává zde)
         self.funny_container = QWidget()
         fc_layout = QVBoxLayout(self.funny_container)
         fc_layout.setContentsMargins(0,0,0,0)
-        
-        # NOVÉ: přidán 4. sloupec pro zdrojový dokument
         self.table_funny = QTableWidget(0, 4)
         self.table_funny.setHorizontalHeaderLabels(["Odpověď", "Datum", "Jméno", "Zdroj"])
         self.table_funny.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -2527,26 +2510,23 @@ class MainWindow(QMainWindow):
         self.table_funny.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table_funny.setFixedHeight(120)
         self.table_funny.setSelectionBehavior(QAbstractItemView.SelectRows)
-        
         btns_layout = QHBoxLayout()
         self.btn_add_funny = QPushButton("Přidat vtipnou odpoveď")
         self.btn_rem_funny = QPushButton("Odebrat")
         btns_layout.addWidget(self.btn_add_funny)
         btns_layout.addWidget(self.btn_rem_funny)
         btns_layout.addStretch()
-
         fc_layout.addLayout(btns_layout)
         fc_layout.addWidget(self.table_funny)
 
-        self.form_layout.addRow("Vtipné odpovědi:", self.funny_container)
-
+        # Obsah otázky (Text Edit)
         self.text_edit = QTextEdit()
         self.text_edit.setAcceptRichText(True)
         self.text_edit.setPlaceholderText("Sem napište znění otázky…\nPodporováno: tučné, kurzíva, podtržení, barva, odrážky, zarovnání.")
         self.text_edit.setMinimumHeight(200)
 
         self.btn_save_question = QPushButton("Uložit změny otázky"); self.btn_save_question.setDefault(True)
-
+        
         self.rename_panel = QWidget()
         rename_layout = QFormLayout(self.rename_panel)
         self.rename_line = QLineEdit()
@@ -2554,41 +2534,55 @@ class MainWindow(QMainWindow):
         rename_layout.addRow("Název:", self.rename_line)
         rename_layout.addRow(self.btn_rename)
 
+        # SKLÁDÁNÍ LAYOUTU (ZMĚNA POŘADÍ)
         self.detail_layout.addWidget(self.editor_toolbar)
         self.detail_layout.addLayout(self.form_layout)
-        self.detail_layout.addWidget(self.text_edit, 1)
+        
+        # 1. Obsah otázky (nyní dříve)
+        lbl_content = QLabel("<b>Obsah otázky:</b>")
+        self.detail_layout.addWidget(lbl_content)
+        self.detail_layout.addWidget(self.text_edit, 1) # Stretch 1
+        
+        # 2. Správná odpověď (nyní pod obsahem)
+        lbl_correct = QLabel("<b>Správná odpověď:</b>")
+        self.detail_layout.addWidget(lbl_correct)
+        self.detail_layout.addWidget(self.edit_correct_answer)
+        
+        # 3. Vtipné odpovědi (nyní pod správnou odpovědí)
+        lbl_funny = QLabel("<b>Vtipné odpovědi:</b>")
+        self.detail_layout.addWidget(lbl_funny)
+        self.detail_layout.addWidget(self.funny_container)
+        
+        # Tlačítko uložit
         self.detail_layout.addWidget(self.btn_save_question)
         self.detail_layout.addWidget(self.rename_panel)
-        self._set_editor_enabled(False)
 
+        self._set_editor_enabled(False)
         self.splitter.addWidget(left_panel_container)
         self.splitter.addWidget(self.detail_stack)
         self.splitter.setStretchFactor(1, 1)
         self.setCentralWidget(self.splitter)
 
+        # Toolbar aplikace
         tb = self.addToolBar("Hlavní")
         tb.setIconSize(QSize(18, 18))
         self.act_add_group = QAction("Přidat skupinu", self)
         self.act_add_subgroup = QAction("Přidat podskupinu", self)
         self.act_add_question = QAction("Přidat otázku", self)
         self.act_delete = QAction("Smazat", self)
-
         self.act_add_group.setShortcut("Ctrl+G")
         self.act_add_subgroup.setShortcut("Ctrl+Shift+G")
         self.act_add_question.setShortcut(QKeySequence.New)
         self.act_delete.setShortcut(QKeySequence.Delete)
-
         tb.addAction(self.act_add_group)
         tb.addAction(self.act_add_subgroup)
         tb.addAction(self.act_add_question)
-
-
         tb.addSeparator()
         tb.addAction(self.act_delete)
-
         self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
         
         self._refresh_history_table()
+
 
     def _refresh_history_table(self) -> None:
         """Načte historii exportů z history.json a naplní tabulku."""
