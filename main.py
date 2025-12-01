@@ -1030,8 +1030,11 @@ class ExportWizard(QWizard):
         dt = self.dt_edit.dateTime()
         date_str = dt.toString("yyyy-MM-dd")
         
+        # Použití Timestamp (sekundy od epochy) místo HH-MM
+        timestamp = str(int(dt.toSecsSinceEpoch()))
+        
         # Defaultní název
-        filename = f"{prefix}_{date_str}.docx"
+        filename = f"{prefix}_{date_str}_{timestamp}.docx"
         
         self.output_path = self.output_dir / filename
         
@@ -1040,8 +1043,8 @@ class ExportWizard(QWizard):
         self.le_output.setText(str(self.output_path))
         self.le_output.blockSignals(False)
         
-        # OPRAVA: Signál se musí emitovat ze stránky
         self.page1.completeChanged.emit()
+
 
     def _on_output_text_changed(self, text):
         self.output_changed_manually = True
