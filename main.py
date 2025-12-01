@@ -2789,7 +2789,6 @@ class MainWindow(QMainWindow):
 
         question_brush = QBrush(QColor("white"))
 
-        # Ikona otazníku
         pix = QPixmap(16, 16)
         pix.fill(Qt.transparent)
         painter = QPainter(pix)
@@ -2813,10 +2812,20 @@ class MainWindow(QMainWindow):
                     if not f_list:
                         continue
 
+                    # Spacer mezi skupinami (pokud už nějaká existuje)
+                    if self.tree_funny.topLevelItemCount() > 0:
+                        spacer = QTreeWidgetItem()
+                        spacer.setFlags(Qt.NoItemFlags)
+                        spacer.setSizeHint(0, QSize(0, 15)) # 15px mezera
+                        self.tree_funny.addTopLevelItem(spacer)
+
                     q_title = q.title or "(bez názvu)"
                     q_item = QTreeWidgetItem()
                     q_item.setText(0, q_title)
                     q_item.setIcon(0, question_icon)
+                    
+                    # Revert: Odstraněno zvětšení samotného itemu
+                    # q_item.setSizeHint(0, QSize(0, 36)) 
 
                     for col in range(4):
                         q_item.setForeground(col, question_brush)
@@ -2847,7 +2856,6 @@ class MainWindow(QMainWindow):
                         
                         child.setData(0, Qt.UserRole, text) 
 
-                    # Defaultně rozbaleno (změna z False na True)
                     q_item.setExpanded(True)
 
                 walk_subgroups(sg.subgroups)
@@ -2855,9 +2863,9 @@ class MainWindow(QMainWindow):
         for g in root.groups:
             walk_subgroups(g.subgroups)
             
-        # Fit sloupců podle obsahu
         for i in range(4):
             self.tree_funny.resizeColumnToContents(i)
+
 
     def register_export(self, filename: str, k_hash: str) -> None:
         """Zaznamená nový export a obnoví tabulku."""
