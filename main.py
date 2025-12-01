@@ -3804,14 +3804,41 @@ class MainWindow(QMainWindow):
             self._merge_format_on_selection(fmt); self._autosave_schedule()
 
     def _toggle_bullets(self) -> None:
+        """Přepne aktuální výběr na odrážky s lepším odsazením."""
         cursor = self.text_edit.textCursor()
-        block = cursor.block()
-        in_list = block.textList() is not None
-        if in_list:
-            lst = block.textList(); fmt = lst.format(); fmt.setStyle(QTextListFormat.ListStyleUndefined); cursor.createList(fmt)
+        cursor.beginEditBlock()
+        
+        # Zjistíme, zda už jsme v listu (podle prvního bloku ve výběru)
+        current_list = cursor.currentList()
+        
+        if current_list:
+            # Zrušit list (nastavit styl na Undefined, což ho odstraní)
+            block_fmt = QTextBlockFormat()
+            block_fmt.setObjectIndex(-1) # Zruší vazbu na list
+            cursor.setBlockFormat(block_fmt)
         else:
-            fmt = QTextListFormat(); fmt.setStyle(QTextListFormat.ListDisc); cursor.createList(fmt)
+            # Vytvořit nový list s lepším formátováním
+            list_fmt = QTextListFormat()
+            list_fmt.setStyle(QTextListFormat.ListDisc)
+            list_fmt.setIndent(1) # Level 1
+            
+            # Odsazení čísla/odrážky
+            # Ve Wordu/Docx to odpovídá Hanging Indent
+            
+            cursor.createList(list_fmt)
+            
+            # Aplikovat odsazení bloku pro vizuální shodu
+            bf = cursor.blockFormat()
+            # Nastavíme levý margin (celé odsuneme) a text indent (první řádek vrátíme zpět pro odrážku)
+            # Hodnoty jsou v px/pt (záleží na DPI, ale 20/-15 je rozumný start)
+            bf.setLeftMargin(20)
+            bf.setTextIndent(-15) 
+            cursor.setBlockFormat(bf)
+            
+        cursor.endEditBlock()
         self._autosave_schedule()
+        self.text_edit.setFocus()
+
 
     def _apply_alignment(self, align_flag: Qt.AlignmentFlag) -> None:
         cursor = self.text_edit.textCursor()
@@ -4576,12 +4603,11 @@ class MainWindow(QMainWindow):
                             run = new_p.add_run()
                             run.add_break()
 
-        # -- Helper: Zpracování jednoho odstavce (Inline i Block) --
         def process_paragraph(p):
             full_text = p.text
             if not full_text.strip(): return
 
-            # 1. BLOCK CHECK
+            # 1. BLOCK CHECK (Rich Only)
             txt_clean = full_text.strip()
             matched_rich = None
             for ph, html in rich_repl_html.items():
@@ -4595,6 +4621,7 @@ class MainWindow(QMainWindow):
 
             # 2. INLINE CHECK
             keys_found = []
+            # Najdeme klíče
             for k in simple_repl.keys():
                 if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
                     keys_found.append(k)
@@ -4605,47 +4632,38 @@ class MainWindow(QMainWindow):
             if not keys_found:
                 return
 
-            # --- OPRAVA: ZACHOVÁNÍ FORMÁTU A SYMBOLŮ ---
-            # Pokud odstavec obsahuje klíč, musíme ho přepsat.
-            # Abychom zachovali symboly (např. šipky) ve fontech jako Wingdings,
-            # musíme pracovat s původními runy, pokud to jde.
-            # Ale protože nahrazujeme text uvnitř runu, je to složité.
-            # Strategie: Zkusíme najít run, který obsahuje placeholder, a nahradit text JEN v něm.
-            
-            # Zjednodušená implementace pro Simple Replacements (MinBody, MaxBody)
-            # která se snaží nemazat celý odstavec, pokud to není nutné.
-            
-            # Pokud máme jen simple replacements a žádné rich replacements v odstavci:
-            has_rich = any(k in rich_repl_html for k in keys_found)
-            
-            if not has_rich:
-                # Projdeme runy a zkusíme nahradit text in-place
-                replacements_made = False
+            # Zjistíme, zda máme nějaký RICH klíč v tomto odstavci
+            has_rich_key = any(k in rich_repl_html for k in keys_found)
+
+            # POKUD MÁME JEN SIMPLE KLÍČE -> ZKUSÍME IN-PLACE REPLACE
+            # To zachová kotvy, obrázky, symboly a formátování ostatního textu
+            if not has_rich_key:
+                replacements_done = 0
+                # Iterujeme přes runy a nahrazujeme text uvnitř nich
                 for run in p.runs:
-                    original_text = run.text
-                    new_text = original_text
+                    t = run.text
+                    original_t = t
                     
                     for k in keys_found:
                         if k in simple_repl:
-                            val = simple_repl[k]
-                            # Replace both <Key> and {Key}
-                            new_text = new_text.replace(f"<{k}>", val).replace(f"{{{k}}}", val)
+                            val = str(simple_repl[k])
+                            # Nahrazení <Klic> a {Klic}
+                            t = t.replace(f"<{k}>", val).replace(f"{{{k}}}", val)
                     
-                    if new_text != original_text:
-                        run.text = new_text
-                        replacements_made = True
+                    if t != original_t:
+                        run.text = t
+                        replacements_done += 1
                 
-                # Pokud se podařilo nahradit vše (kontrolujeme, zda v textu nezbyl placeholder)
-                # Někdy je placeholder rozdělen do více runů (např. "<" v jednom, "Klic" ve druhém).
-                # Pak simple replace selže.
+                # Kontrola: Zbyly v odstavci nějaké nenahrazené klíče?
+                # (Stane se, když je placeholder rozdělen mezi dva runy: Run1="<", Run2="Key>")
                 final_text = p.text
                 still_has_keys = any((f"<{k}>" in final_text or f"{{{k}}}" in final_text) for k in keys_found)
                 
-                if replacements_made and not still_has_keys:
-                    return # Hotovo, zachovali jsme formátování i symboly v jiných runech
-            
-            # Pokud in-place replace nezafungoval (rozbité runy) nebo máme rich text,
-            # musíme provést rekonstrukci (stará metoda), ale vylepšenou o kopírování stylu runů.
+                if replacements_done > 0 and not still_has_keys:
+                    return # Úspěšně nahrazeno in-place, končíme (zachová formát i symboly)
+
+            # Pokud in-place selhalo (nebo máme Rich content), musíme rekonstruovat
+            # POZOR: Zde se ztratí ukotvené objekty (šipky, obrázky) pokud byly v tomto odstavci!
             
             segments = [full_text]
             all_repl_data = {}
@@ -4668,7 +4686,7 @@ class MainWindow(QMainWindow):
                             new_segments.append(seg)
                     segments = new_segments
 
-            # Uchováme styl PŮVODNÍHO prvního runu jako fallback
+            # Base styles fallback
             base_props = {}
             if p.runs:
                 r0 = p.runs[0]
@@ -4689,7 +4707,6 @@ class MainWindow(QMainWindow):
                     # Aplikace base stylu
                     if base_props.get('name'): run.font.name = base_props['name']
                     if base_props.get('size'): run.font.size = base_props['size']
-                    # Zachovat i další styly pro okolní text
                     run.bold = base_props.get('bold')
                     run.italic = base_props.get('italic')
                     
@@ -4697,7 +4714,7 @@ class MainWindow(QMainWindow):
                     val = seg['val']
                     if seg['type'] == 'simple':
                         run = p.add_run(val)
-                        # Simple replacement dědí styl
+                        # Inherit styles for simple replacement
                         if base_props.get('name'): run.font.name = base_props['name']
                         if base_props.get('size'): run.font.size = base_props['size']
                         run.bold = base_props.get('bold')
@@ -4717,7 +4734,6 @@ class MainWindow(QMainWindow):
                                 for idx_part, part in enumerate(parts):
                                     if part:
                                         run = p.add_run(part)
-                                        # Styl z HTML
                                         if r_data.get('b'): run.bold = True
                                         if r_data.get('i'): run.italic = True
                                         if r_data.get('u'): run.underline = True
@@ -4727,7 +4743,7 @@ class MainWindow(QMainWindow):
                                                 run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
                                             except: pass
                                         
-                                        # Fallback styl (pokud HTML neurčuje)
+                                        # Fallback
                                         if not r_data.get('b') and base_props.get('name'): run.font.name = base_props['name']
                                         if not r_data.get('b') and base_props.get('size'): run.font.size = base_props['size']
                                     
@@ -4766,6 +4782,7 @@ class MainWindow(QMainWindow):
             doc.save(output_path)
         except Exception as e:
             QMessageBox.critical(self, "Chyba uložení", f"Nelze uložit DOCX:\n{e}")
+
 
     # -------------------- Pomocné --------------------
 
