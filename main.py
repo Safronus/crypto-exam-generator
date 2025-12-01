@@ -37,7 +37,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from html.parser import HTMLParser
 
-from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime
+from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime, QPoint
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.6.8"
+APP_VERSION = "6.7.2"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2265,8 +2265,6 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_signals()
         
-        # Nové: Kontextové menu pro strom
-        self.tree.customContextMenuRequested.connect(self._on_context_menu)
         
         self._build_menus()
         self.load_data()
@@ -2276,21 +2274,6 @@ class MainWindow(QMainWindow):
         # ZMĚNA: Strom 60%, Editor 40% (cca 840px : 560px)
         # Nyní, když je self.splitter správně nastaven v _build_ui, můžeme přímo nastavit velikosti.
         self.splitter.setSizes([940, 860])
-
-    def _on_context_menu(self, pos) -> None:
-        item = self.tree.itemAt(pos)
-        if not item:
-            return
-            
-        meta = item.data(0, Qt.UserRole) or {}
-        kind = meta.get("kind")
-        
-        if kind == "question":
-            menu = QMenu(self)
-            action_dup = QAction("Duplikovat otázku", self)
-            action_dup.triggered.connect(self._duplicate_question)
-            menu.addAction(action_dup)
-            menu.exec(self.tree.mapToGlobal(pos))
 
     def _duplicate_question(self) -> None:
         kind, meta = self._selected_node()
@@ -2350,6 +2333,9 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.btn_delete_selected)
         questions_layout.addWidget(filter_bar)
         self.tree = DnDTree(self)
+        # NOVÉ: Kontextové menu
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         questions_layout.addWidget(self.tree, 1)
         self.left_tabs.addTab(self.tab_questions, "Otázky")
 
@@ -2519,6 +2505,53 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
         
         self._refresh_history_table()
+        
+    def _on_tree_context_menu(self, pos: QPoint) -> None:
+        """Kontextové menu stromu otázek (v6.7.2)."""
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+            
+        self.tree.setCurrentItem(item)
+
+        # Robustní získání metadat (podpora tuple i dict)
+        raw_data = item.data(0, Qt.UserRole)
+        kind = "unknown"
+        
+        if isinstance(raw_data, tuple) and len(raw_data) >= 1:
+            kind = raw_data[0]
+        elif isinstance(raw_data, dict):
+            kind = raw_data.get("kind", "unknown")
+
+        menu = QMenu(self.tree)
+        has_action = False
+
+        # 1. Přidat podskupinu (Group/Subgroup)
+        if kind in ("group", "subgroup"):
+            act = menu.addAction("Přidat podskupinu")
+            act.triggered.connect(self._add_subgroup)
+            has_action = True
+
+        # 2. Přidat otázku (Subgroup)
+        if kind == "subgroup":
+            act = menu.addAction("Přidat otázku")
+            act.triggered.connect(self._add_question)
+            has_action = True
+            
+        # 3. Duplikovat otázku (Question)
+        if kind == "question":
+            act = menu.addAction("Duplikovat otázku")
+            act.triggered.connect(self._duplicate_question)
+            has_action = True
+
+        if has_action:
+            menu.addSeparator()
+
+        # 4. Smazat (Vše) -> Použijeme existující metodu _delete_selected
+        act_del = menu.addAction("Smazat")
+        act_del.triggered.connect(self._delete_selected)
+
+        menu.exec(self.tree.mapToGlobal(pos))
 
     def _change_indent(self, steps: int) -> None:
         """Změní odsazení aktuálního bloku nebo listu."""
