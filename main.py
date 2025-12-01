@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import secrets
 
+import subprocess
+
 import json
 import sys
 import uuid as _uuid
@@ -82,14 +84,14 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QTableWidget,
     QTableWidgetItem,
-    QHeaderView,
+    QHeaderView, QCheckBox,
     QTreeWidgetItemIterator, QButtonGroup,
     QHeaderView, QMenu, QTabWidget, QRadioButton,
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.4.1"
+APP_VERSION = "6.4.7"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -934,14 +936,13 @@ class ExportWizard(QWizard):
         self._init_page2() # Obnoví UI
         self.owner.statusBar().showMessage("Všechna přiřazení byla zrušena.", 3000)
 
-
     def _build_page3_content(self):
         self.page3.setTitle("Krok 3: Kontrola a Export")
         self.page3.initializePage = self._init_page3
         
         main_layout = QVBoxLayout(self.page3)
         
-        # Info Panel (PŮVODNÍ KÓD OBNOVEN)
+        # Info Panel
         self.info_box_p3 = QGroupBox("Kontext exportu")
         self.info_box_p3.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #555; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
         l_info = QFormLayout(self.info_box_p3)
@@ -950,6 +951,18 @@ class ExportWizard(QWizard):
         l_info.addRow("Vstupní šablona:", self.lbl_templ_p3)
         l_info.addRow("Výstupní soubor:", self.lbl_out_p3)
         main_layout.addWidget(self.info_box_p3)
+        
+        # NOVÉ: Exportní volby
+        self.options_box = QGroupBox("Exportní volby")
+        self.options_box.setStyleSheet("font-weight: bold; margin-top: 6px;")
+        l_opts = QVBoxLayout(self.options_box)
+        
+        self.chk_export_pdf = QCheckBox("Exportovat do PDF pro tisk (složka /data/Tisk/)")
+        self.chk_export_pdf.setChecked(True)
+        self.chk_export_pdf.setToolTip("DOCX se automaticky převede na PDF. V hromadném režimu budou všechny varianty spojeny do jednoho PDF.")
+        l_opts.addWidget(self.chk_export_pdf)
+        
+        main_layout.addWidget(self.options_box)
         
         # Náhled
         lbl_prev = QLabel("<b>Náhled obsahu testu:</b>")
@@ -961,12 +974,14 @@ class ExportWizard(QWizard):
         self.preview_edit.setStyleSheet("QTextEdit { background-color: #252526; color: #e0e0e0; border: 1px solid #3e3e42; }")
         main_layout.addWidget(self.preview_edit)
 
-        # NOVÉ: Label pro kontrolní hash (PŘIDÁNO NA KONEC)
+        # Hash label (OPRAVA FONTU)
         self.lbl_hash_preview = QLabel("Hash: -")
         self.lbl_hash_preview.setWordWrap(True)
-        self.lbl_hash_preview.setStyleSheet("color: #555; font-family: Monospace; font-size: 10px; margin-top: 5px;")
+        # Změna z "Monospace" na "Consolas, Monaco, monospace"
+        self.lbl_hash_preview.setStyleSheet("color: #555; font-family: Consolas, Monaco, monospace; font-size: 10px; margin-top: 5px;")
         self.lbl_hash_preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
         main_layout.addWidget(self.lbl_hash_preview)
+
     # --- Helpers & Logic ---
 
     def _update_default_output(self):
@@ -1806,12 +1821,11 @@ class ExportWizard(QWizard):
             traceback.print_exc()
             self.preview_edit.setText(f"Chyba při generování náhledu: {e}")
 
-
     def accept(self) -> None:
         if not self.template_path or not self.output_path:
             return
 
-        # Kontrolní Hash - jeden společný pro všechny
+        # Kontrolní Hash
         k_hash = getattr(self, "_cached_hash", "")
         if not k_hash:
             ts = str(datetime.now().timestamp())
@@ -1821,63 +1835,56 @@ class ExportWizard(QWizard):
 
         is_multi = (self.mode_group.checkedId() == 1)
         count = self.spin_multi_count.value() if is_multi else 1
+        do_pdf_export = self.chk_export_pdf.isChecked()
         
-        # Příprava poolu otázek pro náhodný výběr
+        # Příprava poolu otázek
         question_pool = []
         if is_multi:
             data = self.combo_multi_source.currentData()
             if data:
-                # Helper pro rekurzivní zisk otázek
                 def collect_questions(group_id, is_subgroup):
                     qs = []
-                    # Najít skupinu/podskupinu v root
                     nodes_to_visit = list(self.owner.root.groups)
                     target_node = None
-                    
-                    # BFS/DFS pro nalezení uzlu
                     while nodes_to_visit:
                         curr = nodes_to_visit.pop(0)
-                        
                         if curr.id == group_id:
                             target_node = curr
                             break
-                        
                         if hasattr(curr, "subgroups") and curr.subgroups:
                             nodes_to_visit.extend(curr.subgroups)
-                    
                     if target_node:
-                        # Rekurzivně sebrat otázky z tohoto uzlu a poduzlů
                         def extract_q(node):
                             valid_qs = []
                             if hasattr(node, "questions"):
                                 valid_qs.extend([q.id for q in node.questions if q.type == 'classic'])
-                            
                             if hasattr(node, "subgroups") and node.subgroups:
                                 for sub in node.subgroups:
                                     valid_qs.extend(extract_q(sub))
                             return valid_qs
-                        
                         qs = extract_q(target_node)
                     return qs
-
                 is_sub = (data["type"] == "subgroup")
                 question_pool = collect_questions(data["id"], is_sub)
         
         base_output_path = self.output_path
         success_count = 0
+        generated_docx_files = []
+        generated_pdf_files = []
 
-        # Loop generování
+        # Příprava složky pro tisk
+        print_folder = self.owner.project_root / "data" / "Tisk"
+        if do_pdf_export:
+            print_folder.mkdir(parents=True, exist_ok=True)
+
+        # Loop generování DOCX
         for i in range(count):
             current_selection = self.selection_map.copy()
             
-            # Náhodný výběr pro Otázka1-10
             if is_multi and question_pool:
                 import random
-                # Najít placeholdery
                 targets = [ph for ph in self.placeholders_q if re.match(r"^Otázka([1-9]|10)$", ph)]
-                # Zamíchat pool a vzít potřebný počet
                 needed = len(targets)
-                
                 if len(question_pool) >= needed:
                     picked = random.sample(question_pool, needed)
                     for idx, ph in enumerate(targets):
@@ -1887,30 +1894,23 @@ class ExportWizard(QWizard):
                         for ph in targets:
                             current_selection[ph] = random.choice(question_pool)
             
-            # Generování pro tuto iteraci
             repl_plain: Dict[str, str] = {}
-            
-            # Datum
             dt = round_dt_to_10m(self.dt_edit.dateTime())
             dt_str = f"{cz_day_of_week(dt.toPython())} {dt.toString('dd.MM.yyyy HH:mm')}"
             repl_plain["DatumČas"] = dt_str
             repl_plain["DatumCas"] = dt_str
             repl_plain["DATUMCAS"] = dt_str
             
-            # Verze
             prefix = self.le_prefix.text().strip()
             today = datetime.now().strftime("%Y-%m-%d")
             verze_str = f"{prefix} {today}"
             repl_plain["PoznamkaVerze"] = verze_str
             repl_plain["POZNAMKAVERZE"] = verze_str
-            
             repl_plain["KontrolniHash"] = k_hash
             repl_plain["KONTROLNIHASH"] = k_hash
             
-            # Body
             total_bonus = 0.0
             min_loss = 0.0
-            
             for qid in current_selection.values():
                 q = self.owner._find_question_by_id(qid)
                 if not q: continue
@@ -1924,14 +1924,12 @@ class ExportWizard(QWizard):
             repl_plain["MinBody"] = f"{min_loss:.2f}"
             repl_plain["MINBODY"] = f"{min_loss:.2f}"
 
-            # Rich text map
             rich_map: Dict[str, str] = {}
             for ph, qid in current_selection.items():
                 q = self.owner._find_question_by_id(qid)
                 if q:
                     rich_map[ph] = q.text_html
 
-            # Název souboru
             if is_multi:
                 p = Path(base_output_path)
                 new_name = f"{p.stem}_v{i+1}{p.suffix}"
@@ -1942,18 +1940,67 @@ class ExportWizard(QWizard):
             try:
                 self.owner._generate_docx_from_template(self.template_path, target_path, repl_plain, rich_map)
                 success_count += 1
+                generated_docx_files.append(target_path)
             except Exception as e:
                 QMessageBox.critical(self, "Export", f"Chyba při exportu verze {i+1}:\n{e}")
                 if not is_multi: return
 
-        # Zápis do historie (jen jednou jako balík, nebo single)
+        # Historie
         if is_multi:
             record_name = f"Balík {count} verzí: {base_output_path.name}"
             self.owner.register_export(record_name, k_hash)
-            QMessageBox.information(self, "Export", f"Hromadný export dokončen.\nVygenerováno {success_count} souborů.")
         else:
             self.owner.register_export(base_output_path.name, k_hash)
-            QMessageBox.information(self, "Export", f"Export dokončen.\nSoubor uložen:\n{base_output_path}")
+
+        # PDF Export
+        pdf_success_msg = ""
+        if do_pdf_export and generated_docx_files:
+            try:
+                # 1. Konverze všech DOCX na PDF
+                for docx_file in generated_docx_files:
+                    pdf_file = self.owner._convert_docx_to_pdf(docx_file)
+                    if pdf_file and pdf_file.exists():
+                        generated_pdf_files.append(pdf_file)
+                
+                # 2. Slučování / Přesun
+                if generated_pdf_files:
+                    if is_multi and len(generated_pdf_files) > 1:
+                        # HROMADNÝ REŽIM: Slučit do jednoho
+                        merged_name = f"{base_output_path.stem}_merged.pdf"
+                        final_pdf = print_folder / merged_name
+                        
+                        if self.owner._merge_pdfs(generated_pdf_files, final_pdf, cleanup=True):
+                            pdf_success_msg = f"\n\nPDF pro tisk (sloučené) uloženo do:\n{final_pdf}"
+                        else:
+                            # Merge selhalo - přesuneme jednotlivé do Tisk
+                            pdf_success_msg = f"\n\nPOZOR: Slučování selhalo. Jednotlivá PDF jsou v:\n{print_folder}"
+                            import shutil
+                            for tmp_pdf in generated_pdf_files:
+                                if tmp_pdf.exists():
+                                    try:
+                                        dest = print_folder / tmp_pdf.name
+                                        shutil.move(str(tmp_pdf), str(dest))
+                                    except:
+                                        pass
+                    else:
+                        # JEDNOTLIVÝ REŽIM: Přesunout jediné PDF
+                        import shutil
+                        final_pdf = print_folder / generated_pdf_files[0].name
+                        shutil.move(str(generated_pdf_files[0]), str(final_pdf))
+                        pdf_success_msg = f"\n\nPDF pro tisk uloženo do:\n{final_pdf}"
+                            
+            except Exception as e:
+                QMessageBox.warning(self, "PDF Export", f"Kritická chyba při exportu PDF:\n{e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Výsledná zpráva
+        if is_multi:
+            msg = f"Hromadný export dokončen.\nVygenerováno {success_count} souborů DOCX.{pdf_success_msg}"
+            QMessageBox.information(self, "Export", msg)
+        else:
+            msg = f"Export dokončen.\nSoubor uložen:\n{base_output_path}{pdf_success_msg}"
+            QMessageBox.information(self, "Export", msg)
             
         super().accept()
 
@@ -4129,6 +4176,175 @@ class MainWindow(QMainWindow):
         # NOVÉ (SPRÁVNĚ):
         wiz = ExportWizard(self)
         wiz.exec()
+
+    def _convert_docx_to_pdf(self, docx_path: Path) -> Optional[Path]:
+        """
+        Konvertuje DOCX na PDF pomocí LibreOffice (hledá spustitelný soubor i v /Applications).
+        Vrací cestu k PDF souboru nebo None pokud selhalo.
+        """
+        import shutil
+        
+        # 1. Hledání spustitelného souboru LibreOffice
+        lo_candidates = [
+            "libreoffice",                                            # Standard Linux/PATH
+            "soffice",                                                # Generic bin
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",   # macOS standard path
+            "/usr/bin/libreoffice",
+            "/usr/local/bin/libreoffice",
+            r"C:\Program Files\LibreOffice\program\soffice.exe",      # Windows x64
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe" # Windows x86
+        ]
+        
+        lo_executable = None
+        for cand in lo_candidates:
+            # shutil.which hledá v PATH, Path(cand).exists() hledá konkrétní soubor
+            if shutil.which(cand) or Path(cand).exists():
+                lo_executable = cand
+                break
+        
+        if not lo_executable:
+             QMessageBox.warning(
+                self, 
+                "LibreOffice nenalezen",
+                "Nemohu najít nainstalovaný LibreOffice.\n"
+                "Pokud jej máte nainstalovaný, ujistěte se, že je ve standardní složce "
+                "(/Applications/LibreOffice.app na macOS)."
+            )
+             return None
+
+        # 2. Samotná konverze
+        try:
+            pdf_path = docx_path.with_suffix('.pdf')
+            
+            cmd = [
+                lo_executable,
+                '--headless',
+                '--convert-to', 'pdf',
+                '--outdir', str(pdf_path.parent),
+                str(docx_path)
+            ]
+            
+            # Spuštění procesu
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode != 0:
+                print(f"LibreOffice chyba (Code {result.returncode}):\nSTDERR: {result.stderr}\nSTDOUT: {result.stdout}")
+            
+            # Ověření, že PDF byl vytvořen
+            if pdf_path.exists():
+                return pdf_path
+            else:
+                # Někdy se stane, že returncode je 0, ale soubor nikde (např. sandbox issues)
+                return None
+                
+        except subprocess.TimeoutExpired:
+            QMessageBox.warning(self, "Chyba konverze", "Konverze trvala příliš dlouho (timeout).")
+            return None
+        except Exception as e:
+            QMessageBox.warning(self, "Chyba konverze", f"Neočekávaná chyba při konverzi PDF:\n{e}")
+            return None
+
+    def _merge_pdfs(self, pdf_paths: List[Path], output_path: Path, cleanup: bool = True) -> bool:
+        """
+        Spojí více PDF souborů do jednoho.
+        Zkouší: PyPDF2 -> macOS join.py -> Ghostscript.
+        Pokud vše selže, vyhodí chybovou hlášku s instrukcemi.
+        """
+        success = False
+        missing_tools = []
+        
+        # 1. Zkusíme PyPDF2 (Preferované)
+        try:
+            from PyPDF2 import PdfMerger
+            merger = PdfMerger()
+            for pdf_path in pdf_paths:
+                if pdf_path.exists():
+                    merger.append(str(pdf_path))
+            merger.write(str(output_path))
+            merger.close()
+            success = True
+        except ImportError:
+            missing_tools.append("PyPDF2 (pip install PyPDF2)")
+            # Pokračujeme na fallback
+        except Exception as e:
+            print(f"Chyba PyPDF2: {e}")
+            # Pokračujeme na fallback
+
+        if not success:
+            # 2. Fallback: macOS Native Script nebo Ghostscript
+            success = self._merge_pdfs_subprocess(pdf_paths, output_path)
+            if not success:
+                missing_tools.append("Ghostscript (brew install ghostscript)")
+
+        # Pokud selhalo úplně
+        if not success:
+            msg = (
+                "Nepodařilo se sloučit PDF soubory.\n"
+                "Chybí potřebné nástroje.\n\n"
+                "Řešení (vyberte jedno):\n"
+                "1. Nainstalujte python knihovnu:  pip install PyPDF2\n"
+                "2. Nainstalujte Ghostscript:      brew install ghostscript\n\n"
+                "Jednotlivé PDF soubory byly ponechány ve složce."
+            )
+            QMessageBox.warning(self, "Chyba slučování PDF", msg)
+            # Vracíme False a NEPROVÁDÍME cleanup, aby uživateli zůstaly aspoň jednotlivé soubory
+            return False
+
+        # Vyčištění (pouze při úspěchu)
+        if success and cleanup:
+            for pdf_path in pdf_paths:
+                try:
+                    pdf_path.unlink()
+                except Exception as e:
+                    print(f"Nemohu smazat dočasný PDF {pdf_path}: {e}")
+        
+        return True
+
+
+    def _merge_pdfs_subprocess(self, pdf_paths: List[Path], output_path: Path) -> bool:
+        """Fallback: slučování PDF pomocí externích nástrojů (macOS join.py nebo GS)."""
+        import sys
+        
+        # A. macOS Built-in Script (Automator)
+        # Tento skript je standardně přítomen na macOS
+        macos_join_script = "/System/Library/Automator/Combine PDF Pages.action/Contents/Resources/join.py"
+        if sys.platform == "darwin" and Path(macos_join_script).exists():
+            try:
+                cmd = [
+                    "python3",  # Použijeme systémový python nebo ten co běží
+                    macos_join_script,
+                    "-o", str(output_path)
+                ]
+                cmd.extend([str(p) for p in pdf_paths if p.exists()])
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if result.returncode == 0:
+                    return True
+                else:
+                    print(f"macOS join.py failed: {result.stderr}")
+            except Exception as e:
+                print(f"macOS join.py exception: {e}")
+
+        # B. Ghostscript
+        try:
+            cmd = ['gs', '-q', '-dNOPAUSE', '-dBATCH', '-dSAFER', '-sDEVICE=pdfwrite', f'-sOutputFile={output_path}']
+            cmd.extend([str(p) for p in pdf_paths if p.exists()])
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            return result.returncode == 0
+            
+        except FileNotFoundError:
+            # GS není nainstalován
+            print("Ghostscript (gs) nebyl nalezen.")
+            return False
+        except Exception as e:
+            print(f"Ghostscript error: {e}")
+            return False
 
 
     def _generate_docx_from_template(self, template_path: Path, output_path: Path,
