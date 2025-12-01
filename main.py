@@ -332,233 +332,169 @@ def round_dt_to_10m(dt: QDateTime) -> QDateTime:
 class HTMLToDocxParser(HTMLParser):
     """
     Převádí HTML na seznam odstavců pro DOCX.
-    Podporuje vnořené styly a ignoruje balast.
+    Podporuje vnořené styly, seznamy a odsazení (indentation).
     """
     def __init__(self) -> None:
         super().__init__()
         self.paragraphs: List[dict] = []
-        
-        # Zásobník otevřených elementů a jejich stylů
-        # Každá položka: {'tag': str, 'attrs': dict, 'styles': dict}
         self._stack: List[dict] = [] 
-        
-        self._list_stack: List[dict] = [] # Pro seznamy
+        self._list_stack: List[dict] = [] 
         self._current_runs: List[dict] = []
         self._current_align: str = "left"
-        
-        # Globální stav ignorování
+        self._current_indent: int = 0
         self._in_body = False
         self._has_body_tag = False
         self._ignore_content = False
 
-    # -- STAVOVÉ METODY PRO PARAGRAFY --
-
-    def _start_paragraph(self, prefix: str = "") -> None:
+    def _start_paragraph(self, prefix: str = "", indent: int = 0) -> None:
         if self._current_runs:
             self._end_paragraph()
-        
         self._current_runs = []
         self._current_align = "left"
-        
-        # Hledáme zarovnání v aktuálním kontextu (poslední blokový element na zásobníku)
-        # Procházíme od konce zásobníku, první p/div/li určí zarovnání
+        self._current_indent = indent
         for item in reversed(self._stack):
             if item['tag'] in ('p', 'div', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
                 if item['styles'].get('align'):
                     self._current_align = item['styles']['align']
-                break # Našli jsme blok, končíme hledání (zarovnání se nedědí z nadřazeného bloku v docx tak snadno)
-                
+                break
         self._current_prefix = prefix
 
-
     def _end_paragraph(self) -> None:
-        # Sloučíme runy a uložíme
-        if not self._current_runs and not hasattr(self, '_current_prefix'):
-            return
-
+        if not self._current_runs and not hasattr(self, '_current_prefix'): return
         merged = []
         for r in self._current_runs:
             if r['text'] == "": continue
-            # Merge
             if merged and all(merged[-1][k] == r[k] for k in ('b','i','u','color')):
                 merged[-1]['text'] += r['text']
             else:
                 merged.append(r)
-        
         prefix = getattr(self, '_current_prefix', '')
-        
-        # Uložíme (i prázdný, pokud má prefix - např. prázdná odrážka)
         if merged or prefix:
             self.paragraphs.append({
                 'align': self._current_align,
                 'runs': merged,
-                'prefix': prefix
+                'prefix': prefix,
+                'indent': self._current_indent
             })
-        
         self._current_runs = []
         if hasattr(self, '_current_prefix'): del self._current_prefix
 
     def _append_text(self, text: str):
-        # Zjistíme aktuální styl ze zásobníku
         b = any(item['styles'].get('b') for item in self._stack)
         i = any(item['styles'].get('i') for item in self._stack)
         u = any(item['styles'].get('u') for item in self._stack)
-        
-        # Barva: poslední platná na zásobníku
         color = None
         for item in reversed(self._stack):
             if item['styles'].get('color'):
                 color = item['styles']['color']
                 break
-        
-        self._current_runs.append({
-            'text': text,
-            'b': b, 'i': i, 'u': u, 'color': color
-        })
-
-    # -- PARSOVACÍ LOGIKA --
+        self._current_runs.append({'text': text, 'b': b, 'i': i, 'u': u, 'color': color})
 
     def feed(self, data: str) -> None:
         if "<body" in data.lower():
-            self._has_body_tag = True
-            self._in_body = False
+            self._has_body_tag = True; self._in_body = False
         else:
-            self._has_body_tag = False
-            self._in_body = True
+            self._has_body_tag = False; self._in_body = True
         super().feed(data)
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
         attrs_d = dict(attrs)
-        
-        if tag == 'body':
-            self._in_body = True
-            return
-        if tag in ('head', 'style', 'script', 'meta', 'title', 'html', '!doctype'):
-            self._ignore_content = True
-            return
-        if not self._in_body or self._ignore_content:
-            return
+        if tag == 'body': self._in_body = True; return
+        if tag in ('head', 'style', 'script', 'meta', 'title', 'html', '!doctype'): self._ignore_content = True; return
+        if not self._in_body or self._ignore_content: return
 
-        # -- ANALÝZA STYLŮ (CSS) --
-        styles = {}
-        
-        # 1. Z atributu style="..."
-        if 'style' in attrs_d:
-            s = attrs_d['style'].lower()
-            
-            # Color
-            m = re.search(r'color\s*:\s*#?([0-9a-f]{6})', s)
-            if m: styles['color'] = m.group(1)
-            else:
-                m2 = re.search(r'color\s*:\s*rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', s)
-                if m2:
-                    r,g,b = [max(0, min(255, int(x))) for x in m2.groups()]
-                    styles['color'] = f"{r:02X}{g:02X}{b:02X}"
-            
-            # Align
-            m_align = re.search(r'text-align\s*:\s*(left|center|right|justify)', s)
-            if m_align: styles['align'] = m_align.group(1)
-            
-            # Bold (font-weight)
-            # Qt používá font-weight:600, 700, 800... nebo bold
-            if 'font-weight' in s:
-                if 'bold' in s:
-                    styles['b'] = True
-                else:
-                    m_fw = re.search(r'font-weight\s*:\s*(\d+)', s)
-                    if m_fw and int(m_fw.group(1)) >= 600:
-                        styles['b'] = True
-            
-            # Italic (font-style)
-            if 'font-style' in s and 'italic' in s:
-                styles['i'] = True
-            
-            # Underline (text-decoration)
-            if 'text-decoration' in s and 'underline' in s:
-                styles['u'] = True
-        
-        # 2. Z atributů tagu (staré HTML)
+        styles = self._parse_style(attrs_d.get('style', ''))
         if attrs_d.get('align'): styles['align'] = attrs_d['align'].lower()
         if tag in ('b', 'strong'): styles['b'] = True
         if tag in ('i', 'em'): styles['i'] = True
         if tag == 'u': styles['u'] = True
         
-        # Přidáme na zásobník
-        self._stack.append({'tag': tag, 'attrs': attrs_d, 'styles': styles})
+        # Explicitní margin - ZVÝŠENÁ CITLIVOST (20px = 1 level)
+        margin_left = styles.get('margin-left', '0px')
+        explicit_indent_val = 0
+        if 'px' in margin_left:
+            try:
+                px = float(margin_left.replace('px', '').strip())
+                explicit_indent_val = int(px / 20) # Changed from 30 to 20
+            except: pass
 
-        # -- ZPRACOVÁNÍ TAGŮ --
-        
+        parent_style = self._stack[-1]['styles'] if self._stack else {}
+        merged_styles = parent_style.copy()
+        merged_styles.update(styles)
+        self._stack.append({'tag': tag, 'attrs': attrs_d, 'styles': merged_styles})
+
+        list_nesting = len(self._list_stack)
+        base_indent = max(0, list_nesting - 1) if tag == 'li' else max(0, list_nesting)
+        final_indent = base_indent + explicit_indent_val
+
         if tag in ('p', 'div'):
-            self._start_paragraph()
-        
+            self._start_paragraph(indent=final_indent)
         elif tag == 'br':
             self._append_text("\n")
-            
         elif tag in ('ul', 'ol'):
             t = attrs_d.get('type', '1')
             self._list_stack.append({'tag': tag, 'type': t, 'count': 0})
-            
         elif tag == 'li':
             prefix = self._get_list_prefix()
-            self._start_paragraph(prefix=prefix)
-
+            self._start_paragraph(prefix=prefix, indent=final_indent)
 
     def handle_endtag(self, tag):
         tag = tag.lower()
-        
-        if tag == 'body':
-            self._in_body = False; return
-        if tag in ('head', 'style', 'script', 'meta', 'title', 'html'):
-            self._ignore_content = False; return
-        if not self._in_body or self._ignore_content:
-            return
-
-        # Strukturální ukončení
-        if tag in ('p', 'div', 'li'):
-            self._end_paragraph()
-        
+        if tag == 'body': self._in_body = False; return
+        if tag in ('head', 'style', 'script', 'meta', 'title', 'html'): self._ignore_content = False; return
+        if not self._in_body or self._ignore_content: return
+        if tag in ('p', 'div', 'li'): self._end_paragraph()
         if tag in ('ul', 'ol'):
             if self._list_stack: self._list_stack.pop()
-
-        # Odstranění ze zásobníku (hledáme od konce odpovídající tag)
-        # Protože HTML může být validně neuzavřené (např. <p>...<p>), 
-        # musíme být opatrní. Ale v QT rich textu je to obvykle well-formed.
         for i in range(len(self._stack) - 1, -1, -1):
             if self._stack[i]['tag'] == tag:
-                # Odebereme tento a všechny nad ním (pokud byly neuzavřené)
                 del self._stack[i:]
                 break
 
     def handle_data(self, data):
         if not self._in_body or self._ignore_content: return
         if not data: return
-        
-        # Normalizace pevných mezer, pokud je třeba (volitelné)
-        # data = data.replace('\xa0', ' ') 
-        
         in_block = False
+        current_indent = 0
+        list_nesting = len(self._list_stack)
+        current_indent = max(0, list_nesting)
         for item in reversed(self._stack):
             if item['tag'] in ('p', 'div', 'li'):
                 in_block = True
                 break
-        
         if not in_block:
             if not data.strip(): return
-            self._start_paragraph()
-            
+            self._start_paragraph(indent=current_indent)
         self._append_text(data)
 
+    def _parse_style(self, style_str: str) -> dict:
+        res = {}
+        if not style_str: return res
+        for part in style_str.split(';'):
+            if ':' in part:
+                k,v = part.split(':', 1)
+                k=k.strip().lower(); v=v.strip().lower()
+                if k=='color':
+                    m = re.search(r'#?([0-9a-f]{6})', v)
+                    if m: res['color']=m.group(1)
+                    else:
+                         m2 = re.search(r'rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', v)
+                         if m2: r,g,b=[int(x) for x in m2.groups()]; res['color']=f"{r:02X}{g:02X}{b:02X}"
+                elif k=='text-align': res['align']=v
+                elif k=='margin-left': res['margin-left']=v
+                elif k=='font-weight':
+                    if 'bold' in v or (re.search(r'\d+',v) and int(re.search(r'\d+',v).group(0))>=600): res['b']=True
+                elif k=='font-style' and 'italic' in v: res['i']=True
+                elif k=='text-decoration' and 'underline' in v: res['u']=True
+        return res
 
-    # Helpers (stejné jako minule)
     def _get_list_prefix(self) -> str:
         if not self._list_stack: return ""
         L = self._list_stack[-1]
         if L['tag'] == 'ul': return "•\t"
         elif L['tag'] == 'ol':
-            L['count'] += 1
-            n = L['count']
-            t = L.get('type', '1')
+            L['count'] += 1; n = L['count']; t = L.get('type', '1')
             val = f"{n}."
             if t == 'a': val = f"{self._to_alpha(n, False)}."
             elif t == 'A': val = f"{self._to_alpha(n, True)}."
@@ -566,22 +502,15 @@ class HTMLToDocxParser(HTMLParser):
             elif t == 'I': val = f"{self._to_roman(n, True)}."
             return f"{val}\t"
         return ""
-        
-    def _to_alpha(self, n: int, upper: bool) -> str:
-        s = ""
-        n -= 1
-        while n >= 0:
-            s = chr(97 + n % 26) + s
-            n = n // 26 - 1
+    def _to_alpha(self, n, upper):
+        s=""; n-=1
+        while n>=0: s=chr(97+n%26)+s; n=n//26-1
         return s.upper() if upper else s
-        
-    def _to_roman(self, n: int, upper: bool) -> str:
-        val = [(50, 'L'), (40, 'XL'), (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I')]
-        res = ""
-        for v, r in val:
-            while n >= v: res += r; n -= v
+    def _to_roman(self, n, upper):
+        val=[(50,'L'),(40,'XL'),(10,'X'),(9,'IX'),(5,'V'),(4,'IV'),(1,'I')]; res=""
+        for v,r in val:
+            while n>=v: res+=r; n-=v
         return res if upper else res.lower()
-
 
 # ---- Tvorba WordprocessingML prvků (w:p, w:r) ----
 
@@ -2472,16 +2401,6 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.addSeparator()
         self.editor_toolbar.addAction(self.action_bullets)
         
-        # NOVÉ: Tlačítka pro odsazení
-        self.action_indent_dec = QAction("< Odsadit", self)
-        self.action_indent_dec.setToolTip("Zmenšit odsazení")
-        self.action_indent_inc = QAction("> Odsadit", self)
-        self.action_indent_inc.setToolTip("Zvětšit odsazení")
-        
-        self.editor_toolbar.addSeparator()
-        self.editor_toolbar.addAction(self.action_indent_dec)
-        self.editor_toolbar.addAction(self.action_indent_inc)
-        
         self.editor_toolbar.addSeparator()
         self.editor_toolbar.addAction(self.action_align_left)
         
@@ -2949,9 +2868,6 @@ class MainWindow(QMainWindow):
         self.action_color.triggered.connect(self._choose_color)
         self.action_bullets.triggered.connect(self._toggle_bullets)
         
-        # NOVÉ: Propojení odsazení
-        self.action_indent_inc.triggered.connect(lambda: self._change_indent(1))
-        self.action_indent_dec.triggered.connect(lambda: self._change_indent(-1))
         
         self.action_align_left.triggered.connect(lambda: self._apply_alignment(Qt.AlignLeft))
         self.action_align_center.triggered.connect(lambda: self._apply_alignment(Qt.AlignHCenter))
@@ -4591,7 +4507,6 @@ class MainWindow(QMainWindow):
 
     def _generate_docx_from_template(self, template_path: Path, output_path: Path,
                                      simple_repl: Dict[str, str], rich_repl_html: Dict[str, str]) -> None:
-        
         try:
             doc = docx.Document(template_path)
         except Exception as e:
@@ -4624,11 +4539,23 @@ class MainWindow(QMainWindow):
                 new_p.paragraph_format.space_before = Pt(0)
                 new_p.paragraph_format.space_after = Pt(0)
 
-                if p_data.get('prefix'):
-                    new_p.paragraph_format.left_indent = Pt(48)
-                    new_p.paragraph_format.first_line_indent = Pt(-24)
-                    new_p.add_run(p_data['prefix'])
+                indent_lvl = p_data.get('indent', 0)
                 
+                if p_data.get('prefix'):
+                    # Seznam (List Item)
+                    # ZVĚTŠENO: Base indent 36pt (0.5 inch), krok 36pt
+                    base_indent = 36
+                    level_indent = indent_lvl * 36
+                    
+                    new_p.paragraph_format.left_indent = Pt(base_indent + level_indent)
+                    # Hanging indent -18pt (0.25 inch) - odrážka uprostřed
+                    new_p.paragraph_format.first_line_indent = Pt(-18)
+                    new_p.add_run(p_data['prefix'])
+                else:
+                    # Běžný odstavec
+                    if indent_lvl > 0:
+                        new_p.paragraph_format.left_indent = Pt(indent_lvl * 36)
+
                 for r_data in p_data['runs']:
                     text_content = r_data['text']
                     parts = text_content.split('\n')
@@ -4643,7 +4570,6 @@ class MainWindow(QMainWindow):
                                     rgb = r_data['color']
                                     run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
                                 except: pass
-                        
                         if idx < len(parts) - 1:
                             run = new_p.add_run()
                             run.add_break()
@@ -4652,64 +4578,48 @@ class MainWindow(QMainWindow):
             full_text = p.text
             if not full_text.strip(): return
 
-            # 1. BLOCK CHECK (Rich Only)
+            # 1. Rich Check
             txt_clean = full_text.strip()
             matched_rich = None
             for ph, html in rich_repl_html.items():
                 if txt_clean == f"<{ph}>" or txt_clean == f"{{{ph}}}":
                     matched_rich = (ph, html)
                     break
-            
             if matched_rich:
                 insert_rich_question_block(p, matched_rich[1])
                 return
 
-            # 2. INLINE CHECK
+            # 2. Inline Check (Simple + Safe Rich)
             keys_found = []
-            # Najdeme klíče
             for k in simple_repl.keys():
-                if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
-                    keys_found.append(k)
+                if f"<{k}>" in full_text or f"{{{k}}}" in full_text: keys_found.append(k)
             for k in rich_repl_html.keys():
-                if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
-                    keys_found.append(k)
+                if f"<{k}>" in full_text or f"{{{k}}}" in full_text: keys_found.append(k)
             
-            if not keys_found:
-                return
+            if not keys_found: return
 
-            # Zjistíme, zda máme nějaký RICH klíč v tomto odstavci
             has_rich_key = any(k in rich_repl_html for k in keys_found)
 
-            # POKUD MÁME JEN SIMPLE KLÍČE -> ZKUSÍME IN-PLACE REPLACE
-            # To zachová kotvy, obrázky, symboly a formátování ostatního textu
+            # Safe replacement pro Simple keys (zachová symboly a formát)
             if not has_rich_key:
                 replacements_done = 0
-                # Iterujeme přes runy a nahrazujeme text uvnitř nich
                 for run in p.runs:
                     t = run.text
                     original_t = t
-                    
                     for k in keys_found:
                         if k in simple_repl:
                             val = str(simple_repl[k])
-                            # Nahrazení <Klic> a {Klic}
                             t = t.replace(f"<{k}>", val).replace(f"{{{k}}}", val)
-                    
                     if t != original_t:
                         run.text = t
                         replacements_done += 1
                 
-                # Kontrola: Zbyly v odstavci nějaké nenahrazené klíče?
-                # (Stane se, když je placeholder rozdělen mezi dva runy: Run1="<", Run2="Key>")
                 final_text = p.text
                 still_has_keys = any((f"<{k}>" in final_text or f"{{{k}}}" in final_text) for k in keys_found)
-                
                 if replacements_done > 0 and not still_has_keys:
-                    return # Úspěšně nahrazeno in-place, končíme (zachová formát i symboly)
+                    return 
 
-            # Pokud in-place selhalo (nebo máme Rich content), musíme rekonstruovat
-            # POZOR: Zde se ztratí ukotvené objekty (šipky, obrázky) pokud byly v tomto odstavci!
-            
+            # Fallback: Rekonstrukce (pro Rich nebo complex split)
             segments = [full_text]
             all_repl_data = {}
             for k, v in simple_repl.items(): all_repl_data[k] = {'type': 'simple', 'val': v}
@@ -4725,22 +4635,17 @@ class MainWindow(QMainWindow):
                             parts = seg.split(token)
                             for i, part in enumerate(parts):
                                 if part: new_segments.append(part)
-                                if i < len(parts) - 1:
-                                    new_segments.append(info)
+                                if i < len(parts) - 1: new_segments.append(info)
                         else:
                             new_segments.append(seg)
                     segments = new_segments
 
-            # Base styles fallback
             base_props = {}
             if p.runs:
                 r0 = p.runs[0]
                 base_props = {
-                    'name': r0.font.name,
-                    'size': r0.font.size,
-                    'bold': r0.bold,
-                    'italic': r0.italic,
-                    'underline': r0.underline,
+                    'name': r0.font.name, 'size': r0.font.size,
+                    'bold': r0.bold, 'italic': r0.italic, 'underline': r0.underline,
                     'color': r0.font.color.rgb if r0.font.color else None
                 }
 
@@ -4749,30 +4654,25 @@ class MainWindow(QMainWindow):
             for seg in segments:
                 if isinstance(seg, str):
                     run = p.add_run(seg)
-                    # Aplikace base stylu
                     if base_props.get('name'): run.font.name = base_props['name']
                     if base_props.get('size'): run.font.size = base_props['size']
                     run.bold = base_props.get('bold')
                     run.italic = base_props.get('italic')
-                    
                 elif isinstance(seg, dict):
                     val = seg['val']
                     if seg['type'] == 'simple':
                         run = p.add_run(val)
-                        # Inherit styles for simple replacement
                         if base_props.get('name'): run.font.name = base_props['name']
                         if base_props.get('size'): run.font.size = base_props['size']
                         run.bold = base_props.get('bold')
                         run.italic = base_props.get('italic')
                         run.underline = base_props.get('underline')
                         if base_props.get('color'): run.font.color.rgb = base_props['color']
-                        
                     elif seg['type'] == 'rich':
+                        # Rich vložení inline (zjednodušené)
                         paras = parse_html_to_paragraphs(val)
                         for p_idx, p_data in enumerate(paras):
-                            if p_idx > 0:
-                                run_break = p.add_run()
-                                run_break.add_break()
+                            if p_idx > 0: p.add_run().add_break()
                             for r_data in p_data['runs']:
                                 text_content = r_data['text']
                                 parts = text_content.split('\n')
@@ -4787,26 +4687,15 @@ class MainWindow(QMainWindow):
                                                 rgb = r_data['color']
                                                 run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
                                             except: pass
-                                        
-                                        # Fallback
                                         if not r_data.get('b') and base_props.get('name'): run.font.name = base_props['name']
                                         if not r_data.get('b') and base_props.get('size'): run.font.size = base_props['size']
-                                    
-                                    if idx_part < len(parts) - 1:
-                                        p.add_run().add_break()
+                                    if idx_part < len(parts) - 1: p.add_run().add_break()
 
-        # 1. Body
-        for p in doc.paragraphs:
-            process_paragraph(p)
-            
-        # 2. Tables in Body
+        for p in doc.paragraphs: process_paragraph(p)
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    for p in cell.paragraphs:
-                        process_paragraph(p)
-        
-        # 3. Headers / Footers
+                    for p in cell.paragraphs: process_paragraph(p)
         for section in doc.sections:
             for h in [section.header, section.first_page_header]:
                 if h:
@@ -4827,7 +4716,6 @@ class MainWindow(QMainWindow):
             doc.save(output_path)
         except Exception as e:
             QMessageBox.critical(self, "Chyba uložení", f"Nelze uložit DOCX:\n{e}")
-
 
     # -------------------- Pomocné --------------------
 
