@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.13.4"
+APP_VERSION = "6.14.0"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -3984,16 +3984,24 @@ class MainWindow(QMainWindow):
         self.save_data()
 
     def _on_tree_selection_changed(self) -> None:
+        # Zajistíme, že během načítání nebude aktivní žádné ID, aby se nespouštěl autosave
+        self._current_question_id = None
+        
         kind, meta = self._selected_node()
         self._current_node_kind = kind
-        
+
         if kind == "question":
             q = self._find_question(meta["parent_group_id"], meta["parent_subgroup_id"], meta["id"])
             if q:
+                # Načteme data do editoru (ID zůstává None)
                 self._load_question_to_editor(q)
+                # Nastavíme viditelnost (to může vyvolat změny hodnot přes _on_type_changed_ui, ale ID je None, takže se neuloží)
                 self._set_question_editor_visible(True)
                 self.rename_panel.hide()
                 self._set_editor_enabled(True)
+                # Teprve až je vše načteno a UI nastaveno, povolíme ID pro budoucí uživatelské úpravy
+                self._current_question_id = q.id
+
         elif kind in ("group", "subgroup"):
             name = ""
             if kind == "group":
@@ -4001,27 +4009,49 @@ class MainWindow(QMainWindow):
             else:
                 sg = self._find_subgroup(meta["parent_group_id"], meta["id"]); name = sg.name if sg else ""
             
+            self.rename_line.blockSignals(True)
             self.rename_line.setText(name)
+            self.rename_line.blockSignals(False)
+            
             self._set_question_editor_visible(False)
             self.rename_panel.show()
-            self._set_editor_enabled(False) 
+            self._set_editor_enabled(False)
+
         else:
-            # Pokud metoda _clear_editor existuje, zavoláme ji. 
-            # Pokud ne, implementujte ji viz výše.
             self._clear_editor()
             self._set_question_editor_visible(False)
             self.rename_panel.hide()
 
     def _clear_editor(self) -> None:
         self._current_question_id = None
-        self.text_edit.clear()
-        self.spin_points.setValue(1)
-        self.spin_bonus_correct.setValue(1.00)
-        self.spin_bonus_wrong.setValue(0.00)
-        self.combo_type.setCurrentIndex(0)
-        self.title_edit.clear()
-        self.edit_correct_answer.clear() # NOVÉ: vymazat i toto
-        self.table_funny.setRowCount(0) # NOVÉ: vymazat i toto
+        
+        widgets = [
+            self.text_edit,
+            self.spin_points,
+            self.spin_bonus_correct,
+            self.spin_bonus_wrong,
+            self.combo_type,
+            self.title_edit,
+            self.edit_correct_answer,
+            self.table_funny
+        ]
+        
+        for w in widgets:
+            w.blockSignals(True)
+
+        try:
+            self.text_edit.clear()
+            self.spin_points.setValue(1)
+            self.spin_bonus_correct.setValue(1.00)
+            self.spin_bonus_wrong.setValue(0.00)
+            self.combo_type.setCurrentIndex(0)
+            self.title_edit.clear()
+            self.edit_correct_answer.clear() 
+            self.table_funny.setRowCount(0) 
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+                
         self._set_editor_enabled(False)
 
     def _set_question_editor_visible(self, visible: bool) -> None:
@@ -4062,52 +4092,61 @@ class MainWindow(QMainWindow):
         if visible:
             self._on_type_changed_ui()
 
-
     def _load_question_to_editor(self, q: Question) -> None:
-        self._current_question_id = q.id
-        self.combo_type.setCurrentIndex(0 if q.type == "classic" else 1)
-        self.spin_points.setValue(int(q.points))
-        self.spin_bonus_correct.setValue(float(q.bonus_correct))
-        self.spin_bonus_wrong.setValue(float(q.bonus_wrong))
-        self.text_edit.setHtml(q.text_html or "<p><br></p>")
-        self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
+        # ID nulujeme i zde pro jistotu
+        self._current_question_id = None
 
-        # Načtení správné odpovědi
-        self.edit_correct_answer.setPlainText(q.correct_answer or "")
+        widgets = [
+            self.combo_type,
+            self.spin_points,
+            self.spin_bonus_correct,
+            self.spin_bonus_wrong,
+            self.text_edit,
+            self.title_edit,
+            self.edit_correct_answer,
+            self.table_funny
+        ]
+        
+        for w in widgets:
+            w.blockSignals(True)
 
-        # Načtení vtipných odpovědí
-        self.table_funny.setRowCount(0)
-        # Pojistka pro případ starého JSONu kde funny_answers může být None
-        f_answers = getattr(q, "funny_answers", []) or []
+        try:
+            self.combo_type.setCurrentIndex(0 if q.type == "classic" else 1)
+            self.spin_points.setValue(int(q.points))
+            self.spin_bonus_correct.setValue(float(q.bonus_correct))
+            self.spin_bonus_wrong.setValue(float(q.bonus_wrong))
+            
+            self.text_edit.setHtml(q.text_html or "")
+            self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
+            self.edit_correct_answer.setPlainText(q.correct_answer or "")
 
-        for fa in f_answers:
-            # fa může být dict (z JSONu) nebo objekt FunnyAnswer
-            if isinstance(fa, FunnyAnswer):
-                text = fa.text
-                date = fa.date
-                author = fa.author
-                source_doc = fa.source_doc
-            else:
-                text = fa.get("text", "")
-                date = fa.get("date", "")
-                author = fa.get("author", "")
-                source_doc = fa.get("source_doc", "")
+            self.table_funny.setRowCount(0)
+            f_answers = getattr(q, "funny_answers", []) or []
 
-            row = self.table_funny.rowCount()
-            self.table_funny.insertRow(row)
-            self.table_funny.setItem(row, 0, QTableWidgetItem(text))
-            self.table_funny.setItem(row, 1, QTableWidgetItem(date))
-            self.table_funny.setItem(row, 2, QTableWidgetItem(author))
+            for fa in f_answers:
+                if isinstance(fa, FunnyAnswer):
+                    text = fa.text; date = fa.date; author = fa.author; source_doc = fa.source_doc
+                else:
+                    text = fa.get("text", ""); date = fa.get("date", ""); author = fa.get("author", ""); source_doc = fa.get("source_doc", "")
+                
+                row = self.table_funny.rowCount()
+                self.table_funny.insertRow(row)
+                self.table_funny.setItem(row, 0, QTableWidgetItem(text))
+                self.table_funny.setItem(row, 1, QTableWidgetItem(date))
+                self.table_funny.setItem(row, 2, QTableWidgetItem(author))
+                
+                display_source = os.path.basename(source_doc) if source_doc else ""
+                source_item = QTableWidgetItem(display_source)
+                source_item.setData(Qt.UserRole, source_doc)
+                self.table_funny.setItem(row, 3, source_item)
 
-            display_source = os.path.basename(source_doc) if source_doc else ""
-            source_item = QTableWidgetItem(display_source)
-            source_item.setData(Qt.UserRole, source_doc)
-            self.table_funny.setItem(row, 3, source_item)
-
-        self._set_editor_enabled(True)
-
-        # Synchronizace viditelnosti polí podle načteného typu
-        self._on_type_changed_ui()
+            self._set_editor_enabled(True)
+            # Toto volání aktualizuje UI, ale protože ID je None, neuloží se nic
+            self._on_type_changed_ui()
+            
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
 
     def _apply_editor_to_current_question(self, silent: bool = False) -> None:
         if not self._current_question_id:
