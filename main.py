@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.11.7"
+APP_VERSION = "6.12.1"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2380,6 +2380,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Otázka byla duplikována.", 3000)
 
     def _build_ui(self) -> None:
+        # ... (Copy everything until the detail layout part) ...
         # Hlavní container
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
@@ -2420,7 +2421,7 @@ class MainWindow(QMainWindow):
         self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         questions_layout.addWidget(self.tree, 1)
         
-        # Legenda barev
+        # Legenda
         legend_box = QFrame()
         legend_box.setStyleSheet("background-color: #2d2d2d; border-radius: 4px;")
         legend_layout = QHBoxLayout(legend_box)
@@ -2449,7 +2450,6 @@ class MainWindow(QMainWindow):
         history_layout.setContentsMargins(4, 4, 4, 4)
         
         self.table_history = QTableWidget(0, 2)
-        # Sloupce se nastaví v _refresh_history_table
         self.table_history.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_history.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table_history.setSortingEnabled(True)
@@ -2457,21 +2457,19 @@ class MainWindow(QMainWindow):
         self.table_history.customContextMenuRequested.connect(self._on_history_context_menu)
         history_layout.addWidget(self.table_history)
         
-        # Tlačítka historie
         h_btns = QHBoxLayout()
         btn_refresh_hist = QPushButton("Obnovit historii")
         btn_refresh_hist.clicked.connect(self._refresh_history_table)
         
         btn_clear_hist = QPushButton("Vymazat celou historii")
         btn_clear_hist.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 4px 8px;")
-        btn_clear_hist.setToolTip("Smaže všechny záznamy z logu historie (soubory zůstanou)")
         btn_clear_hist.clicked.connect(self._clear_all_history)
         
         h_btns.addWidget(btn_refresh_hist)
         h_btns.addStretch()
         h_btns.addWidget(btn_clear_hist)
-        
         history_layout.addLayout(h_btns)
+        
         self.left_tabs.addTab(self.tab_history, "Historie")
         
         self._init_funny_answers_tab()
@@ -2568,19 +2566,22 @@ class MainWindow(QMainWindow):
         rename_layout.addRow("Název:", self.rename_line)
         rename_layout.addRow(self.btn_rename)
 
+        # -- FIX START: Assign labels to self --
+        self.lbl_content = QLabel("<b>Obsah otázky:</b>")
+        self.lbl_correct = QLabel("<b>Správná odpověď:</b>")
+        self.lbl_funny = QLabel("<b>Vtipné odpovědi:</b>")
+        
         self.detail_layout.addWidget(self.editor_toolbar)
         self.detail_layout.addLayout(self.form_layout)
-        self.lbl_content = QLabel("<b>Obsah otázky:</b>")
         self.detail_layout.addWidget(self.lbl_content)
         self.detail_layout.addWidget(self.text_edit, 1) 
-        self.lbl_correct = QLabel("<b>Správná odpověď:</b>")
         self.detail_layout.addWidget(self.lbl_correct)
         self.detail_layout.addWidget(self.edit_correct_answer)
-        self.lbl_funny = QLabel("<b>Vtipné odpovědi:</b>")
         self.detail_layout.addWidget(self.lbl_funny)
         self.detail_layout.addWidget(self.funny_container)
         self.detail_layout.addWidget(self.btn_save_question)
         self.detail_layout.addWidget(self.rename_panel)
+        # -- FIX END --
 
         self._set_editor_enabled(False)
         self.splitter.addWidget(left_panel_container)
@@ -2607,17 +2608,22 @@ class MainWindow(QMainWindow):
         
         self._refresh_history_table()
         
-        self.action_bold.triggered.connect(lambda: self._toggle_format("bold"))
-        self.action_italic.triggered.connect(lambda: self._toggle_format("italic"))
-        self.action_underline.triggered.connect(lambda: self._toggle_format("underline"))
-        self.action_color.triggered.connect(self._choose_color)
-        self.action_bullets.toggled.connect(self._toggle_bullets)
-        self.action_indent_inc.triggered.connect(lambda: self._change_indent(1))
-        self.action_indent_dec.triggered.connect(lambda: self._change_indent(-1))
-        self.action_align_left.triggered.connect(lambda: self._apply_alignment(Qt.AlignLeft))
-        self.action_align_center.triggered.connect(lambda: self._apply_alignment(Qt.AlignHCenter))
-        self.action_align_right.triggered.connect(lambda: self._apply_alignment(Qt.AlignRight))
-        self.action_align_justify.triggered.connect(lambda: self._apply_alignment(Qt.AlignJustify))
+        self.left_tabs.currentChanged.connect(self._on_left_tab_changed)
+
+
+    def _on_left_tab_changed(self, index: int) -> None:
+        """Skrývá/zobrazuje pravý panel podle aktivní záložky."""
+        current_widget = self.left_tabs.widget(index)
+        
+        if current_widget == self.tab_questions:
+            self.detail_stack.setVisible(True)
+        else:
+            self.detail_stack.setVisible(False)
+            
+        if hasattr(self, "tab_funny") and current_widget == self.tab_funny:
+            if hasattr(self, "_refresh_funny_answers_tab"):
+                self._refresh_funny_answers_tab()
+
 
     def _on_tree_context_menu(self, pos: QPoint) -> None:
         """Kontextové menu stromu otázek (v6.7.2)."""
