@@ -91,11 +91,44 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.9.2"
+APP_VERSION = "6.9.8"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
 # ---------------------------------------------------------------------------
+def generate_colored_icon(text: str, color: QColor, shape: str = "circle") -> QIcon:
+    """Vygeneruje jednoduchou ikonu s textem/symbolem (Global Helper)."""
+    pix = QPixmap(16, 16)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing)
+    
+    painter.setBrush(color)
+    painter.setPen(Qt.NoPen)
+    
+    if shape == "circle":
+        painter.drawEllipse(1, 1, 14, 14)
+    elif shape == "star":
+        path = QPainterPath()
+        path.moveTo(8, 0)
+        path.lineTo(16, 8)
+        path.lineTo(8, 16)
+        path.lineTo(0, 8)
+        path.closeSubpath()
+        painter.drawPath(path)
+    else:
+        painter.drawRect(1, 1, 14, 14)
+        
+    painter.setPen(QColor("black")) 
+    font = painter.font()
+    font.setBold(True)
+    font.setPointSize(9)
+    painter.setFont(font)
+    painter.drawText(pix.rect(), Qt.AlignCenter, text)
+    painter.end()
+    return QIcon(pix)
+
+
 
 def parse_html_to_paragraphs(html: str) -> List[dict]:
     if not html:
@@ -1215,12 +1248,28 @@ class ExportWizard(QWizard):
                 if item.widget(): item.widget().deleteLater()
             self.layout_slots.addStretch()
             
+            # Barvy a ikony pro strom (NOVÉ)
+            color_group = QBrush(QColor("#ff5252"))
+            color_subgroup = QBrush(QColor("#ff8a80"))
+            color_classic = QBrush(QColor("#42a5f5"))
+            color_bonus = QBrush(QColor("#ffea00"))
+            
+            icon_group = generate_colored_icon("S", QColor("#ff5252"), "rect")
+            icon_sub = generate_colored_icon("P", QColor("#ff8a80"), "rect")
+            icon_classic = generate_colored_icon("Q", QColor("#42a5f5"), "circle")
+            icon_bonus = generate_colored_icon("B", QColor("#ffea00"), "star")
+            
             # 4. Populate Tree and Combo
             def add_subgroup_recursive(parent_item, subgroup_list, parent_gid, level=1):
                 for sg in subgroup_list:
                     # Tree Item
                     sg_item = QTreeWidgetItem([sg.name])
-                    sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                    
+                    # Ikona a barva
+                    sg_item.setIcon(0, icon_sub)
+                    sg_item.setForeground(0, color_subgroup)
+                    f = sg_item.font(0); f.setBold(True); sg_item.setFont(0, f)
+                    
                     sg_item.setData(0, Qt.UserRole, {
                         "kind": "subgroup", 
                         "id": sg.id, 
@@ -1228,22 +1277,34 @@ class ExportWizard(QWizard):
                     })
                     parent_item.addChild(sg_item)
                     
-                    # Combo Item
+                    # Combo Item (Zachováno)
                     indent = "  " * level
                     self.combo_multi_source.addItem(f"{indent}📂 {sg.name}", {"type": "subgroup", "id": sg.id})
                     
                     for q in sg.questions:
-                        info = f"({q.points} b)" if q.type == 'classic' else f"(Bonus: {q.bonus_correct})"
-                        label = f"{q.title} {info}"
+                        # Zde musíme zjistit typ pro ikonu
+                        label_type = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
+                        is_bonus = (label_type == "BONUS")
                         
-                        q_item = QTreeWidgetItem([label])
+                        info = f"({q.points} b)" if not is_bonus else f"(Bonus: {q.bonus_correct})"
+                        label_text = f"{q.title} {info}"
+                        
+                        q_item = QTreeWidgetItem([label_text])
                         q_item.setData(0, Qt.UserRole, {
                             "kind": "question",
                             "id": q.id,
                             "parent_group_id": parent_gid,
                             "parent_subgroup_id": sg.id
                         })
-                        q_item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
+                        
+                        # Ikona a barva otázky
+                        if is_bonus:
+                            q_item.setIcon(0, icon_bonus)
+                            q_item.setForeground(0, color_bonus)
+                            fb = q_item.font(0); fb.setBold(True); q_item.setFont(0, fb)
+                        else:
+                            q_item.setIcon(0, icon_classic)
+                            q_item.setForeground(0, color_classic)
                         
                         sg_item.addChild(q_item)
                     
@@ -1254,8 +1315,12 @@ class ExportWizard(QWizard):
             for g in groups:
                 # Tree
                 g_item = QTreeWidgetItem([g.name])
-                g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                
+                # Ikona a barva Skupiny
+                g_item.setIcon(0, icon_group)
+                g_item.setForeground(0, color_group)
                 f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
+                
                 g_item.setData(0, Qt.UserRole, {
                     "kind": "group", 
                     "id": g.id
@@ -1278,8 +1343,8 @@ class ExportWizard(QWizard):
                 
                 lbl_name = QLabel(f"{ph}:")
                 lbl_name.setFixedWidth(120)
-                if is_bonus: lbl_name.setStyleSheet("color: #ffcc00;")
-                else: lbl_name.setStyleSheet("color: #4da6ff;")
+                if is_bonus: lbl_name.setStyleSheet("color: #ffea00;") # Was #ffcc00
+                else: lbl_name.setStyleSheet("color: #42a5f5;") # Was #4da6ff
                 
                 btn_assign = QPushButton("Vybrat...")
                 qid = self.selection_map.get(ph)
@@ -1406,13 +1471,13 @@ class ExportWizard(QWizard):
             menu.exec(self.tree_source.mapToGlobal(pos))
 
     def _refresh_tree_visuals(self) -> None:
-        """Aktualizuje vizuální stav položek ve stromu (zvýrazní vybrané)."""
+        """Aktualizuje vizuální stav položek ve stromu (vybrané vs volné)."""
         iterator = QTreeWidgetItemIterator(self.tree_source)
         used_ids = set(self.selection_map.values())
         
-        # Barvy pro dark theme
-        color_used = QColor("#666666")
-        color_normal = QColor("#e0e0e0")
+        c_classic = QColor("#42a5f5")
+        c_bonus = QColor("#ffea00")
+        c_used = QColor("#666666") # Šedá pro vybrané
         
         while iterator.value():
             item = iterator.value()
@@ -1421,20 +1486,30 @@ class ExportWizard(QWizard):
             if meta.get("kind") == "question":
                 qid = meta.get("id")
                 txt = item.text(0)
-                
-                # Odstraníme případný starý suffix
                 clean_txt = txt.replace(" [VYBRÁNO]", "")
                 
+                # Zjištění typu
+                q = self.owner._find_question_by_id(qid)
+                is_bonus = False
+                if q:
+                    is_bonus = (str(q.type).lower() == "bonus" or q.type == 1)
+                
                 if qid in used_ids:
-                    # Je vybrána
+                    # Vybráno -> Šedá
                     item.setText(0, clean_txt + " [VYBRÁNO]")
-                    item.setForeground(0, QBrush(color_used))
-                    f = item.font(0); f.setItalic(True); item.setFont(0, f)
+                    item.setForeground(0, QBrush(c_used))
+                    f = item.font(0); f.setItalic(True); f.setBold(False)
+                    item.setFont(0, f)
                 else:
-                    # Není vybrána
+                    # Volné -> Barva podle typu
                     item.setText(0, clean_txt)
-                    item.setForeground(0, QBrush(color_normal))
-                    f = item.font(0); f.setItalic(False); item.setFont(0, f)
+                    target_color = c_bonus if is_bonus else c_classic
+                    item.setForeground(0, QBrush(target_color))
+                    
+                    f = item.font(0); f.setItalic(False)
+                    if is_bonus: f.setBold(True)
+                    else: f.setBold(False)
+                    item.setFont(0, f)
             
             iterator += 1
 
