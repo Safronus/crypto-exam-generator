@@ -49,7 +49,7 @@ from PySide6.QtGui import (
     QColor,
     QPalette,
     QFont,
-    QPixmap, QPainter, QIcon, QBrush
+    QPixmap, QPainter, QIcon, QBrush, QPainterPath
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.9.0"
+APP_VERSION = "6.9.1"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -3315,26 +3315,67 @@ class MainWindow(QMainWindow):
 
     def _bonus_points_label(self, q: Question) -> str:
         return f"+{q.bonus_correct:.2f}/ {q.bonus_wrong:.2f}"
+    
+    def _generate_icon(self, text: str, color: QColor, shape: str = "circle") -> QIcon:
+        """Vygeneruje jednoduchou ikonu s textem/symbolem."""
+        pix = QPixmap(16, 16)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        painter.setBrush(color)
+        painter.setPen(Qt.NoPen)
+        
+        if shape == "circle":
+            painter.drawEllipse(1, 1, 14, 14)
+        elif shape == "star":
+            # Jednoduchá hvězda/diamant (kosočtverec)
+            path = QPainterPath()
+            path.moveTo(8, 0)
+            path.lineTo(16, 8)
+            path.lineTo(8, 16)
+            path.lineTo(0, 8)
+            path.closeSubpath()
+            painter.drawPath(path)
+        else:
+            painter.drawRect(1, 1, 14, 14)
+            
+        painter.setPen(QColor("black")) # Text černý pro kontrast na světlé barvě
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSize(9)
+        painter.setFont(font)
+        painter.drawText(pix.rect(), Qt.AlignCenter, text)
+        painter.end()
+        return QIcon(pix)
 
     def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str) -> None:
         """Aplikuje vizuální styl na položku otázky (ikona, barva, font)."""
-        item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
         
-        # Definice barev (Explicitní HEX pro tmavý režim)
-        color_classic = QBrush(QColor("#42a5f5")) # Blue 400
-        color_bonus = QBrush(QColor("#ffea00"))   # Yellow A400
+        color_classic_bg = QColor("#42a5f5") # Modrá
+        color_bonus_bg = QColor("#ffea00")   # Žlutá
         
-        # Detekce typu ("bonus" string nebo int 1)
         is_bonus = str(q_type).lower() == "bonus" or q_type == 1
         
         if is_bonus:
-            item.setForeground(0, color_bonus)
-            item.setForeground(1, color_bonus)
+            # BONUS: Ikona hvězdy/diamantu s "B"
+            icon = self._generate_icon("B", color_bonus_bg, "star")
+            item.setIcon(0, icon)
+            
+            item.setForeground(0, QBrush(color_bonus_bg))
+            item.setForeground(1, QBrush(color_bonus_bg))
             f = item.font(0); f.setBold(True); item.setFont(0, f)
         else:
-            item.setForeground(0, color_classic)
-            item.setForeground(1, color_classic)
+            # KLASICKÁ: Ikona kruhu s "Q" (nebo standard)
+            # Pro odlišení použijeme generovanou ikonu "Q" nebo "?" nebo prostě "1" (jako body?)
+            # Zvolím "Q" pro Question
+            icon = self._generate_icon("Q", color_classic_bg, "circle")
+            item.setIcon(0, icon)
+            
+            item.setForeground(0, QBrush(color_classic_bg))
+            item.setForeground(1, QBrush(color_classic_bg))
             f = item.font(0); f.setBold(False); item.setFont(0, f)
+
 
     def _refresh_tree(self) -> None:
         """Obnoví strom otázek podle self.root."""
