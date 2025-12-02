@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.12.1"
+APP_VERSION = "6.13.4"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2340,8 +2340,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_signals()
         
-        
-        self._build_menus()
+
         self.load_data()
         self._refresh_tree()
         self._refresh_funny_answers_tab()
@@ -2380,7 +2379,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Otázka byla duplikována.", 3000)
 
     def _build_ui(self) -> None:
-        # ... (Copy everything until the detail layout part) ...
+        # ... (All previous code identical until the toolbar part) ...
         # Hlavní container
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
@@ -2566,7 +2565,6 @@ class MainWindow(QMainWindow):
         rename_layout.addRow("Název:", self.rename_line)
         rename_layout.addRow(self.btn_rename)
 
-        # -- FIX START: Assign labels to self --
         self.lbl_content = QLabel("<b>Obsah otázky:</b>")
         self.lbl_correct = QLabel("<b>Správná odpověď:</b>")
         self.lbl_funny = QLabel("<b>Vtipné odpovědi:</b>")
@@ -2581,7 +2579,6 @@ class MainWindow(QMainWindow):
         self.detail_layout.addWidget(self.funny_container)
         self.detail_layout.addWidget(self.btn_save_question)
         self.detail_layout.addWidget(self.rename_panel)
-        # -- FIX END --
 
         self._set_editor_enabled(False)
         self.splitter.addWidget(left_panel_container)
@@ -2589,27 +2586,125 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(1, 1)
         self.setCentralWidget(self.splitter)
 
-        tb = self.addToolBar("Hlavní")
-        tb.setIconSize(QSize(18, 18))
-        self.act_add_group = QAction("Přidat skupinu", self)
-        self.act_add_subgroup = QAction("Přidat podskupinu", self)
-        self.act_add_question = QAction("Přidat otázku", self)
-        self.act_delete = QAction("Smazat", self)
-        self.act_add_group.setShortcut("Ctrl+G")
-        self.act_add_subgroup.setShortcut("Ctrl+Shift+G")
-        self.act_add_question.setShortcut(QKeySequence.New)
-        self.act_delete.setShortcut(QKeySequence.Delete)
+        # -- TOOLBAR STYLING & MERGE --
+        
+        # 1. Odstranit starý toolbar "Import/Export" (pokud existuje z _build_menus)
+        for child in self.children():
+            if isinstance(child, QToolBar) and child.windowTitle() == "Import/Export":
+                self.removeToolBar(child)
+                child.deleteLater()
+                break
+        
+        # 2. Najít nebo vytvořit "Hlavní" toolbar
+        tb = None
+        for child in self.children():
+            if isinstance(child, QToolBar) and child.windowTitle() == "Hlavní":
+                tb = child
+                break
+        
+        if not tb:
+            tb = self.addToolBar("Hlavní")
+        
+        tb.clear() # Vyčistit
+        
+        # Stylizace
+        tb.setIconSize(QSize(20, 20))
+        tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        
+        tb.setStyleSheet("""
+            QToolBar {
+                background-color: #2d2d2d;
+                border-bottom: 1px solid #3e3e3e;
+                padding: 4px;
+                spacing: 6px;
+            }
+            QToolButton {
+                background-color: #383838;
+                border: 1px solid #505050;
+                border-radius: 3px;
+                color: #e0e0e0;
+                padding: 4px 8px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QToolButton:hover {
+                background-color: #454545;
+                border-color: #606060;
+            }
+            QToolButton:pressed {
+                background-color: #252525;
+            }
+        """)
+
+        def get_gen_icon(char, color):
+            return self._generate_icon(char, color, "rect")
+
+        # --- ACTIONS ---
+        
+        # 1. Skupina
+        if not hasattr(self, "act_add_group"):
+            self.act_add_group = QAction("Skupina", self)
+            self.act_add_group.setShortcut("Ctrl+G")
+        self.act_add_group.setText("Skupina")
+        self.act_add_group.setIcon(get_gen_icon("S", QColor("#ff5252")))
+        
+        # 2. Podskupina
+        if not hasattr(self, "act_add_subgroup"):
+            self.act_add_subgroup = QAction("Podskupina", self)
+            self.act_add_subgroup.setShortcut("Ctrl+Shift+G")
+        self.act_add_subgroup.setText("Podskupina")
+        self.act_add_subgroup.setIcon(get_gen_icon("P", QColor("#ff8a80")))
+
+        # 3. Otázka
+        if not hasattr(self, "act_add_question"):
+            self.act_add_question = QAction("Otázka", self)
+            self.act_add_question.setShortcut(QKeySequence.New)
+        self.act_add_question.setText("Otázka")
+        self.act_add_question.setIcon(get_gen_icon("O", QColor("#42a5f5")))
+
+        # 4. Smazat
+        if not hasattr(self, "act_delete"):
+            self.act_delete = QAction("Smazat", self)
+            self.act_delete.setShortcut(QKeySequence.Delete)
+        self.act_delete.setText("Smazat")
+        self.act_delete.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
+
+        # 5. Import (Recycle existing from _build_menus)
+        if not hasattr(self, "act_import_docx"):
+            # Pokud by náhodou neexistovala (např. _build_menus neproběhlo), vytvoříme
+            self.act_import_docx = QAction("Import", self)
+            if hasattr(self, "_import_from_docx"):
+                self.act_import_docx.triggered.connect(self._import_from_docx)
+        
+        # Update text/icon for toolbar (Compact look)
+        self.act_import_docx.setText("Import")
+        self.act_import_docx.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
+        
+        # 6. Export (Recycle)
+        if not hasattr(self, "act_export_docx"):
+            self.act_export_docx = QAction("Export", self)
+            if hasattr(self, "_export_docx_wizard"): # Name from user snippet!
+                self.act_export_docx.triggered.connect(self._export_docx_wizard)
+        
+        self.act_export_docx.setText("Export")
+        self.act_export_docx.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
+
+        # Add to Main Toolbar
         tb.addAction(self.act_add_group)
         tb.addAction(self.act_add_subgroup)
         tb.addAction(self.act_add_question)
         tb.addSeparator()
+        tb.addAction(self.act_import_docx)
+        tb.addAction(self.act_export_docx)
+        tb.addSeparator()
         tb.addAction(self.act_delete)
-        self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
         
+        # ... (Rest of the method) ...
+        self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
         self._refresh_history_table()
         
         self.left_tabs.currentChanged.connect(self._on_left_tab_changed)
-
 
     def _on_left_tab_changed(self, index: int) -> None:
         """Skrývá/zobrazuje pravý panel podle aktivní záložky."""
@@ -3358,35 +3453,6 @@ class MainWindow(QMainWindow):
             self.table_funny.setItem(row, 3, new_source_item)
 
             self._autosave_schedule()
-            
-    def _build_menus(self) -> None:
-        bar = self.menuBar()
-        self.file_menu = bar.addMenu("Soubor")
-        edit_menu = bar.addMenu("Úpravy")
-
-        self.act_import_docx = QAction("Import z DOCX…", self)
-        self.act_move_question = QAction("Přesunout otázku…", self)
-        self.act_move_selected = QAction("Přesunout vybrané…", self)
-        self.act_delete_selected = QAction("Smazat vybrané", self)
-        self.act_export_docx = QAction("Export do DOCX (šablona)…", self)
-
-        self.file_menu.addAction(self.act_import_docx)
-        self.file_menu.addAction(self.act_export_docx)
-        edit_menu.addAction(self.act_move_question)
-        edit_menu.addAction(self.act_move_selected)
-        edit_menu.addAction(self.act_delete_selected)
-
-        self.act_import_docx.setShortcut("Ctrl+I")
-        self.act_import_docx.triggered.connect(self._import_from_docx)
-        self.act_move_question.triggered.connect(self._move_question)
-        self.act_move_selected.triggered.connect(self._bulk_move_selected)
-        self.act_delete_selected.triggered.connect(self._bulk_delete_selected)
-        self.act_export_docx.triggered.connect(self._export_docx_wizard)
-
-        tb_import = self.addToolBar("Import/Export")
-        tb_import.setIconSize(QSize(18, 18))
-        tb_import.addAction(self.act_import_docx)
-        tb_import.addAction(self.act_export_docx)
         
     def _move_selected_dialog(self) -> None:
         """Otevře dialog pro přesun vybraných otázek do jiné skupiny/podskupiny."""
