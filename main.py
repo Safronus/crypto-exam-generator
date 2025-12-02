@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.7.2"
+APP_VERSION = "6.8.11"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -3301,41 +3301,57 @@ class MainWindow(QMainWindow):
         return f"+{q.bonus_correct:.2f}/ {q.bonus_wrong:.2f}"
 
     def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str) -> None:
+        """Aplikuje vizuální styl na položku otázky (ikona, barva, font)."""
         item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
-        if q_type == "bonus":
-            item.setForeground(0, self.palette().brush(QPalette.Highlight))
+        
+        # Definice barev (Explicitní HEX pro tmavý režim)
+        color_classic = QBrush(QColor("#42a5f5")) # Blue 400
+        color_bonus = QBrush(QColor("#ffea00"))   # Yellow A400
+        
+        # Detekce typu ("bonus" string nebo int 1)
+        is_bonus = str(q_type).lower() == "bonus" or q_type == 1
+        
+        if is_bonus:
+            item.setForeground(0, color_bonus)
+            item.setForeground(1, color_bonus)
             f = item.font(0); f.setBold(True); item.setFont(0, f)
         else:
-            item.setForeground(0, self.palette().brush(QPalette.Text))
+            item.setForeground(0, color_classic)
+            item.setForeground(1, color_classic)
             f = item.font(0); f.setBold(False); item.setFont(0, f)
 
     def _refresh_tree(self) -> None:
+        """Obnoví strom otázek podle self.root."""
         self.tree.clear()
+        if not self.root:
+            return
+
+        sorted_groups = sorted(self.root.groups, key=lambda g: g.name.lower())
         
-        # Skupiny neřadíme, bereme jak jsou
-        for g in self.root.groups:
-            g_item = QTreeWidgetItem([g.name, ""]) # Prázdný text ve sloupci 1
+        # Barva Skupiny: Červená (Red A200 - výrazná, čitelná na tmavém)
+        color_group = QBrush(QColor("#ff5252")) 
+
+        for g in sorted_groups:
+            g_item = QTreeWidgetItem([g.name, ""])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
             g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
-            f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
-            self.tree.addTopLevelItem(g_item)
             
-            # Podskupiny seřadíme abecedně podle jména (case-insensitive)
-            sorted_subgroups = sorted(g.subgroups, key=lambda s: s.name.lower())
-            self._add_subgroups_to_item(g_item, g.id, sorted_subgroups)
+            # Styl
+            g_item.setForeground(0, color_group)
+            g_item.setForeground(1, color_group)
+            f = g_item.font(0); f.setBold(True); f.setPointSize(13); g_item.setFont(0, f)
+            
+            self.tree.addTopLevelItem(g_item)
+            g_item.setExpanded(True)
 
-        self.tree.expandAll()
-        # Vynutíme přepočet šířky sloupce 1 podle obsahu
-        self.tree.resizeColumnToContents(1)
+            if g.subgroups:
+                sorted_subgroups = sorted(g.subgroups, key=lambda s: s.name.lower())
+                self._add_subgroups_to_item(g_item, g.id, sorted_subgroups)
 
     def _add_subgroups_to_item(self, parent_item: QTreeWidgetItem, group_id: str, subgroups: List[Subgroup]) -> None:
-        # Pozn.: Vstupní 'subgroups' už může být seřazený z _refresh_tree, ale pro rekurzi (vnořené podskupiny)
-        # a pro otázky to musíme řešit zde.
-        
-        # Pokud bychom spoléhali na to, že 'subgroups' na vstupu je seřazené, je to OK pro první úroveň volání.
-        # Pro rekurzi si to raději pojistíme nebo seřadíme při volání.
-        # Zde iterujeme přes seznam, který nám byl předán.
-        
+        # Barva Podskupiny: Světlejší červená / Karmínová (Red A100)
+        color_subgroup = QBrush(QColor("#ff8a80"))
+
         for sg in subgroups:
             parent_meta = parent_item.data(0, Qt.UserRole) or {}
             parent_sub_id = parent_meta.get("id") if parent_meta.get("kind") == "subgroup" else None
@@ -3348,14 +3364,25 @@ class MainWindow(QMainWindow):
                 "parent_subgroup_id": parent_sub_id
             })
             sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirOpenIcon))
+            
+            # Styl
+            sg_item.setForeground(0, color_subgroup)
+            sg_item.setForeground(1, color_subgroup)
+            f = sg_item.font(0); f.setBold(True); sg_item.setFont(0, f)
+
             parent_item.addChild(sg_item)
             
-            # 1. Přidat Otázky (Seřazené abecedně podle titulku)
+            # 1. Otázky
             sorted_questions = sorted(sg.questions, key=lambda q: (q.title or "").lower())
             
             for q in sorted_questions:
-                label = "Klasická" if q.type == "classic" else "BONUS"
-                pts = q.points if q.type == "classic" else self._bonus_points_label(q)
+                label = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
+                is_bonus = (label == "BONUS")
+                
+                if is_bonus:
+                    pts = f"+{q.bonus_correct}/{q.bonus_wrong} b."
+                else:
+                    pts = f"{q.points} b."
                 
                 q_item = QTreeWidgetItem([q.title or "Otázka", f"{label} | {pts}"])
                 q_item.setData(0, Qt.UserRole, {
@@ -3364,23 +3391,35 @@ class MainWindow(QMainWindow):
                     "parent_group_id": group_id, 
                     "parent_subgroup_id": sg.id
                 })
+                
                 self._apply_question_item_visuals(q_item, q.type)
                 sg_item.addChild(q_item)
             
-            # 2. Rekurze pro vnořené podskupiny (Seřazené)
+            # 2. Rekurze
             if sg.subgroups:
                 sorted_nested_subgroups = sorted(sg.subgroups, key=lambda s: s.name.lower())
                 self._add_subgroups_to_item(sg_item, group_id, sorted_nested_subgroups)
+            
+            sg_item.setExpanded(True)
 
-    def _selected_node(self) -> Tuple[Optional[str], Optional[dict]]:
-        items = self.tree.selectedItems()
-        if not items:
+    def _selected_node(self):
+        """Vrátí (kind, meta) pro vybranou položku ve stromu."""
+        sel = self.tree.selectedItems()
+        if not sel:
             return None, None
-        item = items[0]
-        meta = item.data(0, Qt.UserRole)
-        if not meta:
-            return None, None
-        return meta.get("kind"), meta
+        item = sel[0]
+        data = item.data(0, Qt.UserRole)
+        
+        # Podpora pro tuple (kind, meta) - nový formát
+        if isinstance(data, tuple) and len(data) >= 2:
+            return data[0], data[1]
+            
+        # Podpora pro starý formát (dict s klíčem 'kind')
+        if isinstance(data, dict):
+            return data.get("kind"), data
+            
+        return None, None
+
 
     def _sync_model_from_tree(self) -> None:
         group_map = {g.id: g for g in self.root.groups}
