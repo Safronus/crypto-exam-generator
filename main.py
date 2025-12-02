@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.9.15"
+APP_VERSION = "6.10.1"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2385,8 +2385,6 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        self.setCentralWidget(main_widget) # Temporary override or use splitter directly?
-        # Wait, previous code used self.setCentralWidget(self.splitter).
         
         self.splitter = QSplitter()
         self.splitter.setChildrenCollapsible(False)
@@ -2449,19 +2447,31 @@ class MainWindow(QMainWindow):
         self.tab_history = QWidget()
         history_layout = QVBoxLayout(self.tab_history)
         history_layout.setContentsMargins(4, 4, 4, 4)
+        
         self.table_history = QTableWidget(0, 2)
-        self.table_history.setHorizontalHeaderLabels(["Soubor", "Hash (SHA3-256)"])
-        self.table_history.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents) 
-        self.table_history.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        # Sloupce se nastaví v _refresh_history_table
         self.table_history.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_history.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table_history.setSortingEnabled(True)
         self.table_history.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_history.customContextMenuRequested.connect(self._on_history_context_menu)
         history_layout.addWidget(self.table_history)
+        
+        # Tlačítka historie
+        h_btns = QHBoxLayout()
         btn_refresh_hist = QPushButton("Obnovit historii")
         btn_refresh_hist.clicked.connect(self._refresh_history_table)
-        history_layout.addWidget(btn_refresh_hist)
+        
+        btn_clear_hist = QPushButton("Vymazat celou historii")
+        btn_clear_hist.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 4px 8px;")
+        btn_clear_hist.setToolTip("Smaže všechny záznamy z logu historie (soubory zůstanou)")
+        btn_clear_hist.clicked.connect(self._clear_all_history)
+        
+        h_btns.addWidget(btn_refresh_hist)
+        h_btns.addStretch()
+        h_btns.addWidget(btn_clear_hist)
+        
+        history_layout.addLayout(h_btns)
         self.left_tabs.addTab(self.tab_history, "Historie")
         
         self._init_funny_answers_tab()
@@ -2597,6 +2607,18 @@ class MainWindow(QMainWindow):
         
         self._refresh_history_table()
         
+        self.action_bold.triggered.connect(lambda: self._toggle_format("bold"))
+        self.action_italic.triggered.connect(lambda: self._toggle_format("italic"))
+        self.action_underline.triggered.connect(lambda: self._toggle_format("underline"))
+        self.action_color.triggered.connect(self._choose_color)
+        self.action_bullets.toggled.connect(self._toggle_bullets)
+        self.action_indent_inc.triggered.connect(lambda: self._change_indent(1))
+        self.action_indent_dec.triggered.connect(lambda: self._change_indent(-1))
+        self.action_align_left.triggered.connect(lambda: self._apply_alignment(Qt.AlignLeft))
+        self.action_align_center.triggered.connect(lambda: self._apply_alignment(Qt.AlignHCenter))
+        self.action_align_right.triggered.connect(lambda: self._apply_alignment(Qt.AlignRight))
+        self.action_align_justify.triggered.connect(lambda: self._apply_alignment(Qt.AlignJustify))
+
     def _on_tree_context_menu(self, pos: QPoint) -> None:
         """Kontextové menu stromu otázek (v6.7.2)."""
         item = self.tree.itemAt(pos)
@@ -2865,24 +2887,48 @@ class MainWindow(QMainWindow):
         menu.addAction(act_del)
         menu.exec(self.table_history.mapToGlobal(pos))
 
+    def _clear_all_history(self) -> None:
+        """Smaže celou historii exportů."""
+        history_file = self.project_root / "data" / "history.json"
+        if not history_file.exists():
+            return
+            
+        reply = QMessageBox.question(
+            self, 
+            "Vymazat historii", 
+            "Opravdu chcete nenávratně smazat CELOU historii exportů?\n\nTato akce neodstraní vygenerované soubory, pouze záznamy v logu.",
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                with open(history_file, "w", encoding="utf-8") as f:
+                    json.dump([], f)
+                self._refresh_history_table()
+                QMessageBox.information(self, "Hotovo", "Historie byla vymazána.")
+            except Exception as e:
+                QMessageBox.critical(self, "Chyba", f"Nepodařilo se smazat historii:\n{e}")
+
+
     def _delete_history_items(self) -> None:
         """Smaže vybrané záznamy z historie."""
-        # Získáme unikátní řádky
         rows = sorted(set(index.row() for index in self.table_history.selectedIndexes()), reverse=True)
         if not rows:
             return
 
         if QMessageBox.question(self, "Smazat", f"Opravdu smazat {len(rows)} záznamů z historie?") != QMessageBox.Yes:
             return
-
-        # Musíme smazat data z JSONu.
-        # Protože tabulka může být seřazená jinak než JSON, musíme identifikovat záznamy podle obsahu (filename + hash).
-        # Nebo jednodušeji: Načteme JSON, odstraníme ty, co odpovídají vybraným řádkům.
         
-        to_remove = [] # List of (filename, hash)
+        # Získání identifikátorů (Filename na indexu 1, Hash na indexu 2)
+        to_remove = [] 
         for r in rows:
-            fn = self.table_history.item(r, 0).text()
-            h = self.table_history.item(r, 1).text()
+            # UPDATE: Indexy posunuty kvůli sloupci "TYP"
+            fn = self.table_history.item(r, 1).text() 
+            h = self.table_history.item(r, 2).toolTip() # Hash bereme z tooltipu, protože v textu může být zkrácený ("abcd...1234")!
+            # Fallback pokud tooltip není (což by měl být)
+            if not h: h = self.table_history.item(r, 2).text()
+            
             to_remove.append((fn, h))
 
         history_file = self.project_root / "data" / "history.json"
@@ -2894,14 +2940,32 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # Filtrace (ponecháme ty, co nejsou v to_remove)
+        # Filtrace
         new_history = []
         for entry in history:
             match = False
             for r_fn, r_h in to_remove:
-                if entry.get("filename") == r_fn and entry.get("hash") == r_h:
+                # Porovnání: Hash musí sedět přesně.
+                # Filename: U balíků jsme v tabulce zobrazili "clean_fn" (bez "Balík X verzí: "), ale v JSONu je "raw_fn".
+                # Musíme porovnat chytřeji.
+                # Hash je unikátní identifikátor (pro daný export). 
+                # Pokud máme hash, stačí hash. Pokud ne (starší záznamy?), musíme řešit filename.
+                
+                json_h = entry.get("hash", "")
+                json_fn = entry.get("filename", "")
+                
+                # Pokud hash v JSONu existuje a sedí, je to shoda.
+                if json_h and r_h and json_h == r_h:
                     match = True
                     break
+                
+                # Fallback: Pokud hash není, zkusíme filename (obsahuje)
+                # V tabulce máme "soubor.docx", v jsonu "Balík X: soubor.docx"
+                # Zkusíme: json_fn.endswith(r_fn)
+                if not json_h and r_fn and r_fn in json_fn:
+                    match = True
+                    break
+                    
             if not match:
                 new_history.append(entry)
         
@@ -2913,6 +2977,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Chyba", f"Nelze uložit historii:\n{e}")
 
         self._refresh_history_table()
+
 
     def _init_funny_answers_tab(self):
         """Inicializuje záložku 'Hall of Shame' s detailním náhledem."""
