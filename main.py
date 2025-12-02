@@ -83,7 +83,7 @@ from PySide6.QtWidgets import (
     # Nové importy pro v4.0 UI
     QGroupBox,
     QTableWidget,
-    QTableWidgetItem,
+    QTableWidgetItem, QFrame,
     QHeaderView, QCheckBox, QGridLayout,
     QTreeWidgetItemIterator, QButtonGroup,
     QHeaderView, QMenu, QTabWidget, QRadioButton,
@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.8.11"
+APP_VERSION = "6.9.0"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2305,6 +2305,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Otázka byla duplikována.", 3000)
 
     def _build_ui(self) -> None:
+        # Hlavní container
+        main_widget = QWidget()
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        self.setCentralWidget(main_widget) # Temporary override or use splitter directly?
+        # Wait, previous code used self.setCentralWidget(self.splitter).
+        
         self.splitter = QSplitter()
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(8)
@@ -2320,6 +2328,7 @@ class MainWindow(QMainWindow):
         questions_layout = QVBoxLayout(self.tab_questions)
         questions_layout.setContentsMargins(4, 4, 4, 4)
         questions_layout.setSpacing(6)
+        
         filter_bar = QWidget()
         filter_layout = QHBoxLayout(filter_bar)
         filter_layout.setContentsMargins(0, 0, 0, 0)
@@ -2332,11 +2341,33 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.btn_move_selected)
         filter_layout.addWidget(self.btn_delete_selected)
         questions_layout.addWidget(filter_bar)
+        
         self.tree = DnDTree(self)
-        # NOVÉ: Kontextové menu
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         questions_layout.addWidget(self.tree, 1)
+        
+        # Legenda barev
+        legend_box = QFrame()
+        legend_box.setStyleSheet("background-color: #2d2d2d; border-radius: 4px;")
+        legend_layout = QHBoxLayout(legend_box)
+        legend_layout.setContentsMargins(8, 4, 8, 4)
+        legend_layout.setSpacing(15)
+        
+        def add_legend_item(text, color_hex):
+            lbl = QLabel(f"<span style='color:{color_hex}; font-size:14px;'>■</span> <span style='color:#cccccc;'>{text}</span>")
+            lbl.setTextFormat(Qt.RichText)
+            lbl.setStyleSheet("border: none; background: transparent;")
+            legend_layout.addWidget(lbl)
+            
+        add_legend_item("Skupina", "#ff5252")
+        add_legend_item("Podskupina", "#ff8a80")
+        add_legend_item("Klasická", "#42a5f5")
+        add_legend_item("BONUS", "#ffea00")
+        legend_layout.addStretch()
+        
+        questions_layout.addWidget(legend_box)
+        
         self.left_tabs.addTab(self.tab_questions, "Otázky")
 
         # ZÁLOŽKA 2: HISTORIE
@@ -2361,13 +2392,12 @@ class MainWindow(QMainWindow):
         self._init_funny_answers_tab()
         left_container_layout.addWidget(self.left_tabs)
 
-        # PRAVÝ PANEL (Detail / Editor)
+        # PRAVÝ PANEL
         self.detail_stack = QWidget()
         self.detail_layout = QVBoxLayout(self.detail_stack)
         self.detail_layout.setContentsMargins(6, 6, 6, 6)
         self.detail_layout.setSpacing(8)
 
-        # Toolbar
         self.editor_toolbar = QToolBar("Formát")
         self.editor_toolbar.setIconSize(QSize(18, 18))
         self.action_bold = QAction("Tučné", self); self.action_bold.setCheckable(True); self.action_bold.setShortcut(QKeySequence.Bold)
@@ -2400,7 +2430,6 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.addAction(self.action_align_right)
         self.editor_toolbar.addAction(self.action_align_justify)
 
-        # Horní formulář (Název, Typ, Body)
         self.form_layout = QFormLayout()
         self.form_layout.setLabelAlignment(Qt.AlignLeft)
         self.title_edit = QLineEdit()
@@ -2416,12 +2445,10 @@ class MainWindow(QMainWindow):
         self.form_layout.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
         self.form_layout.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
 
-        # Správná odpověď (přesunuto dolů, definice zůstává zde)
         self.edit_correct_answer = QTextEdit()
         self.edit_correct_answer.setPlaceholderText("Volitelný text správné odpovědi...")
         self.edit_correct_answer.setFixedHeight(60)
         
-        # Vtipné odpovědi (přesunuto dolů, definice zůstává zde)
         self.funny_container = QWidget()
         fc_layout = QVBoxLayout(self.funny_container)
         fc_layout.setContentsMargins(0,0,0,0)
@@ -2442,7 +2469,6 @@ class MainWindow(QMainWindow):
         fc_layout.addLayout(btns_layout)
         fc_layout.addWidget(self.table_funny)
 
-        # Obsah otázky (Text Edit)
         self.text_edit = QTextEdit()
         self.text_edit.setAcceptRichText(True)
         self.text_edit.setPlaceholderText("Sem napište znění otázky…\nPodporováno: tučné, kurzíva, podtržení, barva, odrážky, zarovnání.")
@@ -2457,26 +2483,17 @@ class MainWindow(QMainWindow):
         rename_layout.addRow("Název:", self.rename_line)
         rename_layout.addRow(self.btn_rename)
 
-        # SKLÁDÁNÍ LAYOUTU
         self.detail_layout.addWidget(self.editor_toolbar)
         self.detail_layout.addLayout(self.form_layout)
-        
-        # 1. Obsah otázky (uložíme label do self pro skrývání)
         self.lbl_content = QLabel("<b>Obsah otázky:</b>")
         self.detail_layout.addWidget(self.lbl_content)
         self.detail_layout.addWidget(self.text_edit, 1) 
-        
-        # 2. Správná odpověď
         self.lbl_correct = QLabel("<b>Správná odpověď:</b>")
         self.detail_layout.addWidget(self.lbl_correct)
         self.detail_layout.addWidget(self.edit_correct_answer)
-        
-        # 3. Vtipné odpovědi
         self.lbl_funny = QLabel("<b>Vtipné odpovědi:</b>")
         self.detail_layout.addWidget(self.lbl_funny)
         self.detail_layout.addWidget(self.funny_container)
-        
-        # Tlačítko uložit
         self.detail_layout.addWidget(self.btn_save_question)
         self.detail_layout.addWidget(self.rename_panel)
 
@@ -2486,7 +2503,6 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(1, 1)
         self.setCentralWidget(self.splitter)
 
-        # Toolbar aplikace
         tb = self.addToolBar("Hlavní")
         tb.setIconSize(QSize(18, 18))
         self.act_add_group = QAction("Přidat skupinu", self)
