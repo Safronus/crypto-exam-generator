@@ -48,7 +48,7 @@ from PySide6.QtGui import (
     QTextBlockFormat,
     QColor,
     QPalette,
-    QFont,
+    QFont, QPen, 
     QPixmap, QPainter, QIcon, QBrush, QPainterPath
 )
 from PySide6.QtWidgets import (
@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.9.13"
+APP_VERSION = "6.9.15"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2710,6 +2710,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_history_table(self) -> None:
         """Načte historii exportů a zobrazí ji ve stylu 'Hall of Shame' / System Log."""
+        import re
+        
         history_file = self.project_root / "data" / "history.json"
         history = []
         if history_file.exists():
@@ -2741,34 +2743,59 @@ class MainWindow(QMainWindow):
         self.table_history.setShowGrid(False)
         self.table_history.setAlternatingRowColors(True)
         
-        self.table_history.setColumnCount(3)
-        self.table_history.setHorizontalHeaderLabels(["CÍLOVÝ SOUBOR", "DIGITÁLNÍ OTISK (HASH)", "ČASOVÁ STOPA"])
+        self.table_history.setColumnCount(4)
+        self.table_history.setHorizontalHeaderLabels(["TYP", "CÍLOVÝ SOUBOR", "DIGITÁLNÍ OTISK (HASH)", "ČASOVÁ STOPA"])
         
         header = self.table_history.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        
-        # Nastavíme šířku sloupce hash tak, aby se tam vešlo 12+3+12 znaků
-        # (Cca 200px, záleží na fontu, ale Interactive umožní uživateli změnu)
-        self.table_history.setColumnWidth(1, 220)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table_history.setColumnWidth(2, 220)
 
         self.table_history.setRowCount(0)
         self.table_history.setSortingEnabled(False)
         
         font_mono = QFont("Courier New")
         font_mono.setStyleHint(QFont.Monospace)
+        font_bold = QFont("Courier New"); font_bold.setBold(True)
         
-        font_bold = QFont("Courier New")
-        font_bold.setBold(True)
-        
+        # Helper: Ikona balíku (Stack)
+        def get_stack_icon(color):
+            pix = QPixmap(24, 24)
+            pix.fill(Qt.transparent)
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(QPen(QColor(30, 30, 30), 1)) # Dark border
+            p.setBrush(color)
+            
+            # 3 dokumenty za sebou
+            # Bottom
+            p.drawRect(4, 4, 14, 16)
+            # Middle
+            p.drawRect(6, 6, 14, 16)
+            # Top
+            p.drawRect(8, 8, 14, 16)
+            p.end()
+            return QIcon(pix)
+
         for entry in history:
             row = self.table_history.rowCount()
             self.table_history.insertRow(row)
             
-            fn = entry.get("filename", "Neznámý soubor")
+            raw_fn = entry.get("filename", "Neznámý soubor")
             h = entry.get("hash", "---")
             raw_date = entry.get("date", "")
+            
+            match = re.match(r"Balík (\d+) verzí: (.+)", raw_fn)
+            if match:
+                count = int(match.group(1))
+                clean_fn = match.group(2)
+                is_multi = True
+            else:
+                count = 1
+                clean_fn = raw_fn
+                is_multi = False
             
             date_str = raw_date
             try:
@@ -2777,38 +2804,54 @@ class MainWindow(QMainWindow):
                     date_str = dt.strftime("%Y-%m-%d %H:%M")
             except: pass
 
-            # 1. SOUBOR
-            item_fn = QTableWidgetItem(fn)
+            # 1. TYP (Ikona + Počet)
+            if is_multi:
+                icon = get_stack_icon(QColor("#ff9800")) # Oranžový balík
+                text_type = f"{count:02d}x" # Zero pad
+                color_type = QColor("#ff9800")
+            else:
+                icon = self.style().standardIcon(QStyle.SP_FileIcon)
+                text_type = "01x"
+                color_type = QColor("#9e9e9e")
+
+            item_type = QTableWidgetItem(text_type)
+            item_type.setIcon(icon)
+            item_type.setForeground(QBrush(color_type))
+            item_type.setFont(font_bold)
+            item_type.setTextAlignment(Qt.AlignCenter)
+            item_type.setFlags(item_type.flags() ^ Qt.ItemIsEditable)
+            self.table_history.setItem(row, 0, item_type)
+
+            # 2. SOUBOR
+            item_fn = QTableWidgetItem(clean_fn)
             item_fn.setForeground(QBrush(QColor("#80d8ff")))
             item_fn.setFont(font_bold)
             item_fn.setFlags(item_fn.flags() ^ Qt.ItemIsEditable)
-            self.table_history.setItem(row, 0, item_fn)
+            self.table_history.setItem(row, 1, item_fn)
             
-            # 2. HASH (12...12, Center)
+            # 3. HASH
             if len(h) > 24:
                 display_hash = f"{h[:12]}...{h[-12:]}"
             else:
                 display_hash = h
-                
             item_hash = QTableWidgetItem(display_hash)
             item_hash.setForeground(QBrush(QColor("#ff5252")))
             item_hash.setFont(font_mono)
-            item_hash.setTextAlignment(Qt.AlignCenter) # Zarovnání na střed
+            item_hash.setTextAlignment(Qt.AlignCenter)
             item_hash.setToolTip(h)
             item_hash.setFlags(item_hash.flags() ^ Qt.ItemIsEditable)
-            self.table_history.setItem(row, 1, item_hash)
+            self.table_history.setItem(row, 2, item_hash)
 
-            # 3. DATUM
+            # 4. DATUM
             item_date = QTableWidgetItem(f"{date_str}")
             item_date.setForeground(QBrush(QColor("#757575")))
             item_date.setFont(font_mono)
             item_date.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             item_date.setFlags(item_date.flags() ^ Qt.ItemIsEditable)
-            self.table_history.setItem(row, 2, item_date)
+            self.table_history.setItem(row, 3, item_date)
             
         self.table_history.setSortingEnabled(True)
-        self.table_history.sortItems(0, Qt.AscendingOrder)
-
+        self.table_history.sortItems(1, Qt.AscendingOrder)
 
     def _on_history_context_menu(self, pos) -> None:
         """Zobrazí kontextové menu pro tabulku historie."""
