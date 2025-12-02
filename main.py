@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.9.1"
+APP_VERSION = "6.9.2"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -3376,7 +3376,6 @@ class MainWindow(QMainWindow):
             item.setForeground(1, QBrush(color_classic_bg))
             f = item.font(0); f.setBold(False); item.setFont(0, f)
 
-
     def _refresh_tree(self) -> None:
         """Obnoví strom otázek podle self.root."""
         self.tree.clear()
@@ -3385,15 +3384,15 @@ class MainWindow(QMainWindow):
 
         sorted_groups = sorted(self.root.groups, key=lambda g: g.name.lower())
         
-        # Barva Skupiny: Červená (Red A200 - výrazná, čitelná na tmavém)
         color_group = QBrush(QColor("#ff5252")) 
+        # Ikona Skupiny: Červený čtverec s "S"
+        icon_group = self._generate_icon("S", QColor("#ff5252"), "rect")
 
         for g in sorted_groups:
             g_item = QTreeWidgetItem([g.name, ""])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
-            g_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+            g_item.setIcon(0, icon_group)
             
-            # Styl
             g_item.setForeground(0, color_group)
             g_item.setForeground(1, color_group)
             f = g_item.font(0); f.setBold(True); f.setPointSize(13); g_item.setFont(0, f)
@@ -3406,8 +3405,9 @@ class MainWindow(QMainWindow):
                 self._add_subgroups_to_item(g_item, g.id, sorted_subgroups)
 
     def _add_subgroups_to_item(self, parent_item: QTreeWidgetItem, group_id: str, subgroups: List[Subgroup]) -> None:
-        # Barva Podskupiny: Světlejší červená / Karmínová (Red A100)
         color_subgroup = QBrush(QColor("#ff8a80"))
+        # Ikona Podskupiny: Světle červený kruh/čtverec s "P"
+        icon_subgroup = self._generate_icon("P", QColor("#ff8a80"), "rect")
 
         for sg in subgroups:
             parent_meta = parent_item.data(0, Qt.UserRole) or {}
@@ -3420,9 +3420,8 @@ class MainWindow(QMainWindow):
                 "parent_group_id": group_id, 
                 "parent_subgroup_id": parent_sub_id
             })
-            sg_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirOpenIcon))
+            sg_item.setIcon(0, icon_subgroup)
             
-            # Styl
             sg_item.setForeground(0, color_subgroup)
             sg_item.setForeground(1, color_subgroup)
             f = sg_item.font(0); f.setBold(True); sg_item.setFont(0, f)
