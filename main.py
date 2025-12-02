@@ -2482,6 +2482,42 @@ class MainWindow(QMainWindow):
 
         self.editor_toolbar = QToolBar("Formát")
         self.editor_toolbar.setIconSize(QSize(18, 18))
+        
+        # --- PŘIDAT TENTO BLOK PRO LEPŠÍ VZHLED ---
+        self.editor_toolbar.setStyleSheet("""
+            QToolBar {
+                border-bottom: 1px solid #3e3e3e;
+                background-color: #2d2d2d;
+                spacing: 4px; /* Mezera mezi tlačítky */
+            }
+            QToolButton {
+                background-color: #383838; /* Jemné šedé pozadí */
+                border: 1px solid #505050; /* Viditelný okraj */
+                border-radius: 3px;
+                padding: 2px 4px;
+                color: #e0e0e0;
+            }
+            QToolButton:checked {
+                background-color: #4a90e2; /* Výrazná barva pro aktivní stav (B/I/U) */
+                border-color: #4a90e2;
+                color: white;
+            }
+            QToolButton:hover {
+                background-color: #454545;
+                border-color: #707070;
+            }
+            QToolButton:pressed {
+                background-color: #252525;
+            }
+            /* Separátor */
+            QToolBar::separator {
+                background: #555;
+                width: 1px;
+                margin: 4px 4px;
+            }
+        """)
+        # ------------------------------------------
+
         self.action_bold = QAction("Tučné", self); self.action_bold.setCheckable(True); self.action_bold.setShortcut(QKeySequence.Bold)
         self.action_italic = QAction("Kurzíva", self); self.action_italic.setCheckable(True); self.action_italic.setShortcut(QKeySequence.Italic)
         self.action_underline = QAction("Podtržení", self); self.action_underline.setCheckable(True); self.action_underline.setShortcut(QKeySequence.Underline)
