@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.9.8"
+APP_VERSION = "6.9.9"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -4814,17 +4814,46 @@ class MainWindow(QMainWindow):
 
     def _generate_docx_from_template(self, template_path: Path, output_path: Path,
                                      simple_repl: Dict[str, str], rich_repl_html: Dict[str, str]) -> None:
+        
         try:
             doc = docx.Document(template_path)
         except Exception as e:
             QMessageBox.critical(self, "Export chyba", f"Nelze otevřít šablonu pomocí python-docx:\n{e}")
             return
 
-        # Helper function updated to accept style info
-        def insert_rich_question_block(paragraph, html_content, base_style=None, base_font=None):
+        # -- HELPER: Extrakce a obnova Page Breaks --
+        def extract_page_breaks(paragraph):
+            """Extrahuje <w:br w:type="page"/> elementy z odstavce."""
+            from lxml import etree
+            breaks = []
+            p_elem = paragraph._p
+            for run_elem in p_elem.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}r'):
+                for br_elem in run_elem.findall('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}br'):
+                    if br_elem.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type') == 'page':
+                        breaks.append(br_elem)
+            return breaks
+        
+        def restore_page_breaks(paragraph, breaks):
+            """Vrací page breaky na konec odstavce (nebo na libovolné místo v XML)."""
+            if not breaks:
+                return
+            p_elem = paragraph._p
+            # Vytvoříme run a vložíme breaky
+            from docx.oxml import OxmlElement
+            new_run = OxmlElement('w:r')
+            for br in breaks:
+                # Klonujeme break element
+                br_copy = br.__copy__()
+                new_run.append(br_copy)
+            p_elem.append(new_run)
+
+        def insert_rich_question_block(paragraph, html_content):
             paras_data = parse_html_to_paragraphs(html_content)
             if not paras_data: 
+                # Zachovej page breaky i při čistění
+                breaks = extract_page_breaks(paragraph)
                 paragraph.clear()
+                restore_page_breaks(paragraph, breaks)
                 return
             
             p_insert = paragraph._p
@@ -4832,61 +4861,42 @@ class MainWindow(QMainWindow):
             for i, p_data in enumerate(paras_data):
                 if i == 0:
                     new_p = paragraph
+                    # Zachovej page breaky
+                    breaks = extract_page_breaks(new_p)
                     new_p.clear()
-                    # Restore base style for the first paragraph (reused)
-                    if base_style: new_p.style = base_style
-                else:
-                    # Create new paragraph
-                    new_p = doc.add_paragraph()
-                    # Apply base style from template
-                    if base_style: new_p.style = base_style
                     
+                    # Vložíme obsah a pak breaky
+                    # (Obsah bude vložen v process_paragraph, zde jen čistíme)
+                    restore_page_breaks(new_p, breaks)
+                else:
+                    new_p = doc.add_paragraph()
                     p_insert.addnext(new_p._p)
                     p_insert = new_p._p
 
-                # Apply formatting from HTML
+                # -- ZAROVNÁNÍ --
                 align = p_data.get('align', 'left')
                 if align == 'center': new_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 elif align == 'right': new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                 elif align == 'justify': new_p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 else: new_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 
+                # -- MEZEROVÁNÍ (Spacing) --
                 new_p.paragraph_format.space_before = Pt(0)
                 new_p.paragraph_format.space_after = Pt(0)
 
-                indent_lvl = p_data.get('indent', 0)
-                
+                # Prefix
                 if p_data.get('prefix'):
-                    # Seznam
-                    base_indent_pt = 36
-                    level_indent = indent_lvl * 36
-                    new_p.paragraph_format.left_indent = Pt(base_indent_pt + level_indent)
-                    new_p.paragraph_format.first_line_indent = Pt(-18)
-                    
-                    # Prefix run (bullet/number) - inherits font too
-                    r_prefix = new_p.add_run(p_data['prefix'])
-                    if base_font:
-                        if base_font.get('name'): r_prefix.font.name = base_font['name']
-                        if base_font.get('size'): r_prefix.font.size = base_font['size']
-                else:
-                    # Běžný odstavec
-                    if indent_lvl > 0:
-                        new_p.paragraph_format.left_indent = Pt(indent_lvl * 36)
-
+                    new_p.paragraph_format.left_indent = Pt(48)
+                    new_p.paragraph_format.first_line_indent = Pt(-24)
+                    new_p.add_run(p_data['prefix'])
+                
+                # Runs
                 for r_data in p_data['runs']:
                     text_content = r_data['text']
                     parts = text_content.split('\n')
                     for idx, part in enumerate(parts):
                         if part:
                             run = new_p.add_run(part)
-                            # 1. Apply base font from template (if exists)
-                            if base_font:
-                                if base_font.get('name'): run.font.name = base_font['name']
-                                if base_font.get('size'): run.font.size = base_font['size']
-                                # We don't enforce bold/italic from template if HTML has its own, 
-                                # but we could use it as fallback. Here we prioritize HTML format.
-
-                            # 2. Apply HTML format overrides
                             if r_data.get('b'): run.bold = True
                             if r_data.get('i'): run.italic = True
                             if r_data.get('u'): run.underline = True
@@ -4900,26 +4910,13 @@ class MainWindow(QMainWindow):
                             run = new_p.add_run()
                             run.add_break()
 
+
+        # -- Helper: Zpracování jednoho odstavce (Inline i Block) --
         def process_paragraph(p):
             full_text = p.text
             if not full_text.strip(): return
 
-            # Extract Base Style & Font BEFORE modification
-            base_style = p.style
-            base_font = {}
-            if p.runs:
-                # Use the first run as reference for font properties
-                r0 = p.runs[0]
-                base_font = {
-                    'name': r0.font.name,
-                    'size': r0.font.size,
-                    'bold': r0.bold,
-                    'italic': r0.italic,
-                    'underline': r0.underline,
-                    'color': r0.font.color.rgb if r0.font.color else None
-                }
-
-            # 1. Rich Check (Block Replacement)
+            # 1. BLOCK CHECK
             txt_clean = full_text.strip()
             matched_rich = None
             for ph, html in rich_repl_html.items():
@@ -4928,49 +4925,32 @@ class MainWindow(QMainWindow):
                     break
             
             if matched_rich:
-                # Pass style info to insertion function
-                insert_rich_question_block(p, matched_rich[1], base_style=base_style, base_font=base_font)
+                insert_rich_question_block(p, matched_rich[1])
                 return
 
-            # 2. Inline Check
+            # 2. INLINE CHECK
             keys_found = []
             for k in simple_repl.keys():
-                if f"<{k}>" in full_text or f"{{{k}}}" in full_text: keys_found.append(k)
+                if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
+                    keys_found.append(k)
             for k in rich_repl_html.keys():
-                if f"<{k}>" in full_text or f"{{{k}}}" in full_text: keys_found.append(k)
+                if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
+                    keys_found.append(k)
             
-            if not keys_found: return
+            if not keys_found:
+                return
 
-            has_rich_key = any(k in rich_repl_html for k in keys_found)
-
-            # Safe Replacement (Simple)
-            if not has_rich_key:
-                replacements_done = 0
-                for run in p.runs:
-                    t = run.text
-                    original_t = t
-                    for k in keys_found:
-                        if k in simple_repl:
-                            val = str(simple_repl[k])
-                            t = t.replace(f"<{k}>", val).replace(f"{{{k}}}", val)
-                    if t != original_t:
-                        run.text = t
-                        replacements_done += 1
-                
-                final_text = p.text
-                still_has_keys = any((f"<{k}>" in final_text or f"{{{k}}}" in final_text) for k in keys_found)
-                if replacements_done > 0 and not still_has_keys:
-                    return 
-
-            # Fallback Reconstruction (Rich/Complex)
             segments = [full_text]
             all_repl_data = {}
-            for k, v in simple_repl.items(): all_repl_data[k] = {'type': 'simple', 'val': v}
-            for k, html in rich_repl_html.items(): all_repl_data[k] = {'type': 'rich', 'val': html}
+            for k, v in simple_repl.items(): 
+                all_repl_data[k] = {'type': 'simple', 'val': v}
+            for k, html in rich_repl_html.items(): 
+                all_repl_data[k] = {'type': 'rich', 'val': html}
             
             for k in keys_found:
                 info = all_repl_data[k]
                 tokens = [f"<{k}>", f"{{{k}}}"]
+                
                 for token in tokens:
                     new_segments = []
                     for seg in segments:
@@ -4978,47 +4958,57 @@ class MainWindow(QMainWindow):
                             parts = seg.split(token)
                             for i, part in enumerate(parts):
                                 if part: new_segments.append(part)
-                                if i < len(parts) - 1: new_segments.append(info)
+                                if i < len(parts) - 1:
+                                    new_segments.append(info)
                         else:
                             new_segments.append(seg)
                     segments = new_segments
 
-            # For inline reconstruction, we rely on base_font captured earlier
+            # -- APLIKACE ZMĚN + ZACHOVÁNÍ PAGE BREAKS --
+            base_font_name = None
+            base_font_size = None
+            base_bold = None
+            
+            if p.runs:
+                r0 = p.runs[0]
+                base_font_name = r0.font.name
+                base_font_size = r0.font.size
+                base_bold = r0.bold
+
+            # Zachovej page breaky PŘED clear
+            page_breaks = extract_page_breaks(p)
+            
             p.clear()
             
+            # Vložíme segmenty
             for seg in segments:
                 if isinstance(seg, str):
                     run = p.add_run(seg)
-                    # Apply base font
-                    if base_font.get('name'): run.font.name = base_font['name']
-                    if base_font.get('size'): run.font.size = base_font['size']
-                    run.bold = base_font.get('bold')
-                    run.italic = base_font.get('italic')
+                    if base_font_name: run.font.name = base_font_name
+                    if base_font_size: run.font.size = base_font_size
                     
                 elif isinstance(seg, dict):
                     val = seg['val']
                     if seg['type'] == 'simple':
                         run = p.add_run(val)
-                        # Inherit base font
-                        if base_font.get('name'): run.font.name = base_font['name']
-                        if base_font.get('size'): run.font.size = base_font['size']
-                        run.bold = base_font.get('bold')
-                        run.italic = base_font.get('italic')
-                        run.underline = base_font.get('underline')
-                        if base_font.get('color'): run.font.color.rgb = base_font['color']
+                        if base_font_name: run.font.name = base_font_name
+                        if base_font_size: run.font.size = base_font_size
+                        if base_bold is not None: run.bold = base_bold
                         
                     elif seg['type'] == 'rich':
-                        # Inline rich text
                         paras = parse_html_to_paragraphs(val)
+                        
                         for p_idx, p_data in enumerate(paras):
-                            if p_idx > 0: p.add_run().add_break()
+                            if p_idx > 0:
+                                run_break = p.add_run()
+                                run_break.add_break()
+                            
                             for r_data in p_data['runs']:
                                 text_content = r_data['text']
                                 parts = text_content.split('\n')
                                 for idx_part, part in enumerate(parts):
                                     if part:
                                         run = p.add_run(part)
-                                        # Apply formatting
                                         if r_data.get('b'): run.bold = True
                                         if r_data.get('i'): run.italic = True
                                         if r_data.get('u'): run.underline = True
@@ -5028,17 +5018,28 @@ class MainWindow(QMainWindow):
                                                 run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
                                             except: pass
                                         
-                                        # Fallback to base font if not overridden
-                                        if not r_data.get('b') and base_font.get('name'): run.font.name = base_font['name']
-                                        if not r_data.get('b') and base_font.get('size'): run.font.size = base_font['size']
-                                        
-                                    if idx_part < len(parts) - 1: p.add_run().add_break()
+                                        if base_font_name: run.font.name = base_font_name
+                                        if base_font_size: run.font.size = base_font_size
+                                    
+                                    if idx_part < len(parts) - 1:
+                                        p.add_run().add_break()
+            
+            # Obnovíme page breaky NA KONCI odstavce
+            restore_page_breaks(p, page_breaks)
 
-        for p in doc.paragraphs: process_paragraph(p)
+
+        # 1. Body
+        for p in doc.paragraphs:
+            process_paragraph(p)
+            
+        # 2. Tables in Body
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    for p in cell.paragraphs: process_paragraph(p)
+                    for p in cell.paragraphs:
+                        process_paragraph(p)
+        
+        # 3. Headers / Footers
         for section in doc.sections:
             for h in [section.header, section.first_page_header]:
                 if h:
@@ -5059,7 +5060,6 @@ class MainWindow(QMainWindow):
             doc.save(output_path)
         except Exception as e:
             QMessageBox.critical(self, "Chyba uložení", f"Nelze uložit DOCX:\n{e}")
-
 
     # -------------------- Pomocné --------------------
 
