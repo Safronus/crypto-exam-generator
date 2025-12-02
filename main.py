@@ -47,7 +47,7 @@ from PySide6.QtGui import (
     QTextListFormat,
     QTextBlockFormat,
     QColor,
-    QPalette,
+    QPalette, QTextDocument,
     QFont, QPen, 
     QPixmap, QPainter, QIcon, QBrush, QPainterPath
 )
@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.10.1"
+APP_VERSION = "6.11.7"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -2978,55 +2978,55 @@ class MainWindow(QMainWindow):
 
         self._refresh_history_table()
 
-
-    def _init_funny_answers_tab(self):
-        """Inicializuje záložku 'Hall of Shame' s detailním náhledem."""
+    def _init_funny_answers_tab(self) -> None:
+        """Inicializuje záložku s přehledem vtipných odpovědí."""
         self.tab_funny = QWidget()
         layout = QVBoxLayout(self.tab_funny)
         layout.setContentsMargins(4, 4, 4, 4)
-        
-        # Filtr a tlačítka
-        top_bar = QHBoxLayout()
-        self.le_funny_filter = QLineEdit()
-        self.le_funny_filter.setPlaceholderText("Hledat v odpovědích...")
-        self.le_funny_filter.textChanged.connect(self._filter_funny_answers)
-        
-        btn_refresh = QPushButton("Obnovit")
-        btn_refresh.clicked.connect(self._refresh_funny_answers_tab)
-        
-        top_bar.addWidget(self.le_funny_filter)
-        top_bar.addWidget(btn_refresh)
-        layout.addLayout(top_bar)
-        
-        # Splitter pro Strom a Detail
-        splitter = QSplitter(Qt.Vertical)
-        
-        # Strom odpovědí (TreeWidget)
+
         self.tree_funny = QTreeWidget()
-        self.tree_funny.setHeaderLabels(["Odpověď / Otázka", "Datum", "Jméno", "Zdroj"])
-        self.tree_funny.setColumnWidth(0, 400)
-        self.tree_funny.itemSelectionChanged.connect(self._on_funny_tree_select) # Signál výběru
         
-        splitter.addWidget(self.tree_funny)
+        # -- STYLIZACE "HALL OF SHAME" --
+        self.tree_funny.setStyleSheet("""
+            QTreeWidget {
+                background-color: #121212;
+                color: #e0e0e0;
+                border: 1px solid #333;
+                font-family: 'Consolas', 'Monospace', 'Courier New';
+            }
+            QHeaderView::section {
+                background-color: #1e1e1e;
+                color: #9e9e9e;
+                padding: 4px;
+                border: 1px solid #333;
+                font-weight: bold;
+            }
+            QTreeWidget::item:hover {
+                background-color: #1e1e1e;
+            }
+        """)
         
-        # Detail odpovědi
-        detail_container = QWidget()
-        detail_layout = QVBoxLayout(detail_container)
-        detail_layout.setContentsMargins(0, 0, 0, 0)
-        detail_layout.addWidget(QLabel("<b>Celé znění odpovědi:</b>"))
+        self.tree_funny.setColumnCount(4)
+        self.tree_funny.setHeaderLabels(["OTÁZKA / ODPOVĚĎ (HŘÍCH)", "DATUM", "PACHATEL", "ZDROJ"])
+        self.tree_funny.setRootIsDecorated(True)
+        self.tree_funny.setIndentation(18)
+        self.tree_funny.setUniformRowHeights(True)
+        self.tree_funny.setAlternatingRowColors(False)
+
+        header = self.tree_funny.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+
+        self.tree_funny.setSelectionMode(QAbstractItemView.NoSelection)
+        self.tree_funny.setFocusPolicy(Qt.NoFocus)
+
+        layout.addWidget(self.tree_funny)
+        self.left_tabs.addTab(self.tab_funny, "Hall of Shame - legendární odpovědi")
         
-        self.text_funny_detail = QTextEdit()
-        self.text_funny_detail.setReadOnly(True)
-        self.text_funny_detail.setPlaceholderText("Vyberte odpověď pro zobrazení detailu...")
-        detail_layout.addWidget(self.text_funny_detail)
-        
-        splitter.addWidget(detail_container)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        
-        layout.addWidget(splitter)
-        
-        self.left_tabs.addTab(self.tab_funny, "Hall of Shame")
+        # DŮLEŽITÉ: Načíst data ihned po inicializaci
+        self._refresh_funny_answers_tab()
 
     def _on_funny_tree_select(self):
         """Zobrazí detail vybrané vtipné odpovědi ze stromu."""
@@ -3086,107 +3086,85 @@ class MainWindow(QMainWindow):
             return
 
         self.tree_funny.clear()
-        self.text_funny_detail.clear()
 
         root = getattr(self, "root", None)
         if root is None or not root.groups:
             return
+        
+        from pathlib import Path
 
-        question_brush = QBrush(QColor("white"))
+        font_mono = QFont("Courier New"); font_mono.setStyleHint(QFont.Monospace)
+        font_bold = QFont("Courier New"); font_bold.setBold(True)
+        
+        color_q_text = QBrush(QColor("#ff9800")) 
+        color_ans_text = QBrush(QColor("#80d8ff")) 
+        color_name = QBrush(QColor("#ff5252")) 
+        color_date = QBrush(QColor("#757575")) 
+        color_source = QBrush(QColor("#9e9e9e"))
+        
+        icon_q = self.style().standardIcon(QStyle.SP_MessageBoxInformation)
 
-        pix = QPixmap(16, 16)
-        pix.fill(Qt.transparent)
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor("teal"))
-        painter.setPen(Qt.NoPen)
-        painter.drawEllipse(1, 1, 14, 14)
-        painter.setPen(QColor("white"))
-        font = painter.font()
-        font.setBold(True)
-        font.setPointSize(10)
-        painter.setFont(font)
-        painter.drawText(pix.rect(), Qt.AlignCenter, "?")
-        painter.end()
-        question_icon = QIcon(pix)
-
-        all_questions = []
-
-        def collect_questions(subgroups: List[Subgroup]) -> None:
+        questions_with_funny = []
+        
+        def collect_questions_recursive(subgroups):
             for sg in subgroups:
                 for q in sg.questions:
-                    f_list = getattr(q, "funny_answers", []) or []
-                    if f_list:
-                        all_questions.append(q)
-                collect_questions(sg.subgroups)
+                    if hasattr(q, "funny_answers") and q.funny_answers:
+                        questions_with_funny.append(q)
+                if sg.subgroups:
+                    collect_questions_recursive(sg.subgroups)
 
         for g in root.groups:
-            collect_questions(g.subgroups)
-
-        # Sort questions alphabetically
-        all_questions.sort(key=lambda q: (q.title or "").lower())
-
-        # Helper pro parsování data
-        def parse_date_safe(date_str):
-            if not date_str: return datetime.min
-            # Formáty: dd.mm.yyyy, yyyy-mm-dd
-            for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M"):
-                try:
-                    return datetime.strptime(str(date_str).strip(), fmt)
-                except ValueError:
-                    pass
-            return datetime.min
-
-        for q in all_questions:
-            if self.tree_funny.topLevelItemCount() > 0:
-                spacer = QTreeWidgetItem()
-                spacer.setFlags(Qt.NoItemFlags)
-                spacer.setSizeHint(0, QSize(0, 15))
-                self.tree_funny.addTopLevelItem(spacer)
-
-            q_title = q.title or "(bez názvu)"
-            q_item = QTreeWidgetItem()
-            q_item.setText(0, q_title)
-            q_item.setIcon(0, question_icon)
+            collect_questions_recursive(g.subgroups)
             
-            for col in range(4):
-                q_item.setForeground(col, question_brush)
+        questions_with_funny.sort(key=lambda q: q.title.lower() if q.title else "")
 
+        # Helper pro převod HTML na Plain Text (pro tooltip)
+        def html_to_plain(html_text):
+            if not html_text: return ""
+            doc = QTextDocument()
+            doc.setHtml(html_text)
+            return doc.toPlainText().strip()
+
+        for q in questions_with_funny:
+            q_title = q.title if q.title else "(bez názvu)"
+            q_item = QTreeWidgetItem([q_title])
+            q_item.setIcon(0, icon_q)
+            q_item.setForeground(0, color_q_text)
+            q_item.setFont(0, font_bold)
+            
+            # Čistý text do tooltipu
+            plain_text = html_to_plain(q.text_html)
+            # Omezíme délku tooltipu, aby nebyl přes celou obrazovku
+            if len(plain_text) > 300:
+                plain_text = plain_text[:300] + "..."
+            q_item.setToolTip(0, plain_text)
+            
             self.tree_funny.addTopLevelItem(q_item)
-
-            f_list = getattr(q, "funny_answers", [])
-            
-            # Sort answers by parsed date (Descending = Newest first)
-            f_list_sorted = sorted(f_list, key=lambda x: parse_date_safe(x.date if isinstance(x, FunnyAnswer) else x.get('date')), reverse=True)
-
-            for fa in f_list_sorted:
-                if isinstance(fa, FunnyAnswer):
-                    text = fa.text
-                    author = fa.author
-                    date = fa.date
-                    source_doc = getattr(fa, "source_doc", "")
-                else:
-                    text = fa.get("text", "")
-                    author = fa.get("author", "")
-                    date = fa.get("date", "")
-                    source_doc = fa.get("source_doc", "")
-
-                snippet = (text or "").replace("\n", " ")
-                if len(snippet) > 120:
-                    snippet = snippet[:117] + "..."
-
-                child = QTreeWidgetItem(q_item)
-                child.setText(0, snippet)
-                child.setText(1, date or "")
-                child.setText(2, author or "")
-                child.setText(3, os.path.basename(source_doc) if source_doc else "")
-                
-                child.setData(0, Qt.UserRole, text) 
-
             q_item.setExpanded(True)
-
-        for i in range(4):
-            self.tree_funny.resizeColumnToContents(i)
+            
+            answers = sorted(q.funny_answers, key=lambda x: x.date, reverse=True)
+            
+            for fa in answers:
+                text = fa.text
+                date = fa.date
+                author = getattr(fa, "author", "Neznámý")
+                full_source = getattr(fa, "source_doc", "")
+                
+                source_display = Path(full_source).name if full_source else ""
+                
+                child = QTreeWidgetItem([text, date, author, source_display])
+                
+                child.setForeground(0, color_ans_text); child.setFont(0, font_mono)
+                child.setToolTip(0, text) 
+                
+                child.setForeground(1, color_date); child.setFont(1, font_mono)
+                child.setForeground(2, color_name); child.setFont(2, font_bold)
+                
+                child.setForeground(3, color_source); child.setFont(3, font_mono)
+                child.setToolTip(3, full_source)
+                
+                q_item.addChild(child)
 
     def register_export(self, filename: str, k_hash: str) -> None:
         """Zaznamená nový export a obnoví tabulku."""
@@ -3640,7 +3618,6 @@ class MainWindow(QMainWindow):
         sorted_groups = sorted(self.root.groups, key=lambda g: g.name.lower())
         
         color_group = QBrush(QColor("#ff5252")) 
-        # Ikona Skupiny: Červený čtverec s "S"
         icon_group = self._generate_icon("S", QColor("#ff5252"), "rect")
 
         for g in sorted_groups:
@@ -3658,6 +3635,11 @@ class MainWindow(QMainWindow):
             if g.subgroups:
                 sorted_subgroups = sorted(g.subgroups, key=lambda s: s.name.lower())
                 self._add_subgroups_to_item(g_item, g.id, sorted_subgroups)
+
+        # DŮLEŽITÉ: Aktualizujeme také Hall of Shame, pokud existuje
+        if hasattr(self, "_refresh_funny_answers_tab"):
+            self._refresh_funny_answers_tab()
+
 
     def _add_subgroups_to_item(self, parent_item: QTreeWidgetItem, group_id: str, subgroups: List[Subgroup]) -> None:
         color_subgroup = QBrush(QColor("#ff8a80"))
