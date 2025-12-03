@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.1.0"
+APP_VERSION = "7.1.1"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -291,15 +291,13 @@ class DnDTree(QTreeWidget):
 
 
 # ---------------------- Dialog pro výběr cíle ----------------------
-
+# ---------------------- Dialog pro výběr cíle ----------------------
 class MoveTargetDialog(QDialog):
     """Dialog pro výběr cílové skupiny/podskupiny pomocí stromu."""
     def __init__(self, owner: "MainWindow") -> None:
         super().__init__(owner)
         self.setWindowTitle("Vyberte cílovou skupinu/podskupinu")
-        
-        # Zvětšení okna pro lepší přehlednost (bylo 520, 560)
-        self.resize(600, 700) 
+        self.resize(600, 700)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -311,15 +309,11 @@ class MoveTargetDialog(QDialog):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Název", "Typ"])
         
-        # --- NOVÉ: Nastavení šířky sloupců ---
+        # Nastavení sloupců
         header = self.tree.header()
-        # 1. Sloupec (Název) se roztáhne, aby vyplnil místo
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-        # 2. Sloupec (Typ) se přizpůsobí obsahu textu
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        # Vypnutí stretch last section, aby fungovalo nastavení výše
         header.setStretchLastSection(False)
-        # -------------------------------------
 
         layout.addWidget(self.tree, 1)
         
@@ -328,26 +322,51 @@ class MoveTargetDialog(QDialog):
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
 
+        # --- Generování ikon a barev (konzistentní s hlavním stromem) ---
+        
+        # Barvy (stejné jako v _refresh_tree)
+        color_group = QBrush(QColor("#ff5252"))
+        color_subgroup = QBrush(QColor("#ff8a80"))
+        
+        # Ikony (použijeme ownerovu metodu _generate_icon)
+        icon_group = owner._generate_icon("S", QColor("#ff5252"), "rect")
+        
         for g in owner.root.groups:
             g_item = QTreeWidgetItem([g.name, "Skupina"])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
-            g_item.setIcon(0, owner.style().standardIcon(QStyle.SP_DirIcon))
-            f = g_item.font(0)
-            f.setBold(True)
-            g_item.setFont(0, f)
+            
+            # Aplikace stylu
+            g_item.setIcon(0, icon_group)
+            g_item.setForeground(0, color_group)
+            g_item.setForeground(1, color_group)
+            f = g_item.font(0); f.setBold(True); f.setPointSize(13); g_item.setFont(0, f)
+            
             self.tree.addTopLevelItem(g_item)
-            self._add_subs(owner, g_item, g.id, g.subgroups)
-
-        self.tree.expandAll()
+            g_item.setExpanded(True)
+            
+            if g.subgroups:
+                self._add_subs(owner, g_item, g.id, g.subgroups)
 
     def _add_subs(self, owner: "MainWindow", parent_item: QTreeWidgetItem, gid: str, subs: List[Subgroup]) -> None:
+        color_subgroup = QBrush(QColor("#ff8a80"))
+        icon_subgroup = owner._generate_icon("P", QColor("#ff8a80"), "rect")
+
         for sg in subs:
             it = QTreeWidgetItem([sg.name, "Podskupina"])
             it.setData(0, Qt.UserRole, {"kind": "subgroup", "id": sg.id, "parent_group_id": gid})
-            it.setIcon(0, owner.style().standardIcon(QStyle.SP_DirOpenIcon))
+            
+            # Aplikace stylu
+            it.setIcon(0, icon_subgroup)
+            it.setForeground(0, color_subgroup)
+            it.setForeground(1, color_subgroup)
+            f = it.font(0); f.setBold(True); it.setFont(0, f)
+            
             parent_item.addChild(it)
+            
             if sg.subgroups:
                 self._add_subs(owner, it, gid, sg.subgroups)
+                it.setExpanded(True)
+
 
     def selected_target(self) -> tuple[str, Optional[str]]:
         items = self.tree.selectedItems()
