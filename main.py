@@ -37,7 +37,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from html.parser import HTMLParser
 
-from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime, QPoint, QRect
+from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime, QPoint, QRect, QTime
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -63,7 +63,7 @@ from PySide6.QtWidgets import (
     QToolBar,
     QTextEdit,
     QFileDialog,
-    QMessageBox,
+    QMessageBox, QProgressBar,
     QLineEdit,
     QPushButton,
     QFormLayout,
@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.3.0"
+APP_VERSION = "7.4.0"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -1368,6 +1368,32 @@ class ExportWizard(QWizard):
         l_opts.addWidget(self.chk_export_pdf)
         
         main_layout.addWidget(self.options_box)
+
+        # --- NOVÉ: Progress Bar a Status Label ---
+        status_layout = QVBoxLayout()
+        self.lbl_status_final = QLabel("Připraveno k exportu.")
+        self.lbl_status_final.setStyleSheet("font-weight: bold; color: #aaa;")
+        self.lbl_status_final.setAlignment(Qt.AlignCenter)
+        status_layout.addWidget(self.lbl_status_final)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #555;
+                border-radius: 4px;
+                text-align: center;
+                background-color: #2d2d30;
+                color: white;
+            }
+            QProgressBar::chunk {
+                background-color: #4caf50;
+                width: 10px;
+            }
+        """)
+        status_layout.addWidget(self.progress_bar)
+        main_layout.addLayout(status_layout)
+        # -----------------------------------------
         
         # Náhled
         lbl_prev = QLabel("<b>Náhled obsahu testu:</b>")
@@ -1379,13 +1405,13 @@ class ExportWizard(QWizard):
         self.preview_edit.setStyleSheet("QTextEdit { background-color: #252526; color: #e0e0e0; border: 1px solid #3e3e42; }")
         main_layout.addWidget(self.preview_edit)
 
-        # Hash label (OPRAVA FONTU)
+        # Hash label
         self.lbl_hash_preview = QLabel("Hash: -")
         self.lbl_hash_preview.setWordWrap(True)
-        # Změna z "Monospace" na "Consolas, Monaco, monospace"
         self.lbl_hash_preview.setStyleSheet("color: #555; font-family: Consolas, Monaco, monospace; font-size: 10px; margin-top: 5px;")
         self.lbl_hash_preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
         main_layout.addWidget(self.lbl_hash_preview)
+
 
     # --- Helpers & Logic ---
 
@@ -2306,6 +2332,44 @@ class ExportWizard(QWizard):
             traceback.print_exc()
             self.preview_edit.setText(f"Chyba při generování náhledu: {e}")
 
+    def _round_dt_to_10m(self, dt: QDateTime) -> QDateTime:
+        m = dt.time().minute()
+        rounded = m % 10
+        if rounded < 5:
+            m -= rounded
+        else:
+            m += (10 - rounded)
+        
+        # QDateTime je immutable, musíme vytvořit nový
+        # Jednodušší hack: převést na python datetime a zpět, nebo manipulovat s časem
+        # Ale Qt metody pro addSecs jsou nejlepší
+        # Zde původní implementace (dle kontextu) asi vracela upravený QDateTime
+        # Uděláme to robustně:
+        
+        time = dt.time()
+        total_minutes = time.hour() * 60 + time.minute()
+        
+        # Zaokrouhlení na 10 minut
+        remainder = total_minutes % 10
+        if remainder >= 5:
+            total_minutes += (10 - remainder)
+        else:
+            total_minutes -= remainder
+            
+        # Ošetření přetečení dne (24:00)
+        # Pro jednoduchost v rámci dnešního dne:
+        new_h = (total_minutes // 60) % 24
+        new_m = total_minutes % 60
+        
+        new_time = QTime(new_h, new_m)
+        return QDateTime(dt.date(), new_time)
+
+    def _cz_day_of_week(self, dt: QDateTime) -> str:
+        # dt.date().dayOfWeek() vrací 1 (Mon) až 7 (Sun)
+        days = ["pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota", "neděle"]
+        idx = dt.date().dayOfWeek() - 1
+        return days[idx]
+
     def accept(self) -> None:
         self._save_settings()
         
@@ -2324,17 +2388,13 @@ class ExportWizard(QWizard):
         count = self.spin_multi_count.value() if is_multi else 1
         do_pdf_export = self.chk_export_pdf.isChecked()
         
-        # Příprava poolu otázek
         # --- PŘÍPRAVA POOLU OTÁZEK ---
         question_pool = []
-        
         if is_multi:
-            # Helper pro sběr otázek z Group/Subgroup
             def collect_questions(group_id, is_subgroup):
                 qs = []
                 nodes_to_visit = list(self.owner.root.groups)
                 target_node = None
-                
                 while nodes_to_visit:
                     curr = nodes_to_visit.pop(0)
                     if curr.id == group_id:
@@ -2352,29 +2412,23 @@ class ExportWizard(QWizard):
                             for sub in node.subgroups:
                                 valid_qs.extend(extract_q(sub))
                         return valid_qs
-                    
                     qs = extract_q(target_node)
                 return qs
 
-            # Pokud uživatel nic nevybral, bereme VŠECHNY skupiny
+            # Zdroje
             sources_to_process = self.multi_selected_sources
             if not sources_to_process:
-                # Vytvoříme seznam všech hlavních skupin
                 sources_to_process = [{"id": g.id, "type": "group"} for g in self.owner.root.groups]
 
-            # Iterace přes vybrané zdroje
             for source in sources_to_process:
                 sid = source["id"]
                 stype = source["type"]
                 is_sub = (stype == "subgroup")
-                
                 pool_ids = collect_questions(sid, is_sub)
                 question_pool.extend(pool_ids)
             
-            # Odstranění duplicit (kdyby uživatel vybral skupinu A i její podskupinu A-1)
             question_pool = list(set(question_pool))
 
-        
         base_output_path = self.output_path
         success_count = 0
         generated_docx_files = []
@@ -2384,127 +2438,204 @@ class ExportWizard(QWizard):
         if do_pdf_export:
             print_folder.mkdir(parents=True, exist_ok=True)
 
-        # Loop generování DOCX
-        for i in range(count):
-            current_selection = self.selection_map.copy()
-            
-            if is_multi and question_pool:
-                import random
-                # ZMĚNA: Cílem jsou VŠECHNY klasické placeholdery ze šablony
-                targets = self.placeholders_q
-                needed = len(targets)
-                
-                if len(question_pool) >= needed:
-                    picked = random.sample(question_pool, needed)
-                    for idx, ph in enumerate(targets):
-                        current_selection[ph] = picked[idx]
-                else:
-                    if len(question_pool) > 0:
-                        for ph in targets:
-                            current_selection[ph] = random.choice(question_pool)
-            
-            repl_plain: Dict[str, str] = {}
-            dt = round_dt_to_10m(self.dt_edit.dateTime())
-            dt_str = f"{cz_day_of_week(dt.toPython())} {dt.toString('dd.MM.yyyy HH:mm')}"
-            repl_plain["DatumČas"] = dt_str
-            repl_plain["DatumCas"] = dt_str
-            repl_plain["DATUMCAS"] = dt_str
-            
-            prefix = self.le_prefix.text().strip()
-            today = datetime.now().strftime("%Y-%m-%d")
-            verze_str = f"{prefix} {today}"
-            repl_plain["PoznamkaVerze"] = verze_str
-            repl_plain["POZNAMKAVERZE"] = verze_str
-            repl_plain["KontrolniHash"] = k_hash
-            repl_plain["KONTROLNIHASH"] = k_hash
-            
-            total_bonus = 0.0
-            min_loss = 0.0
-            for qid in current_selection.values():
-                q = self.owner._find_question_by_id(qid)
-                if not q: continue
-                if q.type == 'bonus':
-                    total_bonus += float(q.bonus_correct)
-                    min_loss += float(q.bonus_wrong)
-            
-            max_body = 10.0 + total_bonus
-            repl_plain["MaxBody"] = f"{max_body:.2f}"
-            repl_plain["MAXBODY"] = f"{max_body:.2f}"
-            repl_plain["MinBody"] = f"{min_loss:.2f}"
-            repl_plain["MINBODY"] = f"{min_loss:.2f}"
+        # --- UI SETUP ---
+        # Zablokujeme tlačítka, aby uživatel neklikal znovu
+        self.button(QWizard.FinishButton).setEnabled(False)
+        self.button(QWizard.BackButton).setEnabled(False)
+        
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, count)
+            self.progress_bar.setValue(0)
+            self.lbl_status_final.setText("Generuji DOCX soubory...")
+            QApplication.processEvents()
 
-            rich_map: Dict[str, str] = {}
-            for ph, qid in current_selection.items():
-                q = self.owner._find_question_by_id(qid)
-                if q:
-                    rich_map[ph] = q.text_html
+        # --- LOOP GENEROVÁNÍ ---
+        try:
+            for i in range(count):
+                current_selection = self.selection_map.copy()
+                
+                if is_multi and question_pool:
+                    import random
+                    # Pro multi režim ignorujeme ruční výběr
+                    current_selection = {} 
+                    targets = self.placeholders_q
+                    needed = len(targets)
+                    
+                    if len(question_pool) >= needed:
+                        picked = random.sample(question_pool, needed)
+                        for idx, ph in enumerate(targets):
+                            current_selection[ph] = picked[idx]
+                    else:
+                        if len(question_pool) > 0:
+                            for ph in targets:
+                                current_selection[ph] = random.choice(question_pool)
+                
+                repl_plain: Dict[str, str] = {}
+                
+                # --- Datum a Čas (Inline logika) ---
+                raw_dt = self.dt_edit.dateTime()
+                # Zaokrouhlení na 10 min
+                time = raw_dt.time()
+                total_minutes = time.hour() * 60 + time.minute()
+                remainder = total_minutes % 10
+                if remainder >= 5: total_minutes += (10 - remainder)
+                else: total_minutes -= remainder
+                new_h = (total_minutes // 60) % 24
+                new_m = total_minutes % 60
+                rounded_time = QTime(new_h, new_m)
+                rounded_dt = QDateTime(raw_dt.date(), rounded_time)
+                
+                # Den v týdnu
+                days_cz = ["pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota", "neděle"]
+                day_idx = rounded_dt.date().dayOfWeek() - 1
+                day_str = days_cz[day_idx]
+                
+                dt_str = f"{day_str} {rounded_dt.toString('dd.MM.yyyy HH:mm')}"
+                repl_plain["DatumČas"] = dt_str
+                repl_plain["DatumCas"] = dt_str
+                repl_plain["DATUMCAS"] = dt_str
+                
+                prefix = self.le_prefix.text().strip()
+                today = datetime.now().strftime("%Y-%m-%d")
+                version_suffix = f"-{i+1}" if is_multi else ""
+                verze_str = f"{prefix}{version_suffix} {today}"
+                
+                repl_plain["PoznamkaVerze"] = verze_str
+                repl_plain["POZNAMKAVERZE"] = verze_str
+                repl_plain["KontrolniHash"] = k_hash
+                repl_plain["KONTROLNIHASH"] = k_hash
+                
+                total_bonus = 0.0
+                min_loss = 0.0
+                for qid in current_selection.values():
+                    q = self.owner._find_question_by_id(qid)
+                    if not q: continue
+                    if q.type == 'bonus':
+                        total_bonus += float(q.bonus_correct)
+                        min_loss += float(q.bonus_wrong)
+                
+                # Base points - zde fixně 10, nebo spočítat z klasických
+                # Pro jednoduchost bereme 10 jako základ, pokud to tak máte v šabloně
+                # Nebo spočítat: len(placeholders_q)
+                # Zde použijeme logiku z předchozí verze (10.0)
+                max_body = 10.0 + total_bonus
+                
+                repl_plain["MaxBody"] = f"{max_body:.2f}"
+                repl_plain["MAXBODY"] = f"{max_body:.2f}"
+                repl_plain["MinBody"] = f"{min_loss:.2f}"
+                repl_plain["MINBODY"] = f"{min_loss:.2f}"
+
+                rich_map: Dict[str, str] = {}
+                for ph, qid in current_selection.items():
+                    q = self.owner._find_question_by_id(qid)
+                    if q:
+                        rich_map[ph] = q.text_html
+
+                if is_multi:
+                    p = Path(base_output_path)
+                    new_name = f"{p.stem}_v{i+1}{p.suffix}"
+                    target_path = p.parent / new_name
+                else:
+                    target_path = base_output_path
+
+                try:
+                    self.owner._generate_docx_from_template(self.template_path, target_path, repl_plain, rich_map)
+                    success_count += 1
+                    generated_docx_files.append(target_path)
+                except Exception as e:
+                    QMessageBox.critical(self, "Export", f"Chyba při exportu verze {i+1}:\n{e}")
+                    if not is_multi: 
+                        # Povolit tlačítka zpět
+                        self.button(QWizard.FinishButton).setEnabled(True)
+                        self.button(QWizard.BackButton).setEnabled(True)
+                        return
+                
+                # Update Progress
+                if hasattr(self, "progress_bar"):
+                    self.progress_bar.setValue(i + 1)
+                    self.lbl_status_final.setText(f"Generuji DOCX {i+1}/{count}...")
+                    QApplication.processEvents()
+
+            # Historie
+            if is_multi:
+                record_name = f"Balík {count} verzí: {base_output_path.name}"
+                self.owner.register_export(record_name, k_hash)
+            else:
+                self.owner.register_export(base_output_path.name, k_hash)
+
+            # PDF Export
+            pdf_success_msg = ""
+            if do_pdf_export and generated_docx_files:
+                # Reset progress bar
+                if hasattr(self, "progress_bar"):
+                    self.progress_bar.setRange(0, len(generated_docx_files))
+                    self.progress_bar.setValue(0)
+                    self.lbl_status_final.setText("Převádím DOCX na PDF...")
+                    QApplication.processEvents()
+                    
+                try:
+                    for idx, docx_file in enumerate(generated_docx_files):
+                        if hasattr(self, "lbl_status_final"):
+                            self.lbl_status_final.setText(f"PDF Konverze: {docx_file.name}")
+                            QApplication.processEvents()
+                            
+                        pdf_file = self.owner._convert_docx_to_pdf(docx_file)
+                        if pdf_file and pdf_file.exists():
+                            generated_pdf_files.append(pdf_file)
+                        
+                        if hasattr(self, "progress_bar"):
+                            self.progress_bar.setValue(idx + 1)
+
+                    if generated_pdf_files:
+                        if is_multi and len(generated_pdf_files) > 1:
+                            if hasattr(self, "lbl_status_final"):
+                                self.lbl_status_final.setText("Slučuji PDF soubory...")
+                                self.progress_bar.setRange(0, 0) 
+                                QApplication.processEvents()
+                                
+                            merged_name = f"{base_output_path.stem}_merged.pdf"
+                            final_pdf = print_folder / merged_name
+                            
+                            if self.owner._merge_pdfs(generated_pdf_files, final_pdf, cleanup=True):
+                                pdf_success_msg = f"\n\nPDF pro tisk (sloučené) uloženo do:\n{final_pdf}"
+                            else:
+                                pdf_success_msg = f"\n\nPOZOR: Slučování selhalo. Jednotlivá PDF jsou v:\n{print_folder}"
+                                import shutil
+                                for tmp_pdf in generated_pdf_files:
+                                    if tmp_pdf.exists():
+                                        try:
+                                            dest = print_folder / tmp_pdf.name
+                                            shutil.move(str(tmp_pdf), str(dest))
+                                        except: pass
+                        else:
+                            import shutil
+                            final_pdf = print_folder / generated_pdf_files[0].name
+                            shutil.move(str(generated_pdf_files[0]), str(final_pdf))
+                            pdf_success_msg = f"\n\nPDF pro tisk uloženo do:\n{final_pdf}"
+                                
+                except Exception as e:
+                    QMessageBox.warning(self, "PDF Export", f"Kritická chyba při exportu PDF:\n{e}")
+                    import traceback; traceback.print_exc()
+            
+            if hasattr(self, "progress_bar"):
+                self.progress_bar.setVisible(False)
+                self.lbl_status_final.setText("Hotovo.")
 
             if is_multi:
-                p = Path(base_output_path)
-                new_name = f"{p.stem}_v{i+1}{p.suffix}"
-                target_path = p.parent / new_name
+                msg = f"Hromadný export dokončen.\nVygenerováno {success_count} souborů DOCX.{pdf_success_msg}"
+                QMessageBox.information(self, "Export", msg)
             else:
-                target_path = base_output_path
-
-            try:
-                self.owner._generate_docx_from_template(self.template_path, target_path, repl_plain, rich_map)
-                success_count += 1
-                generated_docx_files.append(target_path)
-            except Exception as e:
-                QMessageBox.critical(self, "Export", f"Chyba při exportu verze {i+1}:\n{e}")
-                if not is_multi: return
-
-        # Historie
-        if is_multi:
-            record_name = f"Balík {count} verzí: {base_output_path.name}"
-            self.owner.register_export(record_name, k_hash)
-        else:
-            self.owner.register_export(base_output_path.name, k_hash)
-
-        # PDF Export
-        pdf_success_msg = ""
-        if do_pdf_export and generated_docx_files:
-            try:
-                for docx_file in generated_docx_files:
-                    pdf_file = self.owner._convert_docx_to_pdf(docx_file)
-                    if pdf_file and pdf_file.exists():
-                        generated_pdf_files.append(pdf_file)
+                msg = f"Export dokončen.\nSoubor uložen:\n{base_output_path}{pdf_success_msg}"
+                QMessageBox.information(self, "Export", msg)
                 
-                if generated_pdf_files:
-                    if is_multi and len(generated_pdf_files) > 1:
-                        merged_name = f"{base_output_path.stem}_merged.pdf"
-                        final_pdf = print_folder / merged_name
-                        
-                        if self.owner._merge_pdfs(generated_pdf_files, final_pdf, cleanup=True):
-                            pdf_success_msg = f"\n\nPDF pro tisk (sloučené) uloženo do:\n{final_pdf}"
-                        else:
-                            pdf_success_msg = f"\n\nPOZOR: Slučování selhalo. Jednotlivá PDF jsou v:\n{print_folder}"
-                            import shutil
-                            for tmp_pdf in generated_pdf_files:
-                                if tmp_pdf.exists():
-                                    try:
-                                        dest = print_folder / tmp_pdf.name
-                                        shutil.move(str(tmp_pdf), str(dest))
-                                    except: pass
-                    else:
-                        import shutil
-                        final_pdf = print_folder / generated_pdf_files[0].name
-                        shutil.move(str(generated_pdf_files[0]), str(final_pdf))
-                        pdf_success_msg = f"\n\nPDF pro tisk uloženo do:\n{final_pdf}"
-                            
-            except Exception as e:
-                QMessageBox.warning(self, "PDF Export", f"Kritická chyba při exportu PDF:\n{e}")
-                import traceback
-                traceback.print_exc()
+            super().accept()
         
-        if is_multi:
-            msg = f"Hromadný export dokončen.\nVygenerováno {success_count} souborů DOCX.{pdf_success_msg}"
-            QMessageBox.information(self, "Export", msg)
-        else:
-            msg = f"Export dokončen.\nSoubor uložen:\n{base_output_path}{pdf_success_msg}"
-            QMessageBox.information(self, "Export", msg)
-            
-        super().accept()
+        except Exception as e:
+            # Pokud nastane chyba, odblokujeme tlačítka
+            self.button(QWizard.FinishButton).setEnabled(True)
+            self.button(QWizard.BackButton).setEnabled(True)
+            QMessageBox.critical(self, "Kritická chyba", f"Neočekávaná chyba:\n{e}")
 
 # --------------------------- Hlavní okno (UI + logika) ---------------------------
 
