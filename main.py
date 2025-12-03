@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.2.0"
+APP_VERSION = "7.2.1"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -1345,19 +1345,28 @@ class ExportWizard(QWizard):
             icon_classic = generate_colored_icon("Q", QColor("#42a5f5"), "circle")
             icon_bonus = generate_colored_icon("B", QColor("#ffea00"), "star")
             
+            # NOVÁ POMOCNÁ FUNKCE: Bezpečně spočítá klasické otázky
+            def get_total_classic_count(node):
+                count = 0
+                # 1. Přímé klasické otázky (jen pokud node má otázky - např. Subgroup)
+                if hasattr(node, "questions"):
+                    count += len([q for q in node.questions if q.type == "classic"])
+                
+                # 2. Rekurzivně v podskupinách (Group i Subgroup mají 'subgroups')
+                if hasattr(node, "subgroups") and node.subgroups:
+                    for sub in node.subgroups:
+                        count += get_total_classic_count(sub)
+                return count
+            
             # 4. Populate Tree and Combo
-            # Upraveno: "prefix" pro vizuální vnoření v ComboBoxu
             def add_subgroup_recursive(parent_item, subgroup_list, parent_gid, prefix=""):
-                count = len(subgroup_list)
+                count_siblings = len(subgroup_list)
                 for i, sg in enumerate(subgroup_list):
-                    # Tree Item
+                    # Tree Item (Strom vždy zobrazí vše)
                     sg_item = QTreeWidgetItem([sg.name])
-                    
-                    # Ikona a barva
                     sg_item.setIcon(0, icon_sub)
                     sg_item.setForeground(0, color_subgroup)
                     f = sg_item.font(0); f.setBold(True); sg_item.setFont(0, f)
-                    
                     sg_item.setData(0, Qt.UserRole, {
                         "kind": "subgroup", 
                         "id": sg.id, 
@@ -1365,19 +1374,24 @@ class ExportWizard(QWizard):
                     })
                     parent_item.addChild(sg_item)
                     
-                    # Combo Item - ASCII tree style
-                    is_last = (i == count - 1)
-                    connector = "└─" if is_last else "├─"
-                    display_text = f"{prefix}{connector} {sg.name}"
-                    self.combo_multi_source.addItem(icon_sub, display_text, {"type": "subgroup", "id": sg.id})
+                    # Zjištění počtu klasických otázek (pro filtrování comboboxu)
+                    classic_count = get_total_classic_count(sg)
                     
-                    # Příprava prefixu pro děti
-                    child_prefix = prefix + ("  " if is_last else "│ ")
+                    # Combo Item - Přidáme JEN pokud má klasické otázky
+                    if classic_count > 0:
+                        is_last = (i == count_siblings - 1)
+                        connector = "└─" if is_last else "├─"
+                        display_text = f"{prefix}{connector} {sg.name} ({classic_count})"
+                        self.combo_multi_source.addItem(icon_sub, display_text, {"type": "subgroup", "id": sg.id})
                     
+                    # Prefix pro děti
+                    is_last_visual = (i == count_siblings - 1)
+                    child_prefix = prefix + ("  " if is_last_visual else "│ ")
+                    
+                    # Otázky do stromu
                     for q in sg.questions:
                         label_type = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
                         is_bonus = (label_type == "BONUS")
-                        
                         info = f"({q.points} b)" if not is_bonus else f"(Bonus: {q.bonus_correct})"
                         label_text = f"{q.title} {info}"
                         
@@ -1396,35 +1410,38 @@ class ExportWizard(QWizard):
                         else:
                             q_item.setIcon(0, icon_classic)
                             q_item.setForeground(0, color_classic)
-                        
                         sg_item.addChild(q_item)
                     
+                    # Rekurze
                     if sg.subgroups:
                         add_subgroup_recursive(sg_item, sg.subgroups, parent_gid, child_prefix)
 
             groups = self.owner.root.groups
             for g in groups:
-                # Tree
+                # Tree Item
                 g_item = QTreeWidgetItem([g.name])
                 g_item.setIcon(0, icon_group)
                 g_item.setForeground(0, color_group)
                 f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
-                
                 g_item.setData(0, Qt.UserRole, {
                     "kind": "group", 
                     "id": g.id
                 })
                 self.tree_source.addTopLevelItem(g_item)
                 
-                # Combo
-                self.combo_multi_source.addItem(icon_group, g.name, {"type": "group", "id": g.id})
+                # Spočítat klasické otázky v celé skupině (Group nemá questions, jen subgroups)
+                total_classic = get_total_classic_count(g)
+                
+                # Combo Item - Přidat JEN pokud > 0
+                if total_classic > 0:
+                    self.combo_multi_source.addItem(icon_group, f"{g.name} ({total_classic})", {"type": "group", "id": g.id})
                 
                 add_subgroup_recursive(g_item, g.subgroups, g.id, "")
                 
             self.tree_source.expandAll()
             self.tree_source.blockSignals(False)
 
-            # 5. Create Slots (IDENTICKÉ)
+            # 5. Create Slots
             def create_slot_row(ph, is_bonus):
                 row_w = QWidget()
                 row_l = QHBoxLayout(row_w)
@@ -1477,7 +1494,6 @@ class ExportWizard(QWizard):
             is_multi = (self.mode_group.checkedId() == 1)
             self._update_slots_visuals(is_multi)
             
-            # DŮLEŽITÉ: Aktualizace vizuálů stromu na konci (pokud existuje)
             if hasattr(self, "_refresh_tree_visuals"):
                 self._refresh_tree_visuals()
                     
@@ -1485,6 +1501,7 @@ class ExportWizard(QWizard):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Chyba", f"Chyba při inicializaci stránky 2:\n{e}")
+
 
     def _on_slot_assign_clicked(self, ph: str) -> None:
         # Jednoduchý výběr: Otevře dialog se seznamem dostupných otázek
