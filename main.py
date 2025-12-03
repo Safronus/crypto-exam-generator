@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.2.1"
+APP_VERSION = "7.3.0"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -248,6 +248,193 @@ def apply_dark_theme(app: QApplication) -> None:
     palette.setColor(QPalette.Highlight, QColor(10, 132, 255))
     palette.setColor(QPalette.HighlightedText, Qt.black)
     app.setPalette(palette)
+
+
+class MultiSourceDialog(QDialog):
+    """Dialog se stromem a checkboxy pro výběr více zdrojů s počítadlem otázek."""
+    def __init__(self, owner: "MainWindow", selected_data: list) -> None:
+        super().__init__(owner)
+        self.setWindowTitle("Vyberte zdroje otázek")
+        self.resize(600, 700)
+        self.owner = owner
+        
+        # Ukládáme si vybraná ID
+        self.selected_ids = {item['id'] for item in selected_data} if selected_data else set()
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        
+        layout.addWidget(QLabel("Zaškrtněte skupiny nebo podskupiny, ze kterých se mají náhodně vybírat otázky.\n(Výběr skupiny automaticky zahrne všechny její podskupiny)"))
+        
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Název zdroje"])
+        self.tree.header().hide()
+        # Signál pro změnu checkboxu
+        self.tree.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.tree)
+        
+        # Label pro celkový součet
+        self.lbl_total = QLabel("Celkem vybráno otázek: 0")
+        self.lbl_total.setStyleSheet("font-weight: bold; color: #42a5f5; font-size: 14px; margin-top: 5px;")
+        layout.addWidget(self.lbl_total)
+        
+        # Tlačítka
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+        
+        # Styly
+        self.icon_group = owner._generate_icon("S", QColor("#ff5252"), "rect")
+        self.icon_sub = owner._generate_icon("P", QColor("#ff8a80"), "rect")
+        self.color_group = QBrush(QColor("#ff5252"))
+        self.color_subgroup = QBrush(QColor("#ff8a80"))
+
+        # Naplnění stromu
+        self._is_populating = True # Flag aby se nespouštěly signály při plnění
+        self._populate_tree(owner.root.groups)
+        self._is_populating = False
+        
+        # Prvotní přepočet
+        self._recalculate_total()
+
+    def _get_classic_count(self, node):
+        """Rekurzivně spočítá klasické otázky v uzlu."""
+        count = 0
+        if hasattr(node, "questions"):
+            count += len([q for q in node.questions if q.type == "classic"])
+        if hasattr(node, "subgroups") and node.subgroups:
+            for sub in node.subgroups:
+                count += self._get_classic_count(sub)
+        return count
+
+    def _populate_tree(self, groups):
+        def add_sub_recursive(parent_item, subs):
+            for sg in subs:
+                q_count = self._get_classic_count(sg)
+                
+                # Zobrazíme jen pokud má nějaké klasické otázky (přímo nebo v dětech)
+                if q_count > 0:
+                    display_text = f"{sg.name} ({q_count})"
+                    
+                    item = QTreeWidgetItem([display_text])
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setFlags(item.flags() & ~Qt.ItemIsAutoTristate)
+                    
+                    check_state = Qt.Checked if sg.id in self.selected_ids else Qt.Unchecked
+                    item.setCheckState(0, check_state)
+                    
+                    item.setIcon(0, self.icon_sub)
+                    item.setForeground(0, self.color_subgroup)
+                    item.setData(0, Qt.UserRole, {"id": sg.id, "type": "subgroup", "count": q_count})
+                    
+                    parent_item.addChild(item)
+                    
+                    if sg.subgroups:
+                        add_sub_recursive(item, sg.subgroups)
+                        item.setExpanded(True)
+
+        for g in groups:
+            q_count = self._get_classic_count(g)
+            
+            # Zobrazíme jen pokud má > 0 klasických otázek
+            if q_count > 0:
+                display_text = f"{g.name} ({q_count})"
+                
+                item = QTreeWidgetItem([display_text])
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setFlags(item.flags() & ~Qt.ItemIsAutoTristate)
+                
+                check_state = Qt.Checked if g.id in self.selected_ids else Qt.Unchecked
+                item.setCheckState(0, check_state)
+                
+                item.setIcon(0, self.icon_group)
+                item.setForeground(0, self.color_group)
+                f = item.font(0); f.setBold(True); item.setFont(0, f)
+                item.setData(0, Qt.UserRole, {"id": g.id, "type": "group", "count": q_count})
+                
+                self.tree.addTopLevelItem(item)
+                add_sub_recursive(item, g.subgroups)
+                item.setExpanded(True)
+
+    def _on_item_changed(self, item, column):
+        """Logika pro kaskádové zaškrtávání."""
+        if self._is_populating: return
+        
+        state = item.checkState(0)
+        self._is_populating = True # Blokujeme rekurzivní volání signálů
+        
+        # 1. Aplikovat na všechny potomky (směr dolů)
+        self._set_check_state_recursive(item, state)
+        
+        # 2. Aktualizovat rodiče (směr nahoru - pokud jsou všechny děti checked, rodič checked)
+        # (Tohle je volitelné, někdy je lepší nechat rodiče nezávislého, 
+        # ale pro "výběr skupiny vybere podskupiny" je směr dolů klíčový).
+        
+        self._is_populating = False
+        self._recalculate_total()
+
+    def _set_check_state_recursive(self, item, state):
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child.setCheckState(0, state)
+            self._set_check_state_recursive(child, state)
+
+    def _recalculate_total(self):
+        """Spočítá unikátní otázky ve vybraných uzlech."""
+        # Musíme být opatrní, abychom nepočítali duplicitně.
+        # Nejjednodušší: Pokud je zaškrtnutý rodič, započítáme jeho 'count'.
+        # Ale pozor: 'count' u rodiče už obsahuje děti.
+        # Takže: Pokud je rodič zaškrtnutý, přičteme ho a děti už ignorujeme (protože jsou v jeho součtu).
+        # Pokud rodič není, koukneme na děti.
+        
+        total = 0
+        
+        # Projdeme top-level items
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            total += self._count_checked_item(item)
+            
+        self.lbl_total.setText(f"Celkem vybráno otázek: {total}")
+
+    def _count_checked_item(self, item):
+        # Pokud je tento item zaškrtnutý, vezmeme jeho 'count' (který zahrnuje vše pod ním)
+        # a už neprocházíme děti (abychom je nepřičetli znovu).
+        if item.checkState(0) == Qt.Checked:
+            data = item.data(0, Qt.UserRole)
+            return data.get("count", 0)
+        
+        # Pokud není zaškrtnutý, musíme se podívat do dětí, jestli tam něco není
+        sub_total = 0
+        for i in range(item.childCount()):
+            child = item.child(i)
+            sub_total += self._count_checked_item(child)
+        return sub_total
+
+    def get_selected_items(self) -> list:
+        """Vrátí seznam slovníků pro ExportWizard.
+        Vracíme jen ty položky, které jsou checked.
+        Pokud je checked rodič, vracíme i jeho ID (což v logice wizardu znamená 'vše pod ním').
+        Víme, že wizard si pak umí vybrat unikátní otázky.
+        """
+        res = []
+        it = QTreeWidgetItemIterator(self.tree)
+        while it.value():
+            item = it.value()
+            if item.checkState(0) == Qt.Checked:
+                data = item.data(0, Qt.UserRole)
+                if data:
+                    res.append({"id": data["id"], "type": data["type"], "name": item.text(0), "count": data["count"]})
+            it += 1
+        return res
+    
+    def get_total_selected_count(self):
+        # Rychlý hack - text labelu parse
+        txt = self.lbl_total.text()
+        try:
+            return int(txt.split(": ")[1])
+        except:
+            return 0
 
 
 # ---------------------- Custom Delegate pro Combo (Export Wizard) ----------------------
@@ -690,9 +877,19 @@ class ExportWizard(QWizard):
         self.template_path: Optional[Path] = None
         self.output_path: Optional[Path] = None
         self.output_changed_manually = False
+        
         self.placeholders_q = []
         self.placeholders_b = []
-        self.selection_map = {}        
+        self.selection_map = {}
+        self.cached_hash = ""
+        
+        self.has_datum_cas = False
+        self.has_pozn = False
+        self.has_min_max = False
+        
+        # NOVÉ: Ukládáme seznam vybraných zdrojů pro Multi Export [{'id':..., 'type':...}]
+        self.multi_selected_sources = [] 
+
         # Načtení uložených cest
         self.settings_file = self.owner.project_root / "data" / "export_settings.json"
         self.stored_settings = self._load_settings()
@@ -702,17 +899,14 @@ class ExportWizard(QWizard):
         default_output_dir = self.owner.project_root / "data" / "Vygenerované testy"
         default_print_dir = self.owner.project_root / "data" / "Tisk"
         
-        # Vytvoření složek, pokud neexistují
         default_templates_dir.mkdir(parents=True, exist_ok=True)
         default_output_dir.mkdir(parents=True, exist_ok=True)
         default_print_dir.mkdir(parents=True, exist_ok=True)
         
-        # Aplikace uložených nebo defaultních cest
         self.templates_dir = Path(self.stored_settings.get("templates_dir", default_templates_dir))
         self.output_dir = Path(self.stored_settings.get("output_dir", default_output_dir))
         self.print_dir = Path(self.stored_settings.get("print_dir", default_print_dir))
         
-        # Šablona
         last_template = self.stored_settings.get("last_template")
         if last_template and Path(last_template).exists():
             self.default_template = Path(last_template)
@@ -723,18 +917,17 @@ class ExportWizard(QWizard):
         self.page1 = QWizardPage()
         self.page2 = QWizardPage()
         self.page3 = QWizardPage()
-
+        
         self._build_page1_content()
         self._build_page2_content()
         self._build_page3_content()
-
+        
         self.setPage(self.ID_PAGE1, self.page1)
         self.setPage(self.ID_PAGE2, self.page2)
         self.setPage(self.ID_PAGE3, self.page3)
         
         self.setStartId(self.ID_PAGE1)
-
-        # Auto-load Šablona
+        
         if self.default_template.exists():
             self.le_template.setText(str(self.default_template))
             self.template_path = self.default_template
@@ -742,12 +935,10 @@ class ExportWizard(QWizard):
         else:
             self.le_template.setText(str(self.default_template))
             self._update_path_indicators()
-        
-        # Auto-generate Output Name
+            
         self._update_default_output()
-        
-        # Update indikátorů
         self._update_path_indicators()
+
         
     def _load_settings(self) -> dict:
         if self.settings_file.exists():
@@ -882,9 +1073,8 @@ class ExportWizard(QWizard):
     def _build_page2_content(self):
         self.page2.setTitle("Krok 2: Přiřazení otázek do šablony")
         self.page2.initializePage = self._init_page2
-        
         main_layout = QVBoxLayout(self.page2)
-        
+
         # 1. Info Panel
         self.info_box_p2 = QGroupBox("Kontext exportu")
         self.info_box_p2.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #555; margin-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
@@ -930,12 +1120,24 @@ class ExportWizard(QWizard):
         self.spin_multi_count.setValue(2)
         l_multi.addWidget(self.spin_multi_count)
         
-        l_multi.addWidget(QLabel("Zdroj otázek (pro <Otázka1-10>):"))
-        self.combo_multi_source = QComboBox()
-        self.combo_multi_source.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        # [NOVÉ] Aplikace delegáta pro barevný text v comboboxu
-        self.combo_multi_source.setItemDelegate(ComboGroupDelegate(self.combo_multi_source))
-        l_multi.addWidget(self.combo_multi_source, 1)
+        l_multi.addWidget(QLabel("Zdroje otázek (pro |Otázka|1-10):"))
+        
+        # Místo ComboBoxu tlačítko a label
+        self.btn_select_sources = QPushButton("Vybrat zdroje...")
+        self.btn_select_sources.clicked.connect(self._on_select_sources_clicked)
+        
+        self.lbl_selected_sources = QLabel("Nevybráno (použijí se všechny otázky)")
+        self.lbl_selected_sources.setStyleSheet("color: #aaa; font-style: italic; margin-left: 5px;")
+        self.lbl_selected_sources.setWordWrap(True) # Aby se dlouhý text zalamoval
+        
+        # Kontejner pro tlačítko a label
+        src_container = QWidget()
+        src_layout = QHBoxLayout(src_container)
+        src_layout.setContentsMargins(0, 0, 0, 0)
+        src_layout.addWidget(self.btn_select_sources)
+        src_layout.addWidget(self.lbl_selected_sources, 1) # Stretch pro label
+        
+        l_multi.addWidget(src_container, 1) # Stretch pro kontejner v hlavním layoutu
         
         main_layout.addWidget(self.widget_multi_options)
 
@@ -951,18 +1153,15 @@ class ExportWizard(QWizard):
         self.tree_source = QTreeWidget()
         self.tree_source.setHeaderLabels(["Struktura otázek"])
         self.tree_source.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        
-        # Nastavení signálů
         self.tree_source.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_source.customContextMenuRequested.connect(self._on_tree_source_context_menu)
-        
         if hasattr(self, "_on_tree_selection"):
             self.tree_source.itemSelectionChanged.connect(self._on_tree_selection)
         
         left_layout.addWidget(self.tree_source)
         
         self.btn_assign_multi = QPushButton(">> Přiřadit vybrané na volné pozice >>")
-        self.btn_assign_multi.setToolTip("Doplní vybrané otázky (zleva) na první volná místa v šabloně (vpravo).")
+        self.btn_assign_multi.setToolTip("Doplní vybrané otázky zleva na první volná místa v šabloně vpravo.")
         self.btn_assign_multi.clicked.connect(self._assign_selected_multi)
         left_layout.addWidget(self.btn_assign_multi)
         
@@ -970,18 +1169,15 @@ class ExportWizard(QWizard):
         
         # Pravý panel: Sloty
         right_layout = QVBoxLayout()
-        
         right_header = QHBoxLayout()
         right_header.addWidget(QLabel("<b>Sloty v šabloně:</b>"))
         right_header.addStretch()
-        
         self.btn_clear_all = QPushButton("Vyprázdnit vše")
         self.btn_clear_all.setToolTip("Zruší přiřazení všech otázek.")
         self.btn_clear_all.clicked.connect(self._clear_all_assignments)
         right_header.addWidget(self.btn_clear_all)
-        
         right_layout.addLayout(right_header)
-        
+
         self.scroll_slots = QScrollArea()
         self.scroll_slots.setWidgetResizable(True)
         self.widget_slots = QWidget()
@@ -991,30 +1187,58 @@ class ExportWizard(QWizard):
         self.scroll_slots.setWidget(self.widget_slots)
         right_layout.addWidget(self.scroll_slots)
         columns_layout.addLayout(right_layout, 6)
-        
         main_layout.addLayout(columns_layout, 3)
 
         # 5. Náhled
         preview_box = QGroupBox("Náhled vybrané otázky")
         preview_layout = QVBoxLayout(preview_box)
         preview_layout.setContentsMargins(5,5,5,5)
-        
         self.text_preview_q = QTextEdit()
         self.text_preview_q.setReadOnly(True)
         self.text_preview_q.setMaximumHeight(120)
-        self.text_preview_q.setStyleSheet("""
-            QTextEdit { 
-                background-color: #2e2e2e; 
-                color: #ffffff; 
-                font-size: 14px; 
-                border: 1px solid #555;
-                padding: 5px;
-            }
-        """)
+        self.text_preview_q.setStyleSheet("QTextEdit { background-color: #2e2e2e; color: #ffffff; font-size: 14px; border: 1px solid #555; padding: 5px; }")
         preview_layout.addWidget(self.text_preview_q)
-        
         main_layout.addWidget(preview_box, 1)
 
+    def _on_select_sources_clicked(self):
+        # Zjistíme počet potřebných otázek ze šablony
+        needed_count = len(self.placeholders_q)
+        
+        dlg = MultiSourceDialog(self.owner, self.multi_selected_sources)
+        if dlg.exec():
+            self.multi_selected_sources = dlg.get_selected_items()
+            total_available = dlg.get_total_selected_count() # Počet unikátních dostupných otázek
+            
+            names = [item['name'].split(" (")[0] for item in self.multi_selected_sources]
+            count_sources = len(self.multi_selected_sources)
+            
+            if count_sources == 0:
+                # Pokud nic nevybral -> bere se "všechno".
+                # Zde bychom mohli spočítat celkový počet v DB pro přesnost,
+                # ale pro jednoduchost napíšeme:
+                self.lbl_selected_sources.setText("Nevybráno (použijí se všechny otázky)")
+                self.lbl_selected_sources.setStyleSheet("color: #aaa; font-style: italic; margin-left: 5px;")
+            else:
+                short_list = ", ".join(names[:2])
+                if len(names) > 2:
+                    short_list += f" a {len(names)-2} dalších"
+                
+                # -- KONTROLA DOSTATKU OTÁZEK --
+                if total_available < needed_count:
+                    # NEDOSTATEK -> ČERVENĚ + VAROVÁNÍ
+                    text = f"<b>VYBRÁNO MÁLO: {total_available} z {needed_count}</b> (Zdroj: {short_list})"
+                    style = "color: #ff5252; font-weight: bold; margin-left: 5px;"
+                    QMessageBox.warning(self, "Nedostatek otázek", 
+                                        f"Pozor! Vybrané zdroje obsahují pouze {total_available} otázek,\n"
+                                        f"ale šablona vyžaduje {needed_count}.\n\n"
+                                        "Některé otázky se budou opakovat nebo zůstanou prázdné.")
+                else:
+                    # DOSTATEK -> MODŘE/ZELENĚ
+                    text = f"<b>{total_available} otázek</b> (Potřeba: {needed_count}) z: {short_list}"
+                    style = "color: #81c784; font-weight: bold; margin-left: 5px;" # Zelená
+                
+                self.lbl_selected_sources.setText(text)
+                self.lbl_selected_sources.setStyleSheet(style)
 
     def _on_mode_toggled(self, btn, checked):
         """Reaguje na změnu režimu exportu (Single vs Multi)."""
@@ -1320,10 +1544,9 @@ class ExportWizard(QWizard):
             if not self.placeholders_q and not self.placeholders_b:
                 self._scan_placeholders()
 
-            # 1. Clear Tree & Combo
+            # 1. Clear Tree (Combo už nemáme)
             self.tree_source.blockSignals(True)
             self.tree_source.clear()
-            self.combo_multi_source.clear()
             
             # 2. Clear Slots
             while self.layout_slots.count():
@@ -1331,7 +1554,7 @@ class ExportWizard(QWizard):
                 if item.widget(): item.widget().deleteLater()
             self.layout_slots.addStretch()
             
-            # Barvy a ikony pro strom
+            # Barvy a ikony
             color_group = QBrush(QColor("#ff5252"))
             color_subgroup = QBrush(QColor("#ff8a80"))
             color_classic = QBrush(QColor("#42a5f5"))
@@ -1345,24 +1568,10 @@ class ExportWizard(QWizard):
             icon_classic = generate_colored_icon("Q", QColor("#42a5f5"), "circle")
             icon_bonus = generate_colored_icon("B", QColor("#ffea00"), "star")
             
-            # NOVÁ POMOCNÁ FUNKCE: Bezpečně spočítá klasické otázky
-            def get_total_classic_count(node):
-                count = 0
-                # 1. Přímé klasické otázky (jen pokud node má otázky - např. Subgroup)
-                if hasattr(node, "questions"):
-                    count += len([q for q in node.questions if q.type == "classic"])
-                
-                # 2. Rekurzivně v podskupinách (Group i Subgroup mají 'subgroups')
-                if hasattr(node, "subgroups") and node.subgroups:
-                    for sub in node.subgroups:
-                        count += get_total_classic_count(sub)
-                return count
-            
-            # 4. Populate Tree and Combo
-            def add_subgroup_recursive(parent_item, subgroup_list, parent_gid, prefix=""):
-                count_siblings = len(subgroup_list)
-                for i, sg in enumerate(subgroup_list):
-                    # Tree Item (Strom vždy zobrazí vše)
+            # 4. Populate Tree (Pouze strom)
+            def add_subgroup_recursive(parent_item, subgroup_list, parent_gid):
+                for sg in subgroup_list:
+                    # Tree Item
                     sg_item = QTreeWidgetItem([sg.name])
                     sg_item.setIcon(0, icon_sub)
                     sg_item.setForeground(0, color_subgroup)
@@ -1374,27 +1583,11 @@ class ExportWizard(QWizard):
                     })
                     parent_item.addChild(sg_item)
                     
-                    # Zjištění počtu klasických otázek (pro filtrování comboboxu)
-                    classic_count = get_total_classic_count(sg)
-                    
-                    # Combo Item - Přidáme JEN pokud má klasické otázky
-                    if classic_count > 0:
-                        is_last = (i == count_siblings - 1)
-                        connector = "└─" if is_last else "├─"
-                        display_text = f"{prefix}{connector} {sg.name} ({classic_count})"
-                        self.combo_multi_source.addItem(icon_sub, display_text, {"type": "subgroup", "id": sg.id})
-                    
-                    # Prefix pro děti
-                    is_last_visual = (i == count_siblings - 1)
-                    child_prefix = prefix + ("  " if is_last_visual else "│ ")
-                    
-                    # Otázky do stromu
                     for q in sg.questions:
                         label_type = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
                         is_bonus = (label_type == "BONUS")
                         info = f"({q.points} b)" if not is_bonus else f"(Bonus: {q.bonus_correct})"
                         label_text = f"{q.title} {info}"
-                        
                         q_item = QTreeWidgetItem([label_text])
                         q_item.setData(0, Qt.UserRole, {
                             "kind": "question",
@@ -1412,13 +1605,11 @@ class ExportWizard(QWizard):
                             q_item.setForeground(0, color_classic)
                         sg_item.addChild(q_item)
                     
-                    # Rekurze
                     if sg.subgroups:
-                        add_subgroup_recursive(sg_item, sg.subgroups, parent_gid, child_prefix)
+                        add_subgroup_recursive(sg_item, sg.subgroups, parent_gid)
 
             groups = self.owner.root.groups
             for g in groups:
-                # Tree Item
                 g_item = QTreeWidgetItem([g.name])
                 g_item.setIcon(0, icon_group)
                 g_item.setForeground(0, color_group)
@@ -1428,25 +1619,16 @@ class ExportWizard(QWizard):
                     "id": g.id
                 })
                 self.tree_source.addTopLevelItem(g_item)
-                
-                # Spočítat klasické otázky v celé skupině (Group nemá questions, jen subgroups)
-                total_classic = get_total_classic_count(g)
-                
-                # Combo Item - Přidat JEN pokud > 0
-                if total_classic > 0:
-                    self.combo_multi_source.addItem(icon_group, f"{g.name} ({total_classic})", {"type": "group", "id": g.id})
-                
-                add_subgroup_recursive(g_item, g.subgroups, g.id, "")
+                add_subgroup_recursive(g_item, g.subgroups, g.id)
                 
             self.tree_source.expandAll()
             self.tree_source.blockSignals(False)
 
-            # 5. Create Slots
+            # 5. Create Slots (IDENTICKÉ)
             def create_slot_row(ph, is_bonus):
                 row_w = QWidget()
                 row_l = QHBoxLayout(row_w)
                 row_l.setContentsMargins(0,0,0,0)
-                
                 lbl_name = QLabel(f"{ph}:")
                 lbl_name.setFixedWidth(120)
                 if is_bonus: lbl_name.setStyleSheet("color: #ffea00;")
@@ -1465,14 +1647,10 @@ class ExportWizard(QWizard):
                     btn_assign.setText("--- Volné ---")
                     
                 btn_assign.clicked.connect(lambda checked, p=ph: self._on_slot_assign_clicked(p))
-                
                 btn_clear = QPushButton("X")
                 btn_clear.setFixedWidth(30)
                 btn_clear.clicked.connect(lambda checked, p=ph: self._on_slot_clear_clicked(p))
-                
-                row_l.addWidget(lbl_name)
-                row_l.addWidget(btn_assign, 1)
-                row_l.addWidget(btn_clear)
+                row_l.addWidget(lbl_name); row_l.addWidget(btn_assign, 1); row_l.addWidget(btn_clear)
                 row_w.setProperty("placeholder", ph)
                 self.layout_slots.insertWidget(self.layout_slots.count()-1, row_w)
 
@@ -1480,28 +1658,45 @@ class ExportWizard(QWizard):
                 lbl = QLabel("--- KLASICKÉ OTÁZKY ---")
                 lbl.setStyleSheet("font-weight:bold; color:#4da6ff; margin-top:5px;")
                 self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
-                for ph in self.placeholders_q:
-                    create_slot_row(ph, False)
+                for ph in self.placeholders_q: create_slot_row(ph, False)
 
             if self.placeholders_b:
                 lbl = QLabel("--- BONUSOVÉ OTÁZKY ---")
                 lbl.setStyleSheet("font-weight:bold; color:#ffcc00; margin-top:10px;")
                 self.layout_slots.insertWidget(self.layout_slots.count()-1, lbl)
-                for ph in self.placeholders_b:
-                    create_slot_row(ph, True)
+                for ph in self.placeholders_b: create_slot_row(ph, True)
             
-            # Aplikovat vizuální stav podle aktuálního režimu
             is_multi = (self.mode_group.checkedId() == 1)
             self._update_slots_visuals(is_multi)
-            
-            if hasattr(self, "_refresh_tree_visuals"):
-                self._refresh_tree_visuals()
+            if hasattr(self, "_refresh_tree_visuals"): self._refresh_tree_visuals()
+            # Aktualizace info o výběru zdrojů (pokud se změnil počet placeholderů)
+            if self.multi_selected_sources:
+                needed = len(self.placeholders_q)
+                # Musíme znovu spočítat total z vybraných ID (nemáme dialog instanci)
+                # Helper pro spočítání totalu z self.multi_selected_sources (které má 'count' ale pozor na duplicity/hierarchii)
+                # Protože 'multi_selected_sources' je jen seznam položek z dialogu (které jsou checked),
+                # a my jsme v dialogu zajistili, že checked rodič má 'count' všeho pod sebou.
+                # Pro rychlý odhad stačí sečíst 'count' u položek, které nemají rodiče v tomtéž seznamu?
+                # Nebo prostě vezmeme uložený stav textu? Ne, text se resetuje.
+                
+                # Jednodušší: Zavoláme "refresh" logiku, která sečte unikátní otázky
+                # Ale nemáme tu instanci dialogu.
+                # Zkusíme to odhadnout z uloženého 'count' v selected_items.
+                # V 'get_selected_items' z dialogu jsme vraceli checked items.
+                # Dialog logika '_count_checked_item' sčítala checked rodiče a ignorovala děti.
+                # My ale v 'multi_selected_sources' máme VŠECHNY checked (i děti, protože checkstate se propagoval).
+                
+                # ŘEŠENÍ: Pro správný součet tady v _init_page2 bychom potřebovali logiku z dialogu.
+                # Pro teď jen resetujeme label na neutrální nebo "Vybráno X zdrojů", aby to nemátlo.
+                
+                count_src = len(self.multi_selected_sources)
+                self.lbl_selected_sources.setText(f"Vybráno {count_src} zdrojů (klikněte pro kontrolu počtu)")
+                self.lbl_selected_sources.setStyleSheet("color: #42a5f5; margin-left: 5px;")
                     
         except Exception as e:
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Chyba", f"Chyba při inicializaci stránky 2:\n{e}")
-
 
     def _on_slot_assign_clicked(self, ph: str) -> None:
         # Jednoduchý výběr: Otevře dialog se seznamem dostupných otázek
@@ -2098,34 +2293,55 @@ class ExportWizard(QWizard):
         do_pdf_export = self.chk_export_pdf.isChecked()
         
         # Příprava poolu otázek
+        # --- PŘÍPRAVA POOLU OTÁZEK ---
         question_pool = []
+        
         if is_multi:
-            data = self.combo_multi_source.currentData()
-            if data:
-                def collect_questions(group_id, is_subgroup):
-                    qs = []
-                    nodes_to_visit = list(self.owner.root.groups)
-                    target_node = None
-                    while nodes_to_visit:
-                        curr = nodes_to_visit.pop(0)
-                        if curr.id == group_id:
-                            target_node = curr
-                            break
-                        if hasattr(curr, "subgroups") and curr.subgroups:
-                            nodes_to_visit.extend(curr.subgroups)
-                    if target_node:
-                        def extract_q(node):
-                            valid_qs = []
-                            if hasattr(node, "questions"):
-                                valid_qs.extend([q.id for q in node.questions if q.type == 'classic'])
-                            if hasattr(node, "subgroups") and node.subgroups:
-                                for sub in node.subgroups:
-                                    valid_qs.extend(extract_q(sub))
-                            return valid_qs
-                        qs = extract_q(target_node)
-                    return qs
-                is_sub = (data["type"] == "subgroup")
-                question_pool = collect_questions(data["id"], is_sub)
+            # Helper pro sběr otázek z Group/Subgroup
+            def collect_questions(group_id, is_subgroup):
+                qs = []
+                nodes_to_visit = list(self.owner.root.groups)
+                target_node = None
+                
+                while nodes_to_visit:
+                    curr = nodes_to_visit.pop(0)
+                    if curr.id == group_id:
+                        target_node = curr
+                        break
+                    if hasattr(curr, "subgroups") and curr.subgroups:
+                        nodes_to_visit.extend(curr.subgroups)
+                
+                if target_node:
+                    def extract_q(node):
+                        valid_qs = []
+                        if hasattr(node, "questions"):
+                            valid_qs.extend([q.id for q in node.questions if q.type == "classic"])
+                        if hasattr(node, "subgroups") and node.subgroups:
+                            for sub in node.subgroups:
+                                valid_qs.extend(extract_q(sub))
+                        return valid_qs
+                    
+                    qs = extract_q(target_node)
+                return qs
+
+            # Pokud uživatel nic nevybral, bereme VŠECHNY skupiny
+            sources_to_process = self.multi_selected_sources
+            if not sources_to_process:
+                # Vytvoříme seznam všech hlavních skupin
+                sources_to_process = [{"id": g.id, "type": "group"} for g in self.owner.root.groups]
+
+            # Iterace přes vybrané zdroje
+            for source in sources_to_process:
+                sid = source["id"]
+                stype = source["type"]
+                is_sub = (stype == "subgroup")
+                
+                pool_ids = collect_questions(sid, is_sub)
+                question_pool.extend(pool_ids)
+            
+            # Odstranění duplicit (kdyby uživatel vybral skupinu A i její podskupinu A-1)
+            question_pool = list(set(question_pool))
+
         
         base_output_path = self.output_path
         success_count = 0
