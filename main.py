@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "6.14.0"
+APP_VERSION = "7.1.0"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -294,22 +294,35 @@ class DnDTree(QTreeWidget):
 
 class MoveTargetDialog(QDialog):
     """Dialog pro výběr cílové skupiny/podskupiny pomocí stromu."""
-
     def __init__(self, owner: "MainWindow") -> None:
         super().__init__(owner)
         self.setWindowTitle("Vyberte cílovou skupinu/podskupinu")
-        self.resize(520, 560)
+        
+        # Zvětšení okna pro lepší přehlednost (bylo 520, 560)
+        self.resize(600, 700) 
+        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
-
+        
         self.info = QLabel("Vyberte podskupinu (nebo skupinu – vytvoří se Default).")
         layout.addWidget(self.info)
-
+        
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Název", "Typ"])
-        layout.addWidget(self.tree, 1)
+        
+        # --- NOVÉ: Nastavení šířky sloupců ---
+        header = self.tree.header()
+        # 1. Sloupec (Název) se roztáhne, aby vyplnil místo
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        # 2. Sloupec (Typ) se přizpůsobí obsahu textu
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        # Vypnutí stretch last section, aby fungovalo nastavení výše
+        header.setStretchLastSection(False)
+        # -------------------------------------
 
+        layout.addWidget(self.tree, 1)
+        
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -4636,141 +4649,95 @@ class MainWindow(QMainWindow):
 
     def _parse_questions_from_paragraphs(self, paragraphs: List[dict]) -> List[Question]:
         out: List[Question] = []
-        i = 0
         n = len(paragraphs)
+        i = 0
 
-        rx_bonus = re.compile(r'^\s*Otázka\s+\d+.*BONUS', re.IGNORECASE)
-        rx_question_start_text = re.compile(r'^[A-ZŽŠČŘĎŤŇ].*[\?\.]$') # Začíná velkým, končí ? nebo .
-        rx_not_question_start = re.compile(r'^(Slovník|Tabulka|Obrázek|Příklad|Body|Poznámka)', re.IGNORECASE)
+        # Regexy
+        rx_bonus_start = re.compile(r'^\s*Otázka\s+\d+.*BONUS', re.IGNORECASE)
+        
+        # Přísnější definice otázky: Musí začínat velkým písmenem a končit ?, ., nebo :
+        # Přidal jsem i konce řádků, aby to chytlo i "Uveďte příkaz..." (což nemusí mít na konci nic, pokud je to nadpis)
+        # Ale pro jistotu budeme vyžadovat, aby to nevypadalo jako odrážka.
+        rx_looks_like_question_start = re.compile(r'^[A-ZŽŠČŘĎŤŇ]') 
+        
+        rx_visual_bullet = re.compile(r'^\s*[\-–—•]')
+        rx_not_question = re.compile(r'^(Slovník|Tabulka|Obrázek|Příklad|Body|Poznámka)', re.IGNORECASE)
 
         def html_escape(s: str) -> str:
             return _html.escape(s or "")
 
-        def wrap_list(items: List[tuple[str, int, str]]) -> str:
-            if not items: return ""
-            fmt = items[0][2] or "decimal"
-            is_bullet = (fmt == "bullet")
-            tag_open = "<ul>" if is_bullet else "<ol>"
-            tag_close = "</ul>" if is_bullet else "</ol>"
-            lis = "".join(f"<li>{html_escape(t)}</li>" for (t, _, _) in items if t.strip())
-            return f"{tag_open}{lis}{tag_close}"
+        # --- JÁDRO LOGIKY ---
+        def is_start_of_new_question(p: dict) -> bool:
+            text = p["text"].strip()
+            if not text: return False
+            
+            # 1. Vizuální odrážka (pomlčka atd.) -> NIKDY není nová otázka
+            if rx_visual_bullet.match(text):
+                return False
 
-        # Sledujeme poslední numId hlavní otázky, abychom poznali změnu seznamu
-        last_question_num_id = None
+            # 2. Začíná malým písmenem -> NIKDY není nová otázka (je to asi odpověď/pokračování)
+            #    (S výjimkou, pokud by to bylo číslované "1. něco", ale to ošetříme níže)
+            if text[0].islower():
+                return False
+
+            # 3. Explicitní "Otázka X" -> VŽDY je nová otázka
+            if "Otázka" in text and re.search(r'Otázka\s+\d', text):
+                return True
+
+            # 4. Word číslovaný seznam (level 0)
+            if p["is_numbered"] and p["ilvl"] == 0 and p["num_fmt"] != "bullet":
+                # Pokud to vypadá jako otázka (Velké písmeno) a není to vyloučené slovo
+                if rx_looks_like_question_start.match(text) and not rx_not_question.match(text):
+                    return True
+            
+            return False
 
         while i < n:
             p = paragraphs[i]
-            txt = p["text"]
-            if not txt: 
-                i += 1; continue
+            txt = p["text"].strip()
 
-            # 1. BONUS
-            if rx_bonus.search(txt):
-                block_html = f"<p><b>{html_escape(txt)}</b></p>"
-                j = i + 1
-                while j < n:
-                    next_p = paragraphs[j]
-                    next_txt = next_p["text"]
-                    if rx_bonus.search(next_txt): break
-                    # Pokud narazíme na HLAVNÍ otázku (číslovaná, level 0, decimal, a vypadá jako otázka)
-                    if next_p["is_numbered"] and next_p["ilvl"] == 0 and next_p["num_fmt"] != "bullet" and not rx_not_question_start.match(next_txt):
-                         break
-                    if next_txt: block_html += f"<p>{html_escape(next_txt)}</p>"
-                    j += 1
-                q = Question.new_default("bonus")
-                q.title = self._derive_title_from_html(block_html, prefix="BONUS: ")
-                q.text_html = block_html
-                q.bonus_correct, q.bonus_wrong = 1.0, 0.0
-                out.append(q); i = j; continue
+            # Hledáme start
+            if not is_start_of_new_question(p):
+                i += 1
+                continue
 
-            # 2. KLASICKÁ
-            # Podmínky pro novou otázku:
-            # a) Je číslovaná
-            # b) Je na levelu 0
-            # c) Není to bullet
-            # d) Není to explicitně vyloučený text (Slovník...)
-            is_num = p["is_numbered"]
-            ilvl = p["ilvl"]
-            fmt = p["num_fmt"]
-            nid = p["num_id"]
-
-            is_potential_question = (is_num and (ilvl == 0 or ilvl is None) and fmt != "bullet")
+            # -- START OTÁZKY --
+            is_bonus = bool(rx_bonus_start.search(txt))
+            q_type = "bonus" if is_bonus else "classic"
             
-            # Heuristika pro "Slovník" problém:
-            # Pokud se změnilo numId (oproti minulé otázce) a text nevypadá jako otázka (začíná na Slovník),
-            # tak to pravděpodobně NENÍ nová otázka, ale součást minulé (pokud nějaká byla).
-            if is_potential_question and nid != last_question_num_id and last_question_num_id is not None:
-                if rx_not_question_start.match(txt):
-                    is_potential_question = False
-
-            if is_potential_question:
-                last_question_num_id = nid # Uložíme si ID seznamu této otázky
+            clean_title = re.sub(r'^\d+\.\s*', '', txt)
+            if len(clean_title) > 60: clean_title = clean_title[:57] + "..."
+            
+            html_parts = [f"<p>{html_escape(txt)}</p>"]
+            
+            # -- ČTENÍ OBSAHU (Hladový režim, ale s respektem k nové otázce) --
+            j = i + 1
+            while j < n:
+                next_p = paragraphs[j]
+                next_txt = next_p["text"].strip()
                 
-                block_html = f"<p>{html_escape(txt)}</p>"
-                j = i + 1
-                list_buffer = []
+                # Pokud narazíme na něco, co splňuje definici NOVÉ otázky, končíme.
+                if is_start_of_new_question(next_p):
+                    break
                 
-                while j < n:
-                    next_p = paragraphs[j]
-                    next_txt = next_p["text"]
-                    
-                    # Check start of new element (Bonus or New Question)
-                    if rx_bonus.search(next_txt): break
-                    
-                    next_is_num = next_p["is_numbered"]
-                    next_ilvl = next_p["ilvl"]
-                    next_fmt = next_p["num_fmt"]
-                    next_nid = next_p["num_id"]
-
-                    # Je to začátek další otázky?
-                    if next_is_num and (next_ilvl == 0 or next_ilvl is None) and next_fmt != "bullet":
-                        # Výjimka: Pokud je to "Slovník..." (tedy změna numId, ale textově to není otázka),
-                        # tak to NENÍ nová otázka, ale pokračování této.
-                        is_really_new = True
-                        if next_nid != last_question_num_id:
-                             if rx_not_question_start.match(next_txt):
-                                 is_really_new = False
-                        
-                        if is_really_new:
-                            break
-                    
-                    if not next_txt: j += 1; continue
-
-                    # Je to list item?
-                    # - Buď ilvl > 0
-                    # - Nebo fmt == bullet
-                    # - Nebo ilvl == 0, ale je to ten "Slovník" případ (is_really_new=False výše propadne sem)
-                    is_list_item = False
-                    if next_is_num:
-                        if next_ilvl > 0 or next_fmt == "bullet":
-                            is_list_item = True
-                        elif next_nid != last_question_num_id and rx_not_question_start.match(next_txt):
-                             # To je ten případ "Slovník" na levelu 0
-                             is_list_item = True
-
-                    if is_list_item:
-                        list_buffer.append((next_txt, next_ilvl, next_fmt))
-                    else:
-                        if list_buffer:
-                            block_html += wrap_list(list_buffer)
-                            list_buffer = []
-                        block_html += f"<p>{html_escape(next_txt)}</p>"
-                    j += 1
+                # Jinak je to součást této otázky
+                if next_txt:
+                    html_parts.append(f"<p>{html_escape(next_txt)}</p>")
                 
-                if list_buffer:
-                    block_html += wrap_list(list_buffer)
-                
-                q = Question.new_default("classic")
-                q.title = self._derive_title_from_html(block_html)
-                q.text_html = block_html
-                q.points = 1
-                out.append(q); i = j; continue
+                j += 1
 
-            # Text, který není součástí žádné otázky (úvod atd.)
-            i += 1
+            full_html = "".join(html_parts)
+            
+            q = Question.new_default(q_type)
+            q.title = ("BONUS: " + clean_title) if is_bonus else clean_title
+            q.text_html = full_html
+            q.points = (0 if is_bonus else 1)
+            q.bonus_correct = (1.0 if is_bonus else 0.0)
+            
+            out.append(q)
+            i = j
 
         return out
-
 
     def _ensure_unassigned_group(self) -> tuple[str, Optional[str]]:
         """Zajistí existenci skupiny 'Neroztříděné'. Vrací (group_id, None)."""
@@ -4793,24 +4760,35 @@ class MainWindow(QMainWindow):
         if not paths:
             return
 
-        # 1. Získání cílových podskupin v "Neroztříděné"
-        #    (Použijeme _ensure_unassigned_group pro získání/vytvoření hlavní skupiny,
-        #    ale pak si ručně najdeme/vytvoříme specifické podskupiny.)
-        g_id, _ = self._ensure_unassigned_group()
-        unassigned_group = self._find_group(g_id)
-        if not unassigned_group:
-            # Fallback, nemělo by nastat
+        # 1. Výběr cílové skupiny/podskupiny pomocí dialogu (NOVÉ)
+        dlg = MoveTargetDialog(self)
+        dlg.setWindowTitle("Importovat do...")
+        if dlg.exec() != QDialog.Accepted:
             return
+        
+        target_gid, target_sgid = dlg.selected_target()
+        if not target_gid:
+             return
 
-        def get_or_create_subgroup(g: Group, name: str) -> Subgroup:
-            sg = next((s for s in g.subgroups if s.name == name), None)
-            if not sg:
-                sg = Subgroup(id=str(_uuid.uuid4()), name=name, subgroups=[], questions=[])
-                g.subgroups.append(sg)
-            return sg
+        # Získání reference na cílovou podskupinu
+        target_sg = None
+        if target_sgid:
+            target_sg = self._find_subgroup(target_gid, target_sgid)
+        else:
+            # Pokud vybral jen skupinu, zkusíme najít/vytvořit první podskupinu
+            g = self._find_group(target_gid)
+            if g:
+                if g.subgroups:
+                    target_sg = g.subgroups[0]
+                else:
+                    # Vytvoření defaultní podskupiny, pokud skupina žádnou nemá
+                    new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
+                    g.subgroups.append(new_sg)
+                    target_sg = new_sg
 
-        target_classic = get_or_create_subgroup(unassigned_group, "Klasické")
-        target_bonus = get_or_create_subgroup(unassigned_group, "Bonusové")
+        if not target_sg:
+            QMessageBox.warning(self, "Chyba", "Nepodařilo se určit cílovou podskupinu.")
+            return
 
         # 2. Vytvoření indexu existujících otázek pro kontrolu duplicit
         #    Jako klíč použijeme ostripovaný HTML obsah.
@@ -4853,13 +4831,11 @@ class MainWindow(QMainWindow):
                         total_duplicates += 1
                         continue
                     
-                    # Pokud není duplicitní, přidáme do DB a aktualizujeme hashset (proti duplicitám v rámci jednoho importu)
+                    # Pokud není duplicitní, přidáme do DB a aktualizujeme hashset
                     existing_hashes.add(content_hash)
                     
-                    if q.type == "classic":
-                        target_classic.questions.append(q)
-                    else:
-                        target_bonus.questions.append(q)
+                    # Vložíme přímo do vybrané cílové podskupiny (nerozlišujeme složky Klasické/Bonusové)
+                    target_sg.questions.append(q)
                     
                     file_imported_count += 1
 
@@ -4871,8 +4847,9 @@ class MainWindow(QMainWindow):
         self._refresh_tree()
         self.save_data()
 
-        msg = f"Import dokončen.\n\nÚspěšně importováno: {total_imported}\nDuplicitních (přeskočeno): {total_duplicates}"
+        msg = f"Import dokončen do: {target_sg.name}\n\nÚspěšně importováno: {total_imported}\nDuplicitních (přeskočeno): {total_duplicates}"
         QMessageBox.information(self, "Výsledek importu", msg)
+
 
 
     # -------------------- Přesun otázky --------------------
