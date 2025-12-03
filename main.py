@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.4.0"
+APP_VERSION = "7.4.1"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -1786,48 +1786,221 @@ class ExportWizard(QWizard):
             del self.selection_map[ph]
             self._init_page2() # Refresh
 
-    def _on_tree_source_context_menu(self, pos) -> None:
-        """Kontextové menu nad stromem zdrojových otázek (Krok 2)."""
-        # Zjistíme, kolik je vybraných položek
-        items = self.tree_source.selectedItems()
-        if not items:
-            return
-            
+    def _on_tree_source_context_menu(self, pos):
+        # Kontextové menu nad stromem zdrojových otázek (Krok 2)
+        
+        # 1. Zjistíme položku pod myší (pro single action)
+        item_under_mouse = self.tree_source.itemAt(pos)
+        
+        # 2. Zjistíme všechny vybrané položky (pro multi action)
+        selected_items = self.tree_source.selectedItems()
+        
         menu = QMenu(self)
         has_action = False
 
-        # PŘÍPAD 1: Multi-select (více než 1 položka)
-        if len(items) > 1:
-            # Nabídneme hromadné přiřazení
-            act_multi = QAction(f"Přiřadit vybrané ({len(items)}) na volné pozice", self)
+        # A) AKCE PRO KONKRÉTNÍ OTÁZKU (JEDNOTLIVÝ VÝBĚR)
+        # (Ponecháme stávající logiku, pokud je vybrána jen jedna otázka nebo kliknuto na otázku)
+        if item_under_mouse:
+            data = item_under_mouse.data(0, Qt.UserRole)
+            if data and data.get("kind") == "question":
+                qid = data.get("id")
+                q = self.owner._find_question_by_id(qid)
+                if q:
+                    # Submenu "Přiřadit k..."
+                    menu_assign = menu.addMenu("Přiřadit k...")
+                    
+                    # Najdeme volné sloty
+                    free_slots = []
+                    if q.type == "classic":
+                        for ph in self.placeholders_q:
+                            if ph not in self.selection_map: free_slots.append(ph)
+                    else: # bonus
+                        for ph in self.placeholders_b:
+                            if ph not in self.selection_map: free_slots.append(ph)
+                    
+                    if not free_slots:
+                        a = menu_assign.addAction("(Žádné volné sloty)")
+                        a.setEnabled(False)
+                    else:
+                        for slot in free_slots:
+                            action = QAction(slot, self.tree_source)
+                            action.triggered.connect(lambda checked=False, s_slot=slot, q_id=qid: self._assign_from_context(s_slot, q_id))
+                            menu_assign.addAction(action)
+                    has_action = True
+
+        # B) AKCE PRO MULTI VÝBĚR OTÁZEK (PŘIŘADIT NA PRVNÍ VOLNÉ)
+        # (Pokud je vybráno více otázek)
+        questions_selected = [it for it in selected_items if it.data(0, Qt.UserRole).get("kind") == "question"]
+        if len(questions_selected) > 0:
+            act_multi = QAction(f"Přiřadit vybrané ({len(questions_selected)}) na volné pozice", self)
             act_multi.triggered.connect(self._assign_selected_multi)
             menu.addAction(act_multi)
             has_action = True
+
+        # C) NOVÉ: AKCE PRO MULTI VÝBĚR SKUPIN/PODSKUPIN (NÁHODNÝ VÝBĚR Z NICH)
+        # Filtrujeme vybrané položky, které jsou group nebo subgroup
+        containers_selected = [it for it in selected_items if it.data(0, Qt.UserRole).get("kind") in ("group", "subgroup")]
+        
+        if len(containers_selected) > 0:
+            # Pokud je vybráno více kontejnerů (nebo i jeden, ale chceme sjednotit logiku)
+            label = "této větve" if len(containers_selected) == 1 else "vybraných větví"
+            act_random_multi = QAction(f"Naplnit volné pozice náhodně z {label}", self)
+            act_random_multi.triggered.connect(lambda: self._assign_random_from_multiple_nodes(containers_selected))
+            menu.addAction(act_random_multi)
+            has_action = True
+
+        if has_action:
+            menu.exec(self.tree_source.viewport().mapToGlobal(pos))
             
-        # PŘÍPAD 2: Single-select (1 položka)
-        elif len(items) == 1:
-            item = items[0]
+    # --- POMOCNÉ METODY PRO MULTI-SELECT VE STROMU (JEDNOTLIVÝ EXPORT) ---
+
+    def _find_group_in_root(self, gid: str):
+        """Najde Group podle ID v rootu."""
+        for g in self.owner.root.groups:
+            if g.id == gid:
+                return g
+        return None
+
+    def _find_subgroup_in_group(self, group, sgid: str):
+        """Najde Subgroup podle ID v dané Group (rekurzivně)."""
+        def search(subs):
+            for s in subs:
+                if s.id == sgid:
+                    return s
+                if s.subgroups:
+                    found = search(s.subgroups)
+                    if found:
+                        return found
+            return None
+        
+        # Bezpečný přístup k subgroups
+        subs = getattr(group, "subgroups", []) or []
+        return search(subs)
+
+    def _collect_all_questions_in_branch(self, node) -> List["Question"]:
+        """Rekurzivně vrátí všechny otázky v uzlu a jeho podskupinách."""
+        res: List["Question"] = []
+        
+        # 1. Otázky přímo v uzlu
+        if hasattr(node, "questions") and node.questions:
+            res.extend(node.questions)
+        
+        # 2. Otázky v podskupinách
+        if hasattr(node, "subgroups") and node.subgroups:
+            for sub in node.subgroups:
+                res.extend(self._collect_all_questions_in_branch(sub))
+        
+        return res
+
+    def _assign_random_from_multiple_nodes(self, items: List[QTreeWidgetItem]) -> None:
+        """Naplní volné klasické sloty náhodnými otázkami ze všech vybraných větví."""
+        
+        # 1. Posbírat všechny klasické otázky ze všech vybraných větví
+        all_available_qs: List["Question"] = []
+        
+        for item in items:
             meta = item.data(0, Qt.UserRole) or {}
             kind = meta.get("kind")
             
-            # Skupina/Podskupina -> Náhodný výběr
-            if kind in ("group", "subgroup"):
-                act_random = QAction("Naplnit volné pozice náhodně z této větve", self)
-                act_random.triggered.connect(lambda: self._assign_random_from_context(meta))
-                menu.addAction(act_random)
-                has_action = True
+            if kind not in ("group", "subgroup"):
+                continue
+            
+            node = None
+            if kind == "group":
+                gid = meta.get("id")
+                node = self._find_group_in_root(gid)
                 
-            # Otázka -> Single assign (pokud chceme i v kontext menu, nebo necháme jen dblclick/tlačítko)
-            # Požadavek byl "může to fungovat ještě pro multi-select", o single v menu explicitně nepadlo slovo,
-            # ale v minulé verzi jsem to přidal. Nechám to tam.
-            if kind == "question":
-                act_assign = QAction("Přiřadit na první volné místo", self)
-                act_assign.triggered.connect(lambda: self._assign_single_question_from_context(meta))
-                menu.addAction(act_assign)
-                has_action = True
+            elif kind == "subgroup":
+                gid = meta.get("parent_group_id")
+                sgid = meta.get("id")
+                if gid and sgid:
+                    group = self._find_group_in_root(gid)
+                    if group:
+                        node = self._find_subgroup_in_group(group, sgid)
+            
+            if node:
+                qs_in_branch = self._collect_all_questions_in_branch(node)
+                # Filtrujeme jen klasické otázky
+                classic_qs = [q for q in qs_in_branch if getattr(q, "type", "") == "classic"]
+                all_available_qs.extend(classic_qs)
 
-        if has_action:
-            menu.exec(self.tree_source.mapToGlobal(pos))
+        # 2. Odstranit duplicity (podle ID)
+        unique_qs = {}
+        for q in all_available_qs:
+            unique_qs[q.id] = q
+        pool = list(unique_qs.values())
+        
+        if not pool:
+            QMessageBox.information(self, "Info", "Ve vybraných větvích nejsou žádné klasické otázky.")
+            return
+
+        # 3. Volné sloty pro klasické otázky
+        free_slots = [ph for ph in self.placeholders_q if ph not in self.selection_map]
+        if not free_slots:
+            QMessageBox.information(self, "Info", "Všechny sloty jsou již obsazené.")
+            return
+
+        # 4. Odstranit z poolu otázky, které už jsou někde použité
+        used_ids = set(self.selection_map.values())
+        pool = [q for q in pool if q.id not in used_ids]
+        
+        if not pool:
+            QMessageBox.information(self, "Info", "Všechny dostupné otázky z vybraných větví už jsou použity.")
+            return
+
+        import random
+        needed = len(free_slots)
+        assigned_count = 0
+
+        if len(pool) >= needed:
+            picked = random.sample(pool, needed)
+            for idx, ph in enumerate(free_slots):
+                self._assign_question_to_slot(ph, picked[idx])
+                assigned_count += 1
+        else:
+            # Máme méně otázek než slotů -> naplníme, co jde, bez opakování
+            random.shuffle(pool)
+            for idx, q in enumerate(pool):
+                if idx >= len(free_slots):
+                    break
+                self._assign_question_to_slot(free_slots[idx], q)
+                assigned_count += 1
+            
+            QMessageBox.warning(
+                self,
+                "Nedostatek otázek",
+                f"Doplněno pouze {assigned_count} otázek.\n"
+                "Ve vybraných větvích nebylo dostatek unikátních otázek pro všechny sloty."
+            )
+
+        if assigned_count > 0:
+            try:
+                self.owner.statusBar().showMessage(f"Doplněno {assigned_count} otázek z vybraných větví.", 3000)
+            except Exception:
+                pass
+
+
+    # V ExportWizard nebo použít owner metodu
+    def _find_subgroup_helper(self, parent_gid, sub_id):
+        # Musíme najít skupinu
+        group = None
+        for g in self.owner.root.groups:
+            if g.id == parent_gid:
+                group = g; break
+        
+        if not group: return None
+        
+        # Rekurzivní hledání v group
+        def search(subs):
+            for s in subs:
+                if s.id == sub_id: return s
+                if s.subgroups:
+                    found = search(s.subgroups)
+                    if found: return found
+            return None
+            
+        return search(group.subgroups)
+
 
     def _refresh_tree_visuals(self) -> None:
         """Aktualizuje vizuální stav položek ve stromu (vybrané vs volné)."""
