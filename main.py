@@ -1087,7 +1087,17 @@ class ExportWizard(QWizard):
 
         # 2. Volba režimu
         self.mode_box = QGroupBox("Režim exportu")
-        self.mode_box.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        self.mode_box.setStyleSheet("""
+            QGroupBox { font-weight: bold; margin-top: 10px; }
+            QRadioButton {
+                font-size: 14px; 
+                padding: 5px; 
+                border-radius: 4px;
+            }
+            QRadioButton::indicator { width: 16px; height: 16px; }
+            QRadioButton:checked { color: #61dafb; font-weight: bold; background-color: #3a3a3c; }
+            QRadioButton:hover { background-color: #2d2d30; }
+        """)
         l_mode = QHBoxLayout(self.mode_box)
         
         self.rb_mode_single = QRadioButton("Jednotlivý export (Standardní)")
@@ -1110,7 +1120,7 @@ class ExportWizard(QWizard):
         # 3. Nastavení pro hromadný export (Skryté by default)
         self.widget_multi_options = QWidget()
         self.widget_multi_options.setVisible(False)
-        self.widget_multi_options.setStyleSheet("background-color: #2d2d30; border-radius: 4px; padding: 4px;")
+        self.widget_multi_options.setStyleSheet("background-color: #2d2d30; border-radius: 4px; padding: 10px; border: 1px solid #444;")
         l_multi = QHBoxLayout(self.widget_multi_options)
         l_multi.setContentsMargins(5, 5, 5, 5)
         
@@ -1118,33 +1128,45 @@ class ExportWizard(QWizard):
         self.spin_multi_count = QSpinBox()
         self.spin_multi_count.setRange(2, 50)
         self.spin_multi_count.setValue(2)
+        self.spin_multi_count.setStyleSheet("padding: 4px;")
         l_multi.addWidget(self.spin_multi_count)
         
         l_multi.addWidget(QLabel("Zdroje otázek (pro |Otázka|1-10):"))
         
-        # Místo ComboBoxu tlačítko a label
+        # VÝRAZNĚJŠÍ TLAČÍTKO
         self.btn_select_sources = QPushButton("Vybrat zdroje...")
+        self.btn_select_sources.setCursor(Qt.PointingHandCursor)
+        self.btn_select_sources.setStyleSheet("""
+            QPushButton {
+                background-color: #0d47a1; 
+                color: white; 
+                border: none; 
+                padding: 6px 12px; 
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:pressed { background-color: #0d47a1; }
+        """)
         self.btn_select_sources.clicked.connect(self._on_select_sources_clicked)
         
         self.lbl_selected_sources = QLabel("Nevybráno (použijí se všechny otázky)")
-        self.lbl_selected_sources.setStyleSheet("color: #aaa; font-style: italic; margin-left: 5px;")
-        self.lbl_selected_sources.setWordWrap(True) # Aby se dlouhý text zalamoval
+        self.lbl_selected_sources.setStyleSheet("color: #aaa; font-style: italic; margin-left: 8px;")
+        self.lbl_selected_sources.setWordWrap(True)
         
-        # Kontejner pro tlačítko a label
         src_container = QWidget()
         src_layout = QHBoxLayout(src_container)
         src_layout.setContentsMargins(0, 0, 0, 0)
         src_layout.addWidget(self.btn_select_sources)
-        src_layout.addWidget(self.lbl_selected_sources, 1) # Stretch pro label
+        src_layout.addWidget(self.lbl_selected_sources, 1)
         
-        l_multi.addWidget(src_container, 1) # Stretch pro kontejner v hlavním layoutu
+        l_multi.addWidget(src_container, 1)
         
         main_layout.addWidget(self.widget_multi_options)
 
         # 4. Hlavní obsah (Dva sloupce: Strom | Sloty)
         columns_layout = QHBoxLayout()
         
-        # Levý panel: Strom
         self.widget_left_panel = QWidget()
         left_layout = QVBoxLayout(self.widget_left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -1172,10 +1194,12 @@ class ExportWizard(QWizard):
         right_header = QHBoxLayout()
         right_header.addWidget(QLabel("<b>Sloty v šabloně:</b>"))
         right_header.addStretch()
+        
         self.btn_clear_all = QPushButton("Vyprázdnit vše")
         self.btn_clear_all.setToolTip("Zruší přiřazení všech otázek.")
         self.btn_clear_all.clicked.connect(self._clear_all_assignments)
         right_header.addWidget(self.btn_clear_all)
+        
         right_layout.addLayout(right_header)
 
         self.scroll_slots = QScrollArea()
@@ -1199,6 +1223,7 @@ class ExportWizard(QWizard):
         self.text_preview_q.setStyleSheet("QTextEdit { background-color: #2e2e2e; color: #ffffff; font-size: 14px; border: 1px solid #555; padding: 5px; }")
         preview_layout.addWidget(self.text_preview_q)
         main_layout.addWidget(preview_box, 1)
+
 
     def _on_select_sources_clicked(self):
         # Zjistíme počet potřebných otázek ze šablony
@@ -1245,12 +1270,19 @@ class ExportWizard(QWizard):
         if not checked: return
         
         is_multi = (self.mode_group.checkedId() == 1)
+        
+        # 1. Zobrazit/skrýt panel s možnostmi pro Multi
         self.widget_multi_options.setVisible(is_multi)
         
-        # NOVÉ: Skrytí levého panelu s otázkami při multi režimu
+        # 2. Zobrazit/skrýt levý panel s otázkami (strom) - v Multi režimu ho nepotřebujeme
         self.widget_left_panel.setVisible(not is_multi)
         
+        # 3. NOVÉ: Skrýt tlačítko "Vyprázdnit vše" v Multi režimu
+        self.btn_clear_all.setVisible(not is_multi)
+        
+        # 4. Aktualizovat vizuál slotů (tlačítka "Vybrat..." vs "Náhodně")
         self._update_slots_visuals(is_multi)
+
 
     def _update_slots_visuals(self, is_multi: bool):
         """Aktualizuje vzhled slotů podle režimu."""
@@ -2218,16 +2250,16 @@ class ExportWizard(QWizard):
             html += f"<h3 style='background-color: {sec_q_bg}; padding: 5px; border-left: 4px solid #4da6ff;'>1. Klasické otázky</h3>"
             html += f"<table width='100%' border='0' cellspacing='0' cellpadding='5' style='color: {text_color};'>"
             for ph in self.placeholders_q:
-                qid = self.selection_map.get(ph)
-                if qid:
-                    q = self.owner._find_question_by_id(qid)
-                    if q:
-                        title_clean = re.sub(r'<[^>]+>', '', q.title)
-                        html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right'>({q.points} b)</td></tr>"
+                # Pokud je multi, ignorujeme selection_map a rovnou píšeme, že je to náhodné
+                if is_multi:
+                     html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td colspan='2' style='color:#ffcc00;'>[Náhodný výběr pro každou verzi]</td></tr>"
                 else:
-                    # Pokud je multi a placeholder je v seznamu klasických otázek -> Náhodný
-                    if is_multi and ph in self.placeholders_q:
-                        html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td colspan='2' style='color:#ffcc00;'>[Náhodný výběr pro každou verzi]</td></tr>"
+                    qid = self.selection_map.get(ph)
+                    if qid:
+                        q = self.owner._find_question_by_id(qid)
+                        if q:
+                            title_clean = re.sub(r'<[^>]+>', '', q.title)
+                            html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right'>({q.points} b)</td></tr>"
                     else:
                         html += f"<tr><td width='100' style='color:#ff5555;'>{ph}:</td><td colspan='2' style='color:#ff5555;'>--- NEVYPLNĚNO ---</td></tr>"
             html += "</table>"
