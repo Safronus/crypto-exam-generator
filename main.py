@@ -37,7 +37,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from html.parser import HTMLParser
 
-from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime, QPoint
+from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime, QPoint, QRect
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -83,7 +83,7 @@ from PySide6.QtWidgets import (
     # Nové importy pro v4.0 UI
     QGroupBox,
     QTableWidget,
-    QTableWidgetItem, QFrame,
+    QTableWidgetItem, QFrame, QStyledItemDelegate,
     QHeaderView, QCheckBox, QGridLayout,
     QTreeWidgetItemIterator, QButtonGroup,
     QHeaderView, QMenu, QTabWidget, QRadioButton,
@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.1.1"
+APP_VERSION = "7.2.0"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -127,8 +127,6 @@ def generate_colored_icon(text: str, color: QColor, shape: str = "circle") -> QI
     painter.drawText(pix.rect(), Qt.AlignCenter, text)
     painter.end()
     return QIcon(pix)
-
-
 
 def parse_html_to_paragraphs(html: str) -> List[dict]:
     if not html:
@@ -250,6 +248,57 @@ def apply_dark_theme(app: QApplication) -> None:
     palette.setColor(QPalette.Highlight, QColor(10, 132, 255))
     palette.setColor(QPalette.HighlightedText, Qt.black)
     app.setPalette(palette)
+
+
+# ---------------------- Custom Delegate pro Combo (Export Wizard) ----------------------
+class ComboGroupDelegate(QStyledItemDelegate):
+    """Delegate pro obarvení textu položek v ComboBoxu podle typu (Skupina/Podskupina)."""
+    def paint(self, painter, option, index):
+        # Získání dat položky
+        data = index.data(Qt.UserRole)
+        
+        # Určení barvy podle typu
+        if data and isinstance(data, dict):
+            item_type = data.get("type")
+            if item_type == "group":
+                text_color = QColor("#ff5252")
+            elif item_type == "subgroup":
+                text_color = QColor("#ff8a80")
+            else:
+                text_color = option.palette.color(QPalette.Text)
+        else:
+            text_color = option.palette.color(QPalette.Text)
+        
+        # Kreslení pozadí (výběr/hover)
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        else:
+            # Volitelné: lehce odlišit pozadí řádku
+            pass
+        
+        # Kreslení ikony (pokud existuje)
+        icon = index.data(Qt.DecorationRole)
+        if icon:
+            # Standardní velikost ikony
+            icon_size = option.decorationSize
+            # Vycentrování ikony vertikálně
+            icon_y = option.rect.top() + (option.rect.height() - icon_size.height()) // 2
+            icon_rect = QRect(option.rect.left() + 4, icon_y, icon_size.width(), icon_size.height())
+            icon.paint(painter, icon_rect)
+        
+        # Kreslení textu s barvou
+        text = index.data(Qt.DisplayRole)
+        if text:
+            # Odsazení za ikonu (cca 28px)
+            text_rect = option.rect.adjusted(28, 0, -4, 0)
+            painter.setPen(text_color)
+            
+            # Tučné písmo
+            font = option.font
+            font.setBold(True)
+            painter.setFont(font)
+            
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, text)
 
 
 # --------------------------- DnD Tree ---------------------------
@@ -830,7 +879,6 @@ class ExportWizard(QWizard):
         self.lbl_scan_info.setStyleSheet("color: gray; font-style: italic; margin-top: 10px;")
         l1.addWidget(self.lbl_scan_info)
 
-
     def _build_page2_content(self):
         self.page2.setTitle("Krok 2: Přiřazení otázek do šablony")
         self.page2.initializePage = self._init_page2
@@ -885,6 +933,8 @@ class ExportWizard(QWizard):
         l_multi.addWidget(QLabel("Zdroj otázek (pro <Otázka1-10>):"))
         self.combo_multi_source = QComboBox()
         self.combo_multi_source.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # [NOVÉ] Aplikace delegáta pro barevný text v comboboxu
+        self.combo_multi_source.setItemDelegate(ComboGroupDelegate(self.combo_multi_source))
         l_multi.addWidget(self.combo_multi_source, 1)
         
         main_layout.addWidget(self.widget_multi_options)
@@ -892,7 +942,7 @@ class ExportWizard(QWizard):
         # 4. Hlavní obsah (Dva sloupce: Strom | Sloty)
         columns_layout = QHBoxLayout()
         
-        # Levý panel: Strom (NOVÉ: Obaleno ve widgetu pro skrývání)
+        # Levý panel: Strom
         self.widget_left_panel = QWidget()
         left_layout = QVBoxLayout(self.widget_left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -964,6 +1014,7 @@ class ExportWizard(QWizard):
         preview_layout.addWidget(self.text_preview_q)
         
         main_layout.addWidget(preview_box, 1)
+
 
     def _on_mode_toggled(self, btn, checked):
         """Reaguje na změnu režimu exportu (Single vs Multi)."""
@@ -1280,20 +1331,25 @@ class ExportWizard(QWizard):
                 if item.widget(): item.widget().deleteLater()
             self.layout_slots.addStretch()
             
-            # Barvy a ikony pro strom (NOVÉ)
+            # Barvy a ikony pro strom
             color_group = QBrush(QColor("#ff5252"))
             color_subgroup = QBrush(QColor("#ff8a80"))
             color_classic = QBrush(QColor("#42a5f5"))
             color_bonus = QBrush(QColor("#ffea00"))
             
+            def generate_colored_icon(text, color, shape="rect"):
+                 return self.owner._generate_icon(text, color, shape)
+
             icon_group = generate_colored_icon("S", QColor("#ff5252"), "rect")
             icon_sub = generate_colored_icon("P", QColor("#ff8a80"), "rect")
             icon_classic = generate_colored_icon("Q", QColor("#42a5f5"), "circle")
             icon_bonus = generate_colored_icon("B", QColor("#ffea00"), "star")
             
             # 4. Populate Tree and Combo
-            def add_subgroup_recursive(parent_item, subgroup_list, parent_gid, level=1):
-                for sg in subgroup_list:
+            # Upraveno: "prefix" pro vizuální vnoření v ComboBoxu
+            def add_subgroup_recursive(parent_item, subgroup_list, parent_gid, prefix=""):
+                count = len(subgroup_list)
+                for i, sg in enumerate(subgroup_list):
                     # Tree Item
                     sg_item = QTreeWidgetItem([sg.name])
                     
@@ -1309,12 +1365,16 @@ class ExportWizard(QWizard):
                     })
                     parent_item.addChild(sg_item)
                     
-                    # Combo Item (Zachováno)
-                    indent = "  " * level
-                    self.combo_multi_source.addItem(f"{indent}📂 {sg.name}", {"type": "subgroup", "id": sg.id})
+                    # Combo Item - ASCII tree style
+                    is_last = (i == count - 1)
+                    connector = "└─" if is_last else "├─"
+                    display_text = f"{prefix}{connector} {sg.name}"
+                    self.combo_multi_source.addItem(icon_sub, display_text, {"type": "subgroup", "id": sg.id})
+                    
+                    # Příprava prefixu pro děti
+                    child_prefix = prefix + ("  " if is_last else "│ ")
                     
                     for q in sg.questions:
-                        # Zde musíme zjistit typ pro ikonu
                         label_type = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
                         is_bonus = (label_type == "BONUS")
                         
@@ -1329,7 +1389,6 @@ class ExportWizard(QWizard):
                             "parent_subgroup_id": sg.id
                         })
                         
-                        # Ikona a barva otázky
                         if is_bonus:
                             q_item.setIcon(0, icon_bonus)
                             q_item.setForeground(0, color_bonus)
@@ -1341,14 +1400,12 @@ class ExportWizard(QWizard):
                         sg_item.addChild(q_item)
                     
                     if sg.subgroups:
-                        add_subgroup_recursive(sg_item, sg.subgroups, parent_gid, level + 1)
+                        add_subgroup_recursive(sg_item, sg.subgroups, parent_gid, child_prefix)
 
             groups = self.owner.root.groups
             for g in groups:
                 # Tree
                 g_item = QTreeWidgetItem([g.name])
-                
-                # Ikona a barva Skupiny
                 g_item.setIcon(0, icon_group)
                 g_item.setForeground(0, color_group)
                 f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
@@ -1360,14 +1417,14 @@ class ExportWizard(QWizard):
                 self.tree_source.addTopLevelItem(g_item)
                 
                 # Combo
-                self.combo_multi_source.addItem(f"📁 {g.name}", {"type": "group", "id": g.id})
+                self.combo_multi_source.addItem(icon_group, g.name, {"type": "group", "id": g.id})
                 
-                add_subgroup_recursive(g_item, g.subgroups, g.id)
+                add_subgroup_recursive(g_item, g.subgroups, g.id, "")
                 
             self.tree_source.expandAll()
             self.tree_source.blockSignals(False)
 
-            # 5. Create Slots
+            # 5. Create Slots (IDENTICKÉ)
             def create_slot_row(ph, is_bonus):
                 row_w = QWidget()
                 row_l = QHBoxLayout(row_w)
@@ -1375,8 +1432,8 @@ class ExportWizard(QWizard):
                 
                 lbl_name = QLabel(f"{ph}:")
                 lbl_name.setFixedWidth(120)
-                if is_bonus: lbl_name.setStyleSheet("color: #ffea00;") # Was #ffcc00
-                else: lbl_name.setStyleSheet("color: #42a5f5;") # Was #4da6ff
+                if is_bonus: lbl_name.setStyleSheet("color: #ffea00;")
+                else: lbl_name.setStyleSheet("color: #42a5f5;")
                 
                 btn_assign = QPushButton("Vybrat...")
                 qid = self.selection_map.get(ph)
@@ -1420,14 +1477,14 @@ class ExportWizard(QWizard):
             is_multi = (self.mode_group.checkedId() == 1)
             self._update_slots_visuals(is_multi)
             
-            # DŮLEŽITÉ: Aktualizace vizuálů stromu na konci
-            self._refresh_tree_visuals()
+            # DŮLEŽITÉ: Aktualizace vizuálů stromu na konci (pokud existuje)
+            if hasattr(self, "_refresh_tree_visuals"):
+                self._refresh_tree_visuals()
                     
         except Exception as e:
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Chyba", f"Chyba při inicializaci stránky 2:\n{e}")
-
 
     def _on_slot_assign_clicked(self, ph: str) -> None:
         # Jednoduchý výběr: Otevře dialog se seznamem dostupných otázek
