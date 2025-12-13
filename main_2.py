@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.4.2"
+APP_VERSION = "7.4.1"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -183,7 +183,6 @@ class Question:
     # Nová pole
     correct_answer: str = ""
     funny_answers: List[FunnyAnswer] = field(default_factory=list)
-    image_path: str = ""  # cesta k obrázku (volitelné)
 
     @staticmethod
     def new_default(q_type: str = "classic") -> "Question":
@@ -1603,7 +1602,7 @@ class ExportWizard(QWizard):
             if not self.placeholders_q and not self.placeholders_b:
                 self._scan_placeholders()
 
-            # 1. Clear Tree
+            # 1. Clear Tree (Combo už nemáme)
             self.tree_source.blockSignals(True)
             self.tree_source.clear()
             
@@ -1624,13 +1623,12 @@ class ExportWizard(QWizard):
 
             icon_group = generate_colored_icon("S", QColor("#ff5252"), "rect")
             icon_sub = generate_colored_icon("P", QColor("#ff8a80"), "rect")
+            icon_classic = generate_colored_icon("Q", QColor("#42a5f5"), "circle")
+            icon_bonus = generate_colored_icon("B", QColor("#ffea00"), "star")
             
-            # 4. Populate Tree (Seřazeno abecedně)
+            # 4. Populate Tree (Pouze strom)
             def add_subgroup_recursive(parent_item, subgroup_list, parent_gid):
-                # SEŘAZENÍ PODSKUPIN
-                sorted_subs = sorted(subgroup_list, key=lambda s: s.name.lower())
-                
-                for sg in sorted_subs:
+                for sg in subgroup_list:
                     # Tree Item
                     sg_item = QTreeWidgetItem([sg.name])
                     sg_item.setIcon(0, icon_sub)
@@ -1643,10 +1641,7 @@ class ExportWizard(QWizard):
                     })
                     parent_item.addChild(sg_item)
                     
-                    # SEŘAZENÍ OTÁZEK
-                    sorted_qs = sorted(sg.questions, key=lambda q: (q.title or "").lower())
-                    
-                    for q in sorted_qs:
+                    for q in sg.questions:
                         label_type = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
                         is_bonus = (label_type == "BONUS")
                         info = f"({q.points} b)" if not is_bonus else f"(Bonus: {q.bonus_correct})"
@@ -1659,18 +1654,19 @@ class ExportWizard(QWizard):
                             "parent_subgroup_id": sg.id
                         })
                         
-                        # Vizualizace (Ikona + Obrázek)
-                        has_img = bool(getattr(q, "image_path", "") and os.path.exists(q.image_path))
-                        self.owner._apply_question_item_visuals(q_item, q.type, has_image=has_img)
-                        
+                        if is_bonus:
+                            q_item.setIcon(0, icon_bonus)
+                            q_item.setForeground(0, color_bonus)
+                            fb = q_item.font(0); fb.setBold(True); q_item.setFont(0, fb)
+                        else:
+                            q_item.setIcon(0, icon_classic)
+                            q_item.setForeground(0, color_classic)
                         sg_item.addChild(q_item)
                     
                     if sg.subgroups:
                         add_subgroup_recursive(sg_item, sg.subgroups, parent_gid)
 
-            # SEŘAZENÍ HLAVNÍCH SKUPIN
-            groups = sorted(self.owner.root.groups, key=lambda g: g.name.lower())
-            
+            groups = self.owner.root.groups
             for g in groups:
                 g_item = QTreeWidgetItem([g.name])
                 g_item.setIcon(0, icon_group)
@@ -1686,7 +1682,7 @@ class ExportWizard(QWizard):
             self.tree_source.expandAll()
             self.tree_source.blockSignals(False)
 
-            # 5. Create Slots
+            # 5. Create Slots (IDENTICKÉ)
             def create_slot_row(ph, is_bonus):
                 row_w = QWidget()
                 row_l = QHBoxLayout(row_w)
@@ -1712,13 +1708,7 @@ class ExportWizard(QWizard):
                 btn_clear = QPushButton("X")
                 btn_clear.setFixedWidth(30)
                 btn_clear.clicked.connect(lambda checked, p=ph: self._on_slot_clear_clicked(p))
-                
-                # POZOR: Zde je pořadí prvků v layoutu:
-                # 0: Label, 1: BtnAssign, 2: BtnClear
-                row_l.addWidget(lbl_name)
-                row_l.addWidget(btn_assign, 1)
-                row_l.addWidget(btn_clear)
-                
+                row_l.addWidget(lbl_name); row_l.addWidget(btn_assign, 1); row_l.addWidget(btn_clear)
                 row_w.setProperty("placeholder", ph)
                 self.layout_slots.insertWidget(self.layout_slots.count()-1, row_w)
 
@@ -1737,8 +1727,26 @@ class ExportWizard(QWizard):
             is_multi = (self.mode_group.checkedId() == 1)
             self._update_slots_visuals(is_multi)
             if hasattr(self, "_refresh_tree_visuals"): self._refresh_tree_visuals()
-            
+            # Aktualizace info o výběru zdrojů (pokud se změnil počet placeholderů)
             if self.multi_selected_sources:
+                needed = len(self.placeholders_q)
+                # Musíme znovu spočítat total z vybraných ID (nemáme dialog instanci)
+                # Helper pro spočítání totalu z self.multi_selected_sources (které má 'count' ale pozor na duplicity/hierarchii)
+                # Protože 'multi_selected_sources' je jen seznam položek z dialogu (které jsou checked),
+                # a my jsme v dialogu zajistili, že checked rodič má 'count' všeho pod sebou.
+                # Pro rychlý odhad stačí sečíst 'count' u položek, které nemají rodiče v tomtéž seznamu?
+                # Nebo prostě vezmeme uložený stav textu? Ne, text se resetuje.
+                
+                # Jednodušší: Zavoláme "refresh" logiku, která sečte unikátní otázky
+                # Ale nemáme tu instanci dialogu.
+                # Zkusíme to odhadnout z uloženého 'count' v selected_items.
+                # V 'get_selected_items' z dialogu jsme vraceli checked items.
+                # Dialog logika '_count_checked_item' sčítala checked rodiče a ignorovala děti.
+                # My ale v 'multi_selected_sources' máme VŠECHNY checked (i děti, protože checkstate se propagoval).
+                
+                # ŘEŠENÍ: Pro správný součet tady v _init_page2 bychom potřebovali logiku z dialogu.
+                # Pro teď jen resetujeme label na neutrální nebo "Vybráno X zdrojů", aby to nemátlo.
+                
                 count_src = len(self.multi_selected_sources)
                 self.lbl_selected_sources.setText(f"Vybráno {count_src} zdrojů (klikněte pro kontrolu počtu)")
                 self.lbl_selected_sources.setStyleSheet("color: #42a5f5; margin-left: 5px;")
@@ -2363,41 +2371,30 @@ class ExportWizard(QWizard):
         menu.exec(self.tree_source.viewport().mapToGlobal(position))
 
     def _assign_from_context(self, slot_name, qid):
-        # 1. Uložit přiřazení
         self.selection_map[slot_name] = qid
         
-        # 2. Aktualizovat UI Slotu (pravý panel)
-        found_widget = False
+        # Refresh slot UI
         for i in range(self.layout_slots.count()):
             w = self.layout_slots.itemAt(i).widget()
             if w and isinstance(w, QWidget):
                 children = w.findChildren(QLabel)
                 if children and children[0].text() == f"{slot_name}:":
-                    # Našli jsme správný slot widget
-                    
-                    # Index 1 = Tlačítko s názvem (prostřední)
+                    # Found slot widget
                     lbl_val = w.layout().itemAt(1).widget()
-                    # Index 2 = Tlačítko Clear (napravo) - OPRAVENO z 3 na 2
-                    btn_clr = w.layout().itemAt(2).widget()
-                    
+                    btn_clr = w.layout().itemAt(3).widget()
                     q = self.owner._find_question_by_id(qid)
-                    if q:
-                        lbl_val.setText(q.title)
-                        # Nastavíme styl tlačítka ve slotu (aby bylo vidět, že je plné)
-                        lbl_val.setStyleSheet("color: white; font-weight: bold;") 
-                        btn_clr.setEnabled(True)
-                        btn_clr.setVisible(True)
-                    found_widget = True
+                    lbl_val.setText(q.title)
+                    lbl_val.setStyleSheet("color: white; font-weight: bold;")
+                    btn_clr.setEnabled(True)
                     break
         
-        # 3. Aktualizovat vizuál stromu pomocí existující metody
-        # (Tato metoda projde strom a obarví vše, co je v selection_map)
-        if hasattr(self, "_refresh_tree_visuals"):
-            self._refresh_tree_visuals()
-        else:
-            # Fallback, pokud metoda neexistuje (pro jistotu, ale měla by tam být)
-            print("Warning: _refresh_tree_visuals method not found in ExportWizard.")
-            # Zde případně fallback na ruční obarvení, pokud by metoda chyběla
+        # Hide tree item
+        it = QTreeWidgetItemIterator(self.tree_source)
+        while it.value():
+            if it.value().data(0, Qt.UserRole) == qid:
+                it.value().setHidden(True)
+                break
+            it += 1
 
     def _init_page3(self):
         try:
@@ -2982,9 +2979,6 @@ class MainWindow(QMainWindow):
         default_data_dir.mkdir(parents=True, exist_ok=True)
         self.data_path = data_path or (default_data_dir / "questions.json")
 
-        self.images_dir = default_data_dir / "obrázky"
-        self.images_dir.mkdir(parents=True, exist_ok=True)
-
         # Aplikace ikona (pokud existuje)
         icon_file = self.project_root / "icon" / "icon.png"
         if icon_file.exists():
@@ -3220,22 +3214,9 @@ class MainWindow(QMainWindow):
         self.spin_points = QSpinBox(); self.spin_points.setRange(-999, 999); self.spin_points.setValue(1)
         self.spin_bonus_correct = QDoubleSpinBox(); self.spin_bonus_correct.setDecimals(2); self.spin_bonus_correct.setSingleStep(0.01); self.spin_bonus_correct.setRange(-999.99, 999.99); self.spin_bonus_correct.setValue(1.00)
         self.spin_bonus_wrong = QDoubleSpinBox(); self.spin_bonus_wrong.setDecimals(2); self.spin_bonus_wrong.setSingleStep(0.01); self.spin_bonus_wrong.setRange(-999.99, 999.99); self.spin_bonus_wrong.setValue(0.00)
-
-        self.image_path_edit = QLineEdit()
-        self.image_path_edit.setPlaceholderText("Cesta k obrázku (volitelné)…")
-        self.btn_choose_image = QPushButton("Vybrat…")
-        self.btn_clear_image = QPushButton("Smazat")
-        img_row = QWidget()
-        img_row_l = QHBoxLayout(img_row)
-        img_row_l.setContentsMargins(0, 0, 0, 0)
-        img_row_l.setSpacing(6)
-        img_row_l.addWidget(self.image_path_edit, 1)
-        img_row_l.addWidget(self.btn_choose_image)
-        img_row_l.addWidget(self.btn_clear_image)
-
+        
         self.form_layout.addRow("Název otázky:", self.title_edit)
         self.form_layout.addRow("Typ otázky:", self.combo_type)
-        self.form_layout.addRow("Obrázek:", img_row)
         self.form_layout.addRow("Body (klasická):", self.spin_points)
         self.form_layout.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
         self.form_layout.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
@@ -4012,9 +3993,6 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.setEnabled(enabled)
         self.title_edit.setEnabled(enabled)
         self.combo_type.setEnabled(enabled)
-        self.image_path_edit.setEnabled(enabled)
-        self.btn_choose_image.setEnabled(enabled)
-        self.btn_clear_image.setEnabled(enabled)
         self.spin_points.setEnabled(enabled)
         self.spin_bonus_correct.setEnabled(enabled and self.combo_type.currentIndex() == 1)
         self.spin_bonus_wrong.setEnabled(enabled and self.combo_type.currentIndex() == 1)
@@ -4027,8 +4005,6 @@ class MainWindow(QMainWindow):
         
         self.btn_save_question.clicked.connect(self._on_save_question_clicked)
         self.btn_rename.clicked.connect(self._on_rename_clicked)
-        self.btn_choose_image.clicked.connect(self._choose_question_image)
-        self.btn_clear_image.clicked.connect(self._clear_question_image)
         
         # Tree actions context menu
         self.act_add_group.triggered.connect(self._add_group)
@@ -4041,7 +4017,6 @@ class MainWindow(QMainWindow):
         
         # Autosave triggers
         self.title_edit.textChanged.connect(self._autosave_schedule)
-        self.image_path_edit.textChanged.connect(self._autosave_schedule)
         self.combo_type.currentIndexChanged.connect(self._on_type_changed_ui)
         self.spin_points.valueChanged.connect(self._autosave_schedule)
         self.spin_bonus_correct.valueChanged.connect(self._autosave_schedule)
@@ -4327,7 +4302,6 @@ class MainWindow(QMainWindow):
             created_at=q.get("created_at", ""),
             correct_answer=q.get("correct_answer", ""),
             funny_answers=f_answers,
-            image_path=q.get("image_path", ""),
         )
 
     def _serialize_group(self, g: Group) -> dict:
@@ -4374,69 +4348,32 @@ class MainWindow(QMainWindow):
         painter.end()
         return QIcon(pix)
 
-    def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str, has_image: bool = False) -> None:
+    def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str) -> None:
         """Aplikuje vizuální styl na položku otázky (ikona, barva, font)."""
-        color_classic_bg = QColor("#42a5f5")  # Modrá
-        color_bonus_bg = QColor("#ffea00")    # Žlutá
+        
+        color_classic_bg = QColor("#42a5f5") # Modrá
+        color_bonus_bg = QColor("#ffea00")   # Žlutá
         
         is_bonus = str(q_type).lower() == "bonus" or q_type == 1
-
+        
         if is_bonus:
-            base_icon_char = "B"
-            base_color = color_bonus_bg
-            shape = "star"
+            # BONUS: Ikona hvězdy/diamantu s "B"
+            icon = self._generate_icon("B", color_bonus_bg, "star")
+            item.setIcon(0, icon)
+            
             item.setForeground(0, QBrush(color_bonus_bg))
             item.setForeground(1, QBrush(color_bonus_bg))
             f = item.font(0); f.setBold(True); item.setFont(0, f)
         else:
-            base_icon_char = "Q"
-            base_color = color_classic_bg
-            shape = "circle"
+            # KLASICKÁ: Ikona kruhu s "Q" (nebo standard)
+            # Pro odlišení použijeme generovanou ikonu "Q" nebo "?" nebo prostě "1" (jako body?)
+            # Zvolím "Q" pro Question
+            icon = self._generate_icon("Q", color_classic_bg, "circle")
+            item.setIcon(0, icon)
+            
             item.setForeground(0, QBrush(color_classic_bg))
             item.setForeground(1, QBrush(color_classic_bg))
             f = item.font(0); f.setBold(False); item.setFont(0, f)
-
-        # Generování ikony (případně kompozitní s indikátorem obrázku)
-        if has_image:
-            # Vytvoříme širší pixmapu pro dvě ikony vedle sebe [IMG][Q]
-            pix = QPixmap(34, 16)
-            pix.fill(Qt.transparent)
-            painter = QPainter(pix)
-            painter.setRenderHint(QPainter.Antialiasing)
-            
-            # 1. Ikona obrázku (vlevo)
-            # Malý obdélník s naznačením "obrázku"
-            painter.setBrush(QColor("#ab47bc")) # Fialová pro odlišení
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(0, 2, 14, 12, 2, 2)
-            # Symbol (kolečko uvnitř jako čočka)
-            painter.setBrush(QColor("white"))
-            painter.drawEllipse(4, 5, 6, 6)
-
-            # 2. Standardní ikona (vpravo, posunutá o 18px)
-            painter.setBrush(base_color)
-            painter.translate(18, 0)
-            
-            if shape == "circle":
-                painter.drawEllipse(1, 1, 14, 14)
-            elif shape == "star":
-                path = QPainterPath()
-                path.moveTo(8, 0); path.lineTo(16, 8); path.lineTo(8, 16); path.lineTo(0, 8); path.closeSubpath()
-                painter.drawPath(path)
-            
-            painter.setPen(QColor("black"))
-            font = painter.font()
-            font.setBold(True)
-            font.setPointSize(9)
-            painter.setFont(font)
-            painter.drawText(QRect(0, 0, 16, 16), Qt.AlignCenter, base_icon_char)
-            
-            painter.end()
-            item.setIcon(0, QIcon(pix))
-        else:
-            # Standardní ikona bez obrázku
-            icon = self._generate_icon(base_icon_char, base_color, shape)
-            item.setIcon(0, icon)
 
     def _refresh_tree(self) -> None:
         """Obnoví strom otázek podle self.root."""
@@ -4469,6 +4406,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_refresh_funny_answers_tab"):
             self._refresh_funny_answers_tab()
 
+
     def _add_subgroups_to_item(self, parent_item: QTreeWidgetItem, group_id: str, subgroups: List[Subgroup]) -> None:
         color_subgroup = QBrush(QColor("#ff8a80"))
         # Ikona Podskupiny: Světle červený kruh/čtverec s "P"
@@ -4477,49 +4415,50 @@ class MainWindow(QMainWindow):
         for sg in subgroups:
             parent_meta = parent_item.data(0, Qt.UserRole) or {}
             parent_sub_id = parent_meta.get("id") if parent_meta.get("kind") == "subgroup" else None
-
+            
             sg_item = QTreeWidgetItem([sg.name, ""])
             sg_item.setData(0, Qt.UserRole, {
-                "kind": "subgroup",
-                "id": sg.id,
-                "parent_group_id": group_id,
+                "kind": "subgroup", 
+                "id": sg.id, 
+                "parent_group_id": group_id, 
                 "parent_subgroup_id": parent_sub_id
             })
             sg_item.setIcon(0, icon_subgroup)
+            
             sg_item.setForeground(0, color_subgroup)
             sg_item.setForeground(1, color_subgroup)
             f = sg_item.font(0); f.setBold(True); sg_item.setFont(0, f)
-            parent_item.addChild(sg_item)
 
+            parent_item.addChild(sg_item)
+            
             # 1. Otázky
             sorted_questions = sorted(sg.questions, key=lambda q: (q.title or "").lower())
+            
             for q in sorted_questions:
                 label = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
                 is_bonus = (label == "BONUS")
+                
                 if is_bonus:
                     pts = f"+{q.bonus_correct}/{q.bonus_wrong} b."
                 else:
                     pts = f"{q.points} b."
-
+                
                 q_item = QTreeWidgetItem([q.title or "Otázka", f"{label} | {pts}"])
                 q_item.setData(0, Qt.UserRole, {
-                    "kind": "question",
-                    "id": q.id,
-                    "parent_group_id": group_id,
+                    "kind": "question", 
+                    "id": q.id, 
+                    "parent_group_id": group_id, 
                     "parent_subgroup_id": sg.id
                 })
                 
-                # NOVÉ: Předáváme informaci o existenci obrázku
-                has_img = bool(getattr(q, "image_path", "") and os.path.exists(q.image_path))
-                self._apply_question_item_visuals(q_item, q.type, has_image=has_img)
-
+                self._apply_question_item_visuals(q_item, q.type)
                 sg_item.addChild(q_item)
-
+            
             # 2. Rekurze
             if sg.subgroups:
                 sorted_nested_subgroups = sorted(sg.subgroups, key=lambda s: s.name.lower())
                 self._add_subgroups_to_item(sg_item, group_id, sorted_nested_subgroups)
-                
+            
             sg_item.setExpanded(True)
 
     def _selected_node(self):
@@ -4787,7 +4726,6 @@ class MainWindow(QMainWindow):
             self.spin_bonus_wrong,
             self.combo_type,
             self.title_edit,
-            self.image_path_edit,
             self.edit_correct_answer,
             self.table_funny
         ]
@@ -4802,7 +4740,6 @@ class MainWindow(QMainWindow):
             self.spin_bonus_wrong.setValue(0.00)
             self.combo_type.setCurrentIndex(0)
             self.title_edit.clear()
-            self.image_path_edit.clear()
             self.edit_correct_answer.clear() 
             self.table_funny.setRowCount(0) 
         finally:
@@ -4816,36 +4753,27 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.setVisible(visible)
         self.text_edit.setVisible(visible)
         self.btn_save_question.setVisible(visible)
-
+        
         # Skrytí/Zobrazení prvků formuláře
         widgets = [
-            self.title_edit,
-            self.image_path_edit,
-            self.btn_choose_image,
-            self.btn_clear_image,
-            self.combo_type,
-            self.spin_points,
-            self.spin_bonus_correct,
+            self.title_edit, 
+            self.combo_type, 
+            self.spin_points, 
+            self.spin_bonus_correct, 
             self.spin_bonus_wrong,
+            # NOVÉ: Widgety a jejich labely
             self.edit_correct_answer,
             self.funny_container,
+            # NOVÉ: Samostatné labely sekcí
             self.lbl_content,
             self.lbl_correct,
             self.lbl_funny
         ]
         
-        # Přidáme i label náhledu, pokud existuje
-        if hasattr(self, "lbl_image_preview"):
-            # Zobrazíme jen pokud je 'visible' True A máme co zobrazit (kontroluje se v load_question)
-            # Ale pro jistotu: pokud visible=False, skryjeme určitě.
-            if not visible:
-                self.lbl_image_preview.setVisible(False)
-            # Pokud visible=True, stav labelu řídí _load_question_to_editor, takže neměníme.
-
         for w in widgets:
-            if hasattr(self, w.objectName()) or w in widgets:
+            if hasattr(self, w.objectName()) or w in widgets: # Check existence
                 w.setVisible(visible)
-
+            
         # Skrytí labelů ve form layoutu
         for i in range(self.form_layout.rowCount()):
             item = self.form_layout.itemAt(i, QFormLayout.LabelRole)
@@ -4853,22 +4781,14 @@ class MainWindow(QMainWindow):
                 item.widget().setVisible(visible)
             item = self.form_layout.itemAt(i, QFormLayout.FieldRole)
             if item and item.widget():
-                # Specifická výjimka pro náhled - ten si řídí viditelnost sám podle obsahu
-                if hasattr(self, "lbl_image_preview") and item.widget() == self.lbl_image_preview:
-                    if not visible:
-                        item.widget().setVisible(False)
-                    continue
                 item.widget().setVisible(visible)
-
+        
         if visible:
             self._on_type_changed_ui()
 
     def _load_question_to_editor(self, q: Question) -> None:
         # ID nulujeme i zde pro jistotu
         self._current_question_id = None
-        
-        # Uložení plné cesty k obrázku bokem (protože v GUI ukazujeme jen název)
-        self._current_image_full_path = getattr(q, "image_path", "") or ""
 
         widgets = [
             self.combo_type,
@@ -4877,11 +4797,10 @@ class MainWindow(QMainWindow):
             self.spin_bonus_wrong,
             self.text_edit,
             self.title_edit,
-            self.image_path_edit,
             self.edit_correct_answer,
             self.table_funny
         ]
-
+        
         for w in widgets:
             w.blockSignals(True)
 
@@ -4890,22 +4809,14 @@ class MainWindow(QMainWindow):
             self.spin_points.setValue(int(q.points))
             self.spin_bonus_correct.setValue(float(q.bonus_correct))
             self.spin_bonus_wrong.setValue(float(q.bonus_wrong))
+            
             self.text_edit.setHtml(q.text_html or "")
             self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
-            
-            # NOVÉ: Zobrazit jen název souboru
-            full_path = getattr(q, "image_path", "") or ""
-            if full_path:
-                self.image_path_edit.setText(os.path.basename(full_path))
-                self.image_path_edit.setToolTip(full_path) # Full path v tooltipu
-            else:
-                self.image_path_edit.clear()
-                self.image_path_edit.setToolTip("")
-
             self.edit_correct_answer.setPlainText(q.correct_answer or "")
 
             self.table_funny.setRowCount(0)
             f_answers = getattr(q, "funny_answers", []) or []
+
             for fa in f_answers:
                 if isinstance(fa, FunnyAnswer):
                     text = fa.text; date = fa.date; author = fa.author; source_doc = fa.source_doc
@@ -4917,42 +4828,16 @@ class MainWindow(QMainWindow):
                 self.table_funny.setItem(row, 0, QTableWidgetItem(text))
                 self.table_funny.setItem(row, 1, QTableWidgetItem(date))
                 self.table_funny.setItem(row, 2, QTableWidgetItem(author))
+                
                 display_source = os.path.basename(source_doc) if source_doc else ""
                 source_item = QTableWidgetItem(display_source)
                 source_item.setData(Qt.UserRole, source_doc)
                 self.table_funny.setItem(row, 3, source_item)
 
-            # NOVÉ: Náhled obrázku
-            # Lazy init labelu pro náhled, pokud neexistuje
-            if not hasattr(self, "lbl_image_preview"):
-                self.lbl_image_preview = QLabel()
-                self.lbl_image_preview.setAlignment(Qt.AlignCenter)
-                self.lbl_image_preview.setStyleSheet("border: 1px solid #444; background: #222; border-radius: 4px; margin-top: 5px;")
-                self.lbl_image_preview.setMinimumHeight(150)
-                # Přidáme do form layoutu (nakonec)
-                self.form_layout.addRow("Náhled:", self.lbl_image_preview)
-
-            if full_path and os.path.exists(full_path):
-                pix = QPixmap(full_path)
-                if not pix.isNull():
-                    # Škálování s poměrem stran
-                    scaled = pix.scaled(QSize(400, 200), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    self.lbl_image_preview.setPixmap(scaled)
-                    self.lbl_image_preview.setVisible(True)
-                    # Zvětšíme okno, pokud je malé, aby se náhled vešel
-                    if self.height() < 850:
-                        self.resize(self.width(), 850)
-                else:
-                    self.lbl_image_preview.setText("Chyba načítání")
-                    self.lbl_image_preview.setVisible(True)
-            else:
-                self.lbl_image_preview.clear()
-                self.lbl_image_preview.hide()
-
             self._set_editor_enabled(True)
             # Toto volání aktualizuje UI, ale protože ID je None, neuloží se nic
             self._on_type_changed_ui()
-
+            
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -4963,7 +4848,6 @@ class MainWindow(QMainWindow):
 
         def apply_in(sgs: List[Subgroup]) -> bool:
             for sg in sgs:
-                # 1. Prohledání otázek v aktuální podskupině
                 for i, q in enumerate(sg.questions):
                     if q.id == self._current_question_id:
                         q.type = "classic" if self.combo_type.currentIndex() == 0 else "bonus"
@@ -4971,11 +4855,11 @@ class MainWindow(QMainWindow):
                         q.title = (
                             self.title_edit.text().strip()
                             or self._derive_title_from_html(
-                                q.text_html, 
-                                prefix=("BONUS: " if q.type == "bonus" else "")
+                                q.text_html,
+                                prefix=("BONUS: " if q.type == "bonus" else ""),
                             )
                         )
-                        
+
                         # Uložení bodů
                         if q.type == "classic":
                             q.points = int(self.spin_points.value())
@@ -4989,51 +4873,20 @@ class MainWindow(QMainWindow):
                         # Uložení správné odpovědi
                         q.correct_answer = self.edit_correct_answer.toPlainText()
 
-                        # Uložení cesty k obrázku (s kontrolou na basename)
-                        editor_txt = self.image_path_edit.text().strip()
-                        stored_full = getattr(self, "_current_image_full_path", "")
-                        
-                        final_path = ""
-                        # Pokud uživatel nezměnil text (je stále basename původní cesty), zachováme full path
-                        if stored_full and editor_txt == os.path.basename(stored_full):
-                            final_path = stored_full
-                        else:
-                            # Uživatel něco napsal/vybral -> použijeme to
-                            final_path = editor_txt
-                            # Aktualizujeme stored path pro příští uložení
-                            self._current_image_full_path = final_path
-                        
-                        q.image_path = final_path
-
-                        # --- NOVÉ: OKAMŽITÁ AKTUALIZACE NÁHLEDU ---
-                        if hasattr(self, "lbl_image_preview"):
-                            if final_path and os.path.exists(final_path):
-                                pix = QPixmap(final_path)
-                                if not pix.isNull():
-                                    scaled = pix.scaled(QSize(400, 200), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                                    self.lbl_image_preview.setPixmap(scaled)
-                                    self.lbl_image_preview.setVisible(True)
-                                else:
-                                    self.lbl_image_preview.setText("Chyba načítání")
-                                    self.lbl_image_preview.setVisible(True)
-                            else:
-                                self.lbl_image_preview.clear()
-                                self.lbl_image_preview.hide()
-                        # ------------------------------------------
-
-                        # Uložení vtipných odpovědí z tabulky
+                        # Uložení vtipných odpovědí z tabulky (včetně zdrojového dokumentu)
                         new_funny: List[FunnyAnswer] = []
                         for r in range(self.table_funny.rowCount()):
                             t_item = self.table_funny.item(r, 0)
-                            if not t_item: continue
+                            if not t_item:
+                                continue
                             d_item = self.table_funny.item(r, 1)
                             a_item = self.table_funny.item(r, 2)
                             s_item = self.table_funny.item(r, 3) if self.table_funny.columnCount() > 3 else None
-                            
+
                             text = t_item.text()
                             date = d_item.text() if d_item else ""
                             author = a_item.text() if a_item else ""
-                            
+
                             if s_item is not None:
                                 data = s_item.data(Qt.UserRole)
                                 if isinstance(data, str) and data:
@@ -5042,87 +4895,42 @@ class MainWindow(QMainWindow):
                                     source_doc = s_item.text()
                             else:
                                 source_doc = ""
-                            
+
                             new_funny.append(
                                 FunnyAnswer(
                                     text=text,
                                     author=author,
                                     date=date,
-                                    source_doc=source_doc
+                                    source_doc=source_doc,
                                 )
                             )
-
                         q.funny_answers = new_funny
+
                         sg.questions[i] = q
 
                         label = "Klasická" if q.type == "classic" else "BONUS"
                         pts = q.points if q.type == "classic" else self._bonus_points_label(q)
-                        
                         self._update_selected_question_item_title(q.title)
                         self._update_selected_question_item_subtitle(f"{label} | {pts}")
-                        
+
                         items = self.tree.selectedItems()
                         if items:
-                            # Aktualizace vizuálu položky (ikona)
-                            has_img = bool(q.image_path and os.path.exists(q.image_path))
-                            self._apply_question_item_visuals(items[0], q.type, has_image=has_img)
+                            self._apply_question_item_visuals(items[0], q.type)
 
                         if not silent:
                             self.statusBar().showMessage("Změny otázky uloženy (lokálně).", 1200)
-                        
+
+                        # 🔁 po každé změně otázky obnovíme přehled vtipných odpovědí
                         self._refresh_funny_answers_tab()
                         return True
-            
-                # 2. Rekurzivní hledání v podskupinách
+
                 if apply_in(sg.subgroups):
                     return True
-
             return False
 
         for g in self.root.groups:
             if apply_in(g.subgroups):
                 break
-
-    def _clear_editor(self) -> None:
-        self._current_question_id = None
-        self._current_image_full_path = ""  # Vyčistit cache cesty
-
-        widgets = [
-            self.text_edit,
-            self.spin_points,
-            self.spin_bonus_correct,
-            self.spin_bonus_wrong,
-            self.combo_type,
-            self.title_edit,
-            self.image_path_edit,
-            self.edit_correct_answer,
-            self.table_funny
-        ]
-
-        for w in widgets:
-            w.blockSignals(True)
-
-        try:
-            self.text_edit.clear()
-            self.spin_points.setValue(1)
-            self.spin_bonus_correct.setValue(1.00)
-            self.spin_bonus_wrong.setValue(0.00)
-            self.combo_type.setCurrentIndex(0)
-            self.title_edit.clear()
-            self.image_path_edit.clear()
-            self.edit_correct_answer.clear()
-            self.table_funny.setRowCount(0)
-            
-            # NOVÉ: Vyčistit náhled
-            if hasattr(self, "lbl_image_preview"):
-                self.lbl_image_preview.clear()
-                self.lbl_image_preview.hide()
-
-        finally:
-            for w in widgets:
-                w.blockSignals(False)
-        
-        self._set_editor_enabled(False)
             
     def _autosave_schedule(self) -> None:
         if not self._current_question_id:
@@ -5335,29 +5143,6 @@ class MainWindow(QMainWindow):
             self.data_path = Path(new_path)
             self.statusBar().showMessage(f"Datový soubor změněn na: {self.data_path}", 4000)
             self.load_data(); self._refresh_tree()
-
-    def _choose_question_image(self) -> None:
-        """Vybere obrázek k aktuální otázce (uloží se pouze cesta)."""
-        if not getattr(self, "_current_question_id", None):
-            return
-        start_dir = str(getattr(self, "images_dir", self.project_root))
-        Path(start_dir).mkdir(parents=True, exist_ok=True)
-        fn, _ = QFileDialog.getOpenFileName(
-            self,
-            "Vybrat obrázek k otázce",
-            start_dir,
-            "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic);;All files (*)",
-        )
-        if fn:
-            self.image_path_edit.setText(fn)
-            self._autosave_schedule()
-
-    def _clear_question_image(self) -> None:
-        """Odebere obrázek z aktuální otázky."""
-        if not getattr(self, "_current_question_id", None):
-            return
-        self.image_path_edit.clear()
-        self._autosave_schedule()
 
     # -------------------- Filtr --------------------
 
