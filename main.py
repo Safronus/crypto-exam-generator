@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.4.1"
+APP_VERSION = "7.4.2"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -183,6 +183,7 @@ class Question:
     # Nová pole
     correct_answer: str = ""
     funny_answers: List[FunnyAnswer] = field(default_factory=list)
+    image_path: str = ""  # cesta k obrázku (volitelné)
 
     @staticmethod
     def new_default(q_type: str = "classic") -> "Question":
@@ -2979,6 +2980,9 @@ class MainWindow(QMainWindow):
         default_data_dir.mkdir(parents=True, exist_ok=True)
         self.data_path = data_path or (default_data_dir / "questions.json")
 
+        self.images_dir = default_data_dir / "obrázky"
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+
         # Aplikace ikona (pokud existuje)
         icon_file = self.project_root / "icon" / "icon.png"
         if icon_file.exists():
@@ -3214,9 +3218,22 @@ class MainWindow(QMainWindow):
         self.spin_points = QSpinBox(); self.spin_points.setRange(-999, 999); self.spin_points.setValue(1)
         self.spin_bonus_correct = QDoubleSpinBox(); self.spin_bonus_correct.setDecimals(2); self.spin_bonus_correct.setSingleStep(0.01); self.spin_bonus_correct.setRange(-999.99, 999.99); self.spin_bonus_correct.setValue(1.00)
         self.spin_bonus_wrong = QDoubleSpinBox(); self.spin_bonus_wrong.setDecimals(2); self.spin_bonus_wrong.setSingleStep(0.01); self.spin_bonus_wrong.setRange(-999.99, 999.99); self.spin_bonus_wrong.setValue(0.00)
-        
+
+        self.image_path_edit = QLineEdit()
+        self.image_path_edit.setPlaceholderText("Cesta k obrázku (volitelné)…")
+        self.btn_choose_image = QPushButton("Vybrat…")
+        self.btn_clear_image = QPushButton("Smazat")
+        img_row = QWidget()
+        img_row_l = QHBoxLayout(img_row)
+        img_row_l.setContentsMargins(0, 0, 0, 0)
+        img_row_l.setSpacing(6)
+        img_row_l.addWidget(self.image_path_edit, 1)
+        img_row_l.addWidget(self.btn_choose_image)
+        img_row_l.addWidget(self.btn_clear_image)
+
         self.form_layout.addRow("Název otázky:", self.title_edit)
         self.form_layout.addRow("Typ otázky:", self.combo_type)
+        self.form_layout.addRow("Obrázek:", img_row)
         self.form_layout.addRow("Body (klasická):", self.spin_points)
         self.form_layout.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
         self.form_layout.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
@@ -3993,6 +4010,9 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.setEnabled(enabled)
         self.title_edit.setEnabled(enabled)
         self.combo_type.setEnabled(enabled)
+        self.image_path_edit.setEnabled(enabled)
+        self.btn_choose_image.setEnabled(enabled)
+        self.btn_clear_image.setEnabled(enabled)
         self.spin_points.setEnabled(enabled)
         self.spin_bonus_correct.setEnabled(enabled and self.combo_type.currentIndex() == 1)
         self.spin_bonus_wrong.setEnabled(enabled and self.combo_type.currentIndex() == 1)
@@ -4005,6 +4025,8 @@ class MainWindow(QMainWindow):
         
         self.btn_save_question.clicked.connect(self._on_save_question_clicked)
         self.btn_rename.clicked.connect(self._on_rename_clicked)
+        self.btn_choose_image.clicked.connect(self._choose_question_image)
+        self.btn_clear_image.clicked.connect(self._clear_question_image)
         
         # Tree actions context menu
         self.act_add_group.triggered.connect(self._add_group)
@@ -4017,6 +4039,7 @@ class MainWindow(QMainWindow):
         
         # Autosave triggers
         self.title_edit.textChanged.connect(self._autosave_schedule)
+        self.image_path_edit.textChanged.connect(self._autosave_schedule)
         self.combo_type.currentIndexChanged.connect(self._on_type_changed_ui)
         self.spin_points.valueChanged.connect(self._autosave_schedule)
         self.spin_bonus_correct.valueChanged.connect(self._autosave_schedule)
@@ -4302,6 +4325,7 @@ class MainWindow(QMainWindow):
             created_at=q.get("created_at", ""),
             correct_answer=q.get("correct_answer", ""),
             funny_answers=f_answers,
+            image_path=q.get("image_path", ""),
         )
 
     def _serialize_group(self, g: Group) -> dict:
@@ -4726,6 +4750,7 @@ class MainWindow(QMainWindow):
             self.spin_bonus_wrong,
             self.combo_type,
             self.title_edit,
+            self.image_path_edit,
             self.edit_correct_answer,
             self.table_funny
         ]
@@ -4740,6 +4765,7 @@ class MainWindow(QMainWindow):
             self.spin_bonus_wrong.setValue(0.00)
             self.combo_type.setCurrentIndex(0)
             self.title_edit.clear()
+            self.image_path_edit.clear()
             self.edit_correct_answer.clear() 
             self.table_funny.setRowCount(0) 
         finally:
@@ -4757,6 +4783,9 @@ class MainWindow(QMainWindow):
         # Skrytí/Zobrazení prvků formuláře
         widgets = [
             self.title_edit, 
+            self.image_path_edit,
+            self.btn_choose_image,
+            self.btn_clear_image,
             self.combo_type, 
             self.spin_points, 
             self.spin_bonus_correct, 
@@ -4797,6 +4826,7 @@ class MainWindow(QMainWindow):
             self.spin_bonus_wrong,
             self.text_edit,
             self.title_edit,
+            self.image_path_edit,
             self.edit_correct_answer,
             self.table_funny
         ]
@@ -4812,6 +4842,7 @@ class MainWindow(QMainWindow):
             
             self.text_edit.setHtml(q.text_html or "")
             self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
+            self.image_path_edit.setText(getattr(q, "image_path", "") or "")
             self.edit_correct_answer.setPlainText(q.correct_answer or "")
 
             self.table_funny.setRowCount(0)
@@ -4872,6 +4903,9 @@ class MainWindow(QMainWindow):
 
                         # Uložení správné odpovědi
                         q.correct_answer = self.edit_correct_answer.toPlainText()
+
+                        # Uložení cesty k obrázku (volitelné)
+                        q.image_path = self.image_path_edit.text().strip()
 
                         # Uložení vtipných odpovědí z tabulky (včetně zdrojového dokumentu)
                         new_funny: List[FunnyAnswer] = []
@@ -5143,6 +5177,29 @@ class MainWindow(QMainWindow):
             self.data_path = Path(new_path)
             self.statusBar().showMessage(f"Datový soubor změněn na: {self.data_path}", 4000)
             self.load_data(); self._refresh_tree()
+
+    def _choose_question_image(self) -> None:
+        """Vybere obrázek k aktuální otázce (uloží se pouze cesta)."""
+        if not getattr(self, "_current_question_id", None):
+            return
+        start_dir = str(getattr(self, "images_dir", self.project_root))
+        Path(start_dir).mkdir(parents=True, exist_ok=True)
+        fn, _ = QFileDialog.getOpenFileName(
+            self,
+            "Vybrat obrázek k otázce",
+            start_dir,
+            "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic);;All files (*)",
+        )
+        if fn:
+            self.image_path_edit.setText(fn)
+            self._autosave_schedule()
+
+    def _clear_question_image(self) -> None:
+        """Odebere obrázek z aktuální otázky."""
+        if not getattr(self, "_current_question_id", None):
+            return
+        self.image_path_edit.clear()
+        self._autosave_schedule()
 
     # -------------------- Filtr --------------------
 
