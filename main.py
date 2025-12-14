@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.5.2"
+APP_VERSION = "7.5.3"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
