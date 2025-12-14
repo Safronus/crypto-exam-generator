@@ -90,8 +90,8 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.5.3"
+APP_VERSION = "8.0.0"
+APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -3238,6 +3238,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, data_path: Optional[Path] = None) -> None:
         super().__init__()
+        # ZMĚNA: Titulek s verzí
         self.setWindowTitle(APP_NAME)
         self.resize(1800, 900)
 
@@ -3268,14 +3269,13 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_signals()
         
-
         self.load_data()
         self._refresh_tree()
         self._refresh_funny_answers_tab()
 
         # ZMĚNA: Strom 60%, Editor 40% (cca 840px : 560px)
-        # Nyní, když je self.splitter správně nastaven v _build_ui, můžeme přímo nastavit velikosti.
         self.splitter.setSizes([940, 860])
+
 
     def _duplicate_question(self) -> None:
         kind, meta = self._selected_node()
@@ -3307,7 +3307,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Otázka byla duplikována.", 3000)
 
     def _build_ui(self) -> None:
-        # ... (All previous code identical until the toolbar part) ...
         # Hlavní container
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
@@ -3411,22 +3410,22 @@ class MainWindow(QMainWindow):
         self.editor_toolbar = QToolBar("Formát")
         self.editor_toolbar.setIconSize(QSize(18, 18))
         
-        # --- PŘIDAT TENTO BLOK PRO LEPŠÍ VZHLED ---
+        # --- STYLING EDITOR TOOLBARU ---
         self.editor_toolbar.setStyleSheet("""
             QToolBar {
                 border-bottom: 1px solid #3e3e3e;
                 background-color: #2d2d2d;
-                spacing: 4px; /* Mezera mezi tlačítky */
+                spacing: 4px;
             }
             QToolButton {
-                background-color: #383838; /* Jemné šedé pozadí */
-                border: 1px solid #505050; /* Viditelný okraj */
+                background-color: #383838;
+                border: 1px solid #505050;
                 border-radius: 3px;
                 padding: 2px 4px;
                 color: #e0e0e0;
             }
             QToolButton:checked {
-                background-color: #4a90e2; /* Výrazná barva pro aktivní stav (B/I/U) */
+                background-color: #4a90e2;
                 border-color: #4a90e2;
                 color: white;
             }
@@ -3437,14 +3436,12 @@ class MainWindow(QMainWindow):
             QToolButton:pressed {
                 background-color: #252525;
             }
-            /* Separátor */
             QToolBar::separator {
                 background: #555;
                 width: 1px;
                 margin: 4px 4px;
             }
         """)
-        # ------------------------------------------
 
         self.action_bold = QAction("Tučné", self); self.action_bold.setCheckable(True); self.action_bold.setShortcut(QKeySequence.Bold)
         self.action_italic = QAction("Kurzíva", self); self.action_italic.setCheckable(True); self.action_italic.setShortcut(QKeySequence.Italic)
@@ -3565,7 +3562,7 @@ class MainWindow(QMainWindow):
 
         # -- TOOLBAR STYLING & MERGE --
         
-        # 1. Odstranit starý toolbar "Import/Export" (pokud existuje z _build_menus)
+        # 1. Odstranit starý toolbar "Import/Export"
         for child in self.children():
             if isinstance(child, QToolBar) and child.windowTitle() == "Import/Export":
                 self.removeToolBar(child)
@@ -3584,7 +3581,7 @@ class MainWindow(QMainWindow):
         
         tb.clear() # Vyčistit
         
-        # Stylizace
+        # Stylizace Hlavního toolbaru
         tb.setIconSize(QSize(20, 20))
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -3647,27 +3644,39 @@ class MainWindow(QMainWindow):
         self.act_delete.setText("Smazat")
         self.act_delete.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
 
-        # 5. Import (Recycle existing from _build_menus)
+        # 5. Import
         if not hasattr(self, "act_import_docx"):
-            # Pokud by náhodou neexistovala (např. _build_menus neproběhlo), vytvoříme
             self.act_import_docx = QAction("Import", self)
             if hasattr(self, "_import_from_docx"):
                 self.act_import_docx.triggered.connect(self._import_from_docx)
-        
-        # Update text/icon for toolbar (Compact look)
         self.act_import_docx.setText("Import")
         self.act_import_docx.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
         
-        # 6. Export (Recycle)
+        # 6. Export
         if not hasattr(self, "act_export_docx"):
             self.act_export_docx = QAction("Export", self)
-            if hasattr(self, "_export_docx_wizard"): # Name from user snippet!
+            if hasattr(self, "_export_docx_wizard"):
                 self.act_export_docx.triggered.connect(self._export_docx_wizard)
-        
         self.act_export_docx.setText("Export")
         self.act_export_docx.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
 
-        # Add to Main Toolbar
+        # --- ZMĚNA: NOVÉ JSON AKCE ---
+        if not hasattr(self, "act_load_json"):
+            self.act_load_json = QAction("Nahrát DB", self)
+            self.act_load_json.triggered.connect(self._action_load_questions_json)
+        self.act_load_json.setText("Nahrát DB")
+        # Použijeme systémovou ikonu pro Open
+        self.act_load_json.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+
+        if not hasattr(self, "act_save_json"):
+            self.act_save_json = QAction("Uložit DB", self)
+            self.act_save_json.triggered.connect(self._action_export_questions_json)
+        self.act_save_json.setText("Uložit DB")
+        # Použijeme systémovou ikonu pro Save
+        self.act_save_json.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        # -----------------------------
+
+        # Přidání do Hlavního Toolbaru
         tb.addAction(self.act_add_group)
         tb.addAction(self.act_add_subgroup)
         tb.addAction(self.act_add_question)
@@ -3675,13 +3684,133 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_import_docx)
         tb.addAction(self.act_export_docx)
         tb.addSeparator()
+        
+        # ZMĚNA: Přidání JSON tlačítek do layoutu toolbaru
+        tb.addAction(self.act_load_json)
+        tb.addAction(self.act_save_json)
+        
+        tb.addSeparator()
         tb.addAction(self.act_delete)
         
-        # ... (Rest of the method) ...
         self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
         self._refresh_history_table()
         
         self.left_tabs.currentChanged.connect(self._on_left_tab_changed)
+
+    def _action_load_questions_json(self) -> None:
+        """Načte kompletní strukturu otázek z vybraného JSON souboru."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Načíst databázi otázek", 
+            str(self.project_root), 
+            "JSON soubory (*.json)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            if "groups" not in data:
+                raise ValueError("JSON neobsahuje klíč 'groups'.")
+
+            # --- Pomocné funkce pro rekurzivní převod ---
+
+            def dict_to_funny_answers(raw_list: list) -> list:
+                """Převede seznam slovníků (nebo stringů) na objekty FunnyAnswer."""
+                res = []
+                for item in raw_list:
+                    if isinstance(item, dict):
+                        res.append(FunnyAnswer(**item))
+                    else:
+                        # Fallback pro staré verze (pokud to byl jen string)
+                        res.append(FunnyAnswer(text=str(item), date="", author="", source_doc=""))
+                return res
+
+            def dict_to_question(d: dict) -> Question:
+                """Převede slovník na objekt Question."""
+                # Zpracujeme funny answers zvlášť
+                f_answers = dict_to_funny_answers(d.get("funny_answers", []))
+                
+                # Vytvoříme kopii dictu a aktualizujeme funny_answers
+                q_args = d.copy()
+                q_args["funny_answers"] = f_answers
+                
+                # Bezpečné vytvoření (ignoruje extra klíče, pokud by vadily, 
+                # ale dataclass **kwargs by to měl zvládnout, pokud sedí pole.
+                # Pro jistotu explicitní mapping u klíčových polí, pokud by JSON obsahoval balast)
+                return Question(
+                    id=q_args.get("id", str(_uuid.uuid4())),
+                    type=q_args.get("type", "classic"),
+                    text_html=q_args.get("text_html", ""),
+                    title=q_args.get("title", ""),
+                    points=int(q_args.get("points", 1)),
+                    bonus_correct=float(q_args.get("bonus_correct", 0.0)),
+                    bonus_wrong=float(q_args.get("bonus_wrong", 0.0)),
+                    created_at=q_args.get("created_at", ""),
+                    correct_answer=q_args.get("correct_answer", ""),
+                    funny_answers=f_answers,
+                    image_path=q_args.get("image_path", "")
+                )
+
+            def dict_to_subgroup(d: dict) -> Subgroup:
+                """Rekurzivně převede slovník na objekt Subgroup."""
+                # 1. Převedeme otázky
+                qs = [dict_to_question(q) for q in d.get("questions", [])]
+                
+                # 2. Převedeme vnořené podskupiny (rekurze)
+                subs = [dict_to_subgroup(s) for s in d.get("subgroups", [])]
+                
+                return Subgroup(
+                    id=d.get("id", str(_uuid.uuid4())),
+                    name=d.get("name", "Bez názvu"),
+                    subgroups=subs,
+                    questions=qs
+                )
+
+            # --- Hlavní smyčka převodu ---
+            new_groups = []
+            for g_data in data["groups"]:
+                # Převedeme podskupiny v této skupině
+                converted_subgroups = [dict_to_subgroup(sg) for sg in g_data.get("subgroups", [])]
+                
+                new_group = Group(
+                    id=g_data.get("id", str(_uuid.uuid4())),
+                    name=g_data.get("name", "Bez názvu"),
+                    subgroups=converted_subgroups
+                )
+                new_groups.append(new_group)
+
+            # Nahrazení dat v aplikaci
+            self.root.groups = new_groups
+            
+            # Refresh UI
+            self._refresh_tree()
+            self.save_data() # Uložíme hned do pracovního souboru
+            self.statusBar().showMessage(f"Databáze úspěšně načtena: {os.path.basename(path)}", 5000)
+
+        except Exception as e:
+            # Výpis chyby do konzole pro lepší debug
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Chyba načítání JSON", f"Nepodařilo se načíst soubor.\n\nDetail: {str(e)}")
+
+
+    def _action_export_questions_json(self) -> None:
+        default_name = f"questions_export_{QDateTime.currentDateTime().toString('yyyyMMdd_HHmm')}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportovat databázi", str(self.project_root / default_name), "JSON soubory (*.json)"
+        )
+        if not path: return
+        try:
+            data_out = {"groups": [self._serialize_group(g) for g in self.root.groups]}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data_out, f, indent=2, ensure_ascii=False)
+            self.statusBar().showMessage(f"Exportováno: {os.path.basename(path)}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Chyba", f"Nepodařilo se exportovat:\n{e}")
+
 
     def _on_left_tab_changed(self, index: int) -> None:
         """Skrývá/zobrazuje pravý panel podle aktivní záložky."""
