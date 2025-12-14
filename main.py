@@ -526,8 +526,130 @@ class DnDTree(QTreeWidget):
         self.owner.save_data()
         self.owner.statusBar().showMessage("Přesun dokončen (uloženo).", 3000)
 
+class BonusQuestionSelectorDialog(QDialog):
+    """Dialog se stromem a checkboxy pro výběr konkrétních bonusových otázek."""
 
-# ---------------------- Dialog pro výběr cíle ----------------------
+    def __init__(self, owner: "MainWindow", selected_ids: set) -> None:
+        super().__init__(owner)
+        self.setWindowTitle("Vyberte bonusové otázky")
+        self.resize(700, 800)
+        self.owner = owner
+        self.selected_ids = selected_ids.copy()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(QLabel("Zaškrtněte konkrétní bonusové otázky, které se mají použít v exportu.\n(Pokud nevyberete nic, použijí se náhodné bonusové otázky ze všech dostupných)"))
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Název zdroje / Otázka"])
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tree.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.tree)
+
+        self.lbl_total = QLabel(f"Celkem vybráno otázek: {len(self.selected_ids)}")
+        self.lbl_total.setStyleSheet("font-weight: bold; color: #ffea00; font-size: 14px; margin-top: 5px;")
+        layout.addWidget(self.lbl_total)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+
+        self.icon_group = owner._generate_icon("S", QColor("#ff5252"), "rect")
+        self.icon_sub = owner._generate_icon("P", QColor("#ff8a80"), "rect")
+        self.icon_bonus = owner._generate_icon("B", QColor("#ffea00"), "star")
+
+        self._is_populating = True
+        self._populate_tree()
+        self._is_populating = False
+        self._recalculate_total()
+
+    def _populate_tree(self):
+        for g in self.owner.root.groups:
+            bonus_questions_in_group = self._collect_bonus_questions(g)
+            if not bonus_questions_in_group:
+                continue
+
+            g_item = QTreeWidgetItem([g.name])
+            g_item.setFlags(g_item.flags() | Qt.ItemIsUserCheckable)
+            g_item.setFlags(g_item.flags() & ~Qt.ItemIsAutoTristate)
+            g_item.setCheckState(0, Qt.Unchecked)
+            g_item.setIcon(0, self.icon_group)
+            f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
+            self.tree.addTopLevelItem(g_item)
+
+            self._add_subgroups_recursive(g_item, g.subgroups)
+            g_item.setExpanded(True)
+
+    def _add_subgroups_recursive(self, parent_item, subgroups):
+        for sg in subgroups:
+            bonus_questions_in_subgroup = self._collect_bonus_questions(sg)
+            if not bonus_questions_in_subgroup:
+                continue
+
+            sg_item = QTreeWidgetItem([sg.name])
+            sg_item.setFlags(sg_item.flags() | Qt.ItemIsUserCheckable)
+            sg_item.setFlags(sg_item.flags() & ~Qt.ItemIsAutoTristate)
+            sg_item.setCheckState(0, Qt.Unchecked)
+            sg_item.setIcon(0, self.icon_sub)
+            parent_item.addChild(sg_item)
+
+            for q in bonus_questions_in_subgroup:
+                q_item = QTreeWidgetItem([q.title or "Bonusová otázka"])
+                q_item.setFlags(q_item.flags() | Qt.ItemIsUserCheckable)
+                q_item.setData(0, Qt.UserRole, {"id": q.id, "type": "question"})
+                q_item.setIcon(0, self.icon_bonus)
+                
+                check_state = Qt.Checked if q.id in self.selected_ids else Qt.Unchecked
+                q_item.setCheckState(0, check_state)
+                sg_item.addChild(q_item)
+
+            if sg.subgroups:
+                self._add_subgroups_recursive(sg_item, sg.subgroups)
+
+            sg_item.setExpanded(True)
+
+    def _collect_bonus_questions(self, node) -> list:
+        questions = []
+        if hasattr(node, "questions"):
+            questions.extend([q for q in node.questions if q.type == "bonus"])
+        if hasattr(node, "subgroups"):
+            for sub in node.subgroups:
+                questions.extend(self._collect_bonus_questions(sub))
+        return questions
+
+    def _on_item_changed(self, item, column):
+        if self._is_populating: return
+        state = item.checkState(0)
+        self._is_populating = True
+        if not item.data(0, Qt.UserRole): 
+            self._set_check_state_recursive(item, state)
+        self._is_populating = False
+        self._recalculate_total()
+
+    def _set_check_state_recursive(self, item, state):
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child.setCheckState(0, state)
+            self._set_check_state_recursive(child, state)
+
+    def _recalculate_total(self):
+        count = len(self.get_selected_ids())
+        self.lbl_total.setText(f"Celkem vybráno otázek: {count}")
+
+    def get_selected_ids(self) -> set:
+        selected = set()
+        it = QTreeWidgetItemIterator(self.tree)
+        while it.value():
+            item = it.value()
+            if item.checkState(0) == Qt.Checked:
+                data = item.data(0, Qt.UserRole)
+                if data and data.get("type") == "question":
+                    selected.add(data["id"])
+            it += 1
+        return selected
+
+
 # ---------------------- Dialog pro výběr cíle ----------------------
 class MoveTargetDialog(QDialog):
     """Dialog pro výběr cílové skupiny/podskupiny pomocí stromu."""
@@ -878,18 +1000,18 @@ class ExportWizard(QWizard):
         self.template_path: Optional[Path] = None
         self.output_path: Optional[Path] = None
         self.output_changed_manually = False
-        
         self.placeholders_q = []
         self.placeholders_b = []
         self.selection_map = {}
         self.cached_hash = ""
-        
         self.has_datum_cas = False
         self.has_pozn = False
         self.has_min_max = False
         
         # NOVÉ: Ukládáme seznam vybraných zdrojů pro Multi Export [{'id':..., 'type':...}]
-        self.multi_selected_sources = [] 
+        self.multi_selected_sources = []
+        # NOVÉ: Ukládáme seznam ID vybraných bonusových otázek
+        self.multi_selected_bonus_ids = set()
 
         # Načtení uložených cest
         self.settings_file = self.owner.project_root / "data" / "export_settings.json"
@@ -899,15 +1021,13 @@ class ExportWizard(QWizard):
         default_templates_dir = self.owner.project_root / "data" / "Šablony"
         default_output_dir = self.owner.project_root / "data" / "Vygenerované testy"
         default_print_dir = self.owner.project_root / "data" / "Tisk"
-        
         default_templates_dir.mkdir(parents=True, exist_ok=True)
         default_output_dir.mkdir(parents=True, exist_ok=True)
         default_print_dir.mkdir(parents=True, exist_ok=True)
-        
         self.templates_dir = Path(self.stored_settings.get("templates_dir", default_templates_dir))
         self.output_dir = Path(self.stored_settings.get("output_dir", default_output_dir))
         self.print_dir = Path(self.stored_settings.get("print_dir", default_print_dir))
-        
+
         last_template = self.stored_settings.get("last_template")
         if last_template and Path(last_template).exists():
             self.default_template = Path(last_template)
@@ -918,17 +1038,16 @@ class ExportWizard(QWizard):
         self.page1 = QWizardPage()
         self.page2 = QWizardPage()
         self.page3 = QWizardPage()
-        
         self._build_page1_content()
         self._build_page2_content()
         self._build_page3_content()
-        
+
         self.setPage(self.ID_PAGE1, self.page1)
         self.setPage(self.ID_PAGE2, self.page2)
         self.setPage(self.ID_PAGE3, self.page3)
-        
+
         self.setStartId(self.ID_PAGE1)
-        
+
         if self.default_template.exists():
             self.le_template.setText(str(self.default_template))
             self.template_path = self.default_template
@@ -936,7 +1055,7 @@ class ExportWizard(QWizard):
         else:
             self.le_template.setText(str(self.default_template))
             self._update_path_indicators()
-            
+
         self._update_default_output()
         self._update_path_indicators()
 
@@ -1122,19 +1241,20 @@ class ExportWizard(QWizard):
         self.widget_multi_options = QWidget()
         self.widget_multi_options.setVisible(False)
         self.widget_multi_options.setStyleSheet("background-color: #2d2d30; border-radius: 4px; padding: 10px; border: 1px solid #444;")
-        l_multi = QHBoxLayout(self.widget_multi_options)
+        # --- ZMĚNA NA QGridLayout pro lepší formátování s bonusy ---
+        l_multi = QGridLayout(self.widget_multi_options)
         l_multi.setContentsMargins(5, 5, 5, 5)
         
-        l_multi.addWidget(QLabel("Počet kopií:"))
+        # Řádek 0: Počet kopií
+        l_multi.addWidget(QLabel("Počet kopií:"), 0, 0)
         self.spin_multi_count = QSpinBox()
         self.spin_multi_count.setRange(2, 50)
         self.spin_multi_count.setValue(2)
         self.spin_multi_count.setStyleSheet("padding: 4px;")
-        l_multi.addWidget(self.spin_multi_count)
+        l_multi.addWidget(self.spin_multi_count, 0, 1)
         
-        l_multi.addWidget(QLabel("Zdroje otázek (pro |Otázka|1-10):"))
-        
-        # VÝRAZNĚJŠÍ TLAČÍTKO
+        # Řádek 1: Zdroje klasických otázek
+        l_multi.addWidget(QLabel("Zdroje otázek (pro |Otázka|1-10):"), 1, 0)
         self.btn_select_sources = QPushButton("Vybrat zdroje...")
         self.btn_select_sources.setCursor(Qt.PointingHandCursor)
         self.btn_select_sources.setStyleSheet("""
@@ -1160,9 +1280,37 @@ class ExportWizard(QWizard):
         src_layout.setContentsMargins(0, 0, 0, 0)
         src_layout.addWidget(self.btn_select_sources)
         src_layout.addWidget(self.lbl_selected_sources, 1)
+        l_multi.addWidget(src_container, 1, 1)
         
-        l_multi.addWidget(src_container, 1)
+        # --- NOVÉ: Řádek 2: Bonusové otázky ---
+        l_multi.addWidget(QLabel("Bonusové otázky (pro |Bonus|...):"), 2, 0)
+        self.btn_select_bonus = QPushButton("Vybrat bonusové...")
+        self.btn_select_bonus.setCursor(Qt.PointingHandCursor)
+        self.btn_select_bonus.setStyleSheet("""
+            QPushButton {
+                background-color: #b08d00; 
+                color: white; 
+                border: none; 
+                padding: 6px 12px; 
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #c9a300; }
+            QPushButton:pressed { background-color: #b08d00; }
+        """)
+        self.btn_select_bonus.clicked.connect(self._on_select_bonus_clicked)
         
+        self.lbl_selected_bonus = QLabel("Nevybráno (použijí se náhodné)")
+        self.lbl_selected_bonus.setStyleSheet("color: #aaa; font-style: italic; margin-left: 8px;")
+        self.lbl_selected_bonus.setWordWrap(True)
+        
+        bonus_container = QWidget()
+        bonus_layout = QHBoxLayout(bonus_container)
+        bonus_layout.setContentsMargins(0,0,0,0)
+        bonus_layout.addWidget(self.btn_select_bonus)
+        bonus_layout.addWidget(self.lbl_selected_bonus, 1)
+        l_multi.addWidget(bonus_container, 2, 1)
+
         main_layout.addWidget(self.widget_multi_options)
 
         # 4. Hlavní obsah (Dva sloupce: Strom | Sloty)
@@ -1265,6 +1413,19 @@ class ExportWizard(QWizard):
                 
                 self.lbl_selected_sources.setText(text)
                 self.lbl_selected_sources.setStyleSheet(style)
+
+    def _on_select_bonus_clicked(self):
+        dlg = BonusQuestionSelectorDialog(self.owner, self.multi_selected_bonus_ids)
+        if dlg.exec() == QDialog.Accepted:
+            self.multi_selected_bonus_ids = dlg.get_selected_ids()
+            count = len(self.multi_selected_bonus_ids)
+            if count > 0:
+                self.lbl_selected_bonus.setText(f"Vybráno konkrétních: {count}")
+                self.lbl_selected_bonus.setStyleSheet("color: #ffea00; font-weight: bold;")
+            else:
+                self.lbl_selected_bonus.setText("Nevybráno (použijí se náhodné)")
+                self.lbl_selected_bonus.setStyleSheet("color: #aaa; font-style: italic;")
+
 
     def _on_mode_toggled(self, btn, checked):
         """Reaguje na změnu režimu exportu (Single vs Multi)."""
@@ -2566,8 +2727,11 @@ class ExportWizard(QWizard):
         
         # --- PŘÍPRAVA POOLU OTÁZEK ---
         question_pool = []
+        # --- NOVÉ: Pool pro bonusové otázky ---
+        question_pool_bonus = []
+        
         if is_multi:
-            def collect_questions(group_id, is_subgroup):
+            def collect_questions(group_id, is_subgroup, target_type="classic"):
                 qs = []
                 nodes_to_visit = list(self.owner.root.groups)
                 target_node = None
@@ -2583,7 +2747,7 @@ class ExportWizard(QWizard):
                     def extract_q(node):
                         valid_qs = []
                         if hasattr(node, "questions"):
-                            valid_qs.extend([q.id for q in node.questions if q.type == "classic"])
+                            valid_qs.extend([q.id for q in node.questions if q.type == target_type])
                         if hasattr(node, "subgroups") and node.subgroups:
                             for sub in node.subgroups:
                                 valid_qs.extend(extract_q(sub))
@@ -2591,7 +2755,7 @@ class ExportWizard(QWizard):
                     qs = extract_q(target_node)
                 return qs
 
-            # Zdroje
+            # 1. Zdroje pro KLASICKÉ otázky
             sources_to_process = self.multi_selected_sources
             if not sources_to_process:
                 sources_to_process = [{"id": g.id, "type": "group"} for g in self.owner.root.groups]
@@ -2600,10 +2764,22 @@ class ExportWizard(QWizard):
                 sid = source["id"]
                 stype = source["type"]
                 is_sub = (stype == "subgroup")
-                pool_ids = collect_questions(sid, is_sub)
+                pool_ids = collect_questions(sid, is_sub, "classic")
                 question_pool.extend(pool_ids)
             
             question_pool = list(set(question_pool))
+            
+            # 2. Zdroje pro BONUSOVÉ otázky
+            # Pokud uživatel vybral konkrétní, použijeme ty. Jinak sebereme VŠECHNY dostupné bonusy.
+            if self.multi_selected_bonus_ids:
+                question_pool_bonus = list(self.multi_selected_bonus_ids)
+            else:
+                # Pokud není vybráno, vezmeme bonusy ze všech skupin
+                all_groups = [{"id": g.id, "type": "group"} for g in self.owner.root.groups]
+                for g_src in all_groups:
+                    b_ids = collect_questions(g_src["id"], False, "bonus")
+                    question_pool_bonus.extend(b_ids)
+                question_pool_bonus = list(set(question_pool_bonus))
 
         base_output_path = self.output_path
         success_count = 0
@@ -2635,6 +2811,8 @@ class ExportWizard(QWizard):
                     import random
                     # Pro multi režim ignorujeme ruční výběr
                     current_selection = {} 
+                    
+                    # A. Klasické otázky
                     targets = self.placeholders_q
                     needed = len(targets)
                     
@@ -2646,6 +2824,22 @@ class ExportWizard(QWizard):
                         if len(question_pool) > 0:
                             for ph in targets:
                                 current_selection[ph] = random.choice(question_pool)
+                    
+                    # B. Bonusové otázky
+                    targets_b = self.placeholders_b
+                    needed_b = len(targets_b)
+                    
+                    if len(question_pool_bonus) >= needed_b:
+                        picked_b = random.sample(question_pool_bonus, needed_b)
+                        for idx, ph in enumerate(targets_b):
+                            current_selection[ph] = picked_b[idx]
+                    else:
+                        if len(question_pool_bonus) > 0:
+                             for idx, ph in enumerate(targets_b):
+                                 # Pokud nemáme dost unikátních, musíme opakovat, nebo vzít co je
+                                 # Zde fallback: pokud dojdou, bereme random s opakováním
+                                 current_selection[ph] = random.choice(question_pool_bonus)
+
                 
                 repl_plain: Dict[str, str] = {}
                 
@@ -2814,7 +3008,6 @@ class ExportWizard(QWizard):
             self.button(QWizard.FinishButton).setEnabled(True)
             self.button(QWizard.BackButton).setEnabled(True)
             QMessageBox.critical(self, "Kritická chyba", f"Neočekávaná chyba:\n{e}")
-
 
 # --------------------------- Hlavní okno (UI + logika) ---------------------------
 
@@ -6259,7 +6452,7 @@ class MainWindow(QMainWindow):
         
         # 1. Body
         for i, p in enumerate(doc.paragraphs):
-            if "<" in p.text or "{" in p.text:
+            
             process_paragraph(p)
             
         # 2. Tables in Body
