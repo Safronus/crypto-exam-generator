@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.0.0"
+APP_VERSION = "8.0.1"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
