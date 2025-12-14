@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.0.1"
+APP_VERSION = "8.0.0"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -186,6 +186,7 @@ class Question:
     image_path: str = ""  # cesta k obrázku (volitelné)
     image_width_cm: float = 0.0  # cílová šířka vloženého obrázku v DOCX (cm), 0 = default
     image_height_cm: float = 0.0  # cílová výška vloženého obrázku v DOCX (cm), 0 = default/auto
+    image_keep_aspect: bool = True  # pokud True, UI udržuje poměr stran (šířka/výška) při editaci rozměrů
 
     @staticmethod
     def new_default(q_type: str = "classic") -> "Question":
@@ -3242,7 +3243,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         # ZMĚNA: Titulek s verzí
         self.setWindowTitle(APP_NAME)
-        self.resize(1800, 900)
+        self.resize(1800, 1600)
 
         self.project_root = Path.cwd()
         default_data_dir = self.project_root / "data"
@@ -3500,7 +3501,15 @@ class MainWindow(QMainWindow):
         self.form_layout.addRow("Typ otázky:", self.combo_type)
         self.form_layout.addRow("Obrázek:", img_row)
 
+        # Aktuální velikost obrázku (cm) – pouze informativní (dle DPI v souboru / fallback)
+        self.lbl_img_actual_size_label = QLabel("Aktuální velikost (cm):")
+        self.lbl_img_actual_size = QLabel("")
+        self.lbl_img_actual_size.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_img_actual_size.setStyleSheet("color: #cfcfcf;")
+        self.form_layout.addRow(self.lbl_img_actual_size_label, self.lbl_img_actual_size)
+
         # Rozměry obrázku v DOCX (cm) – použije se při exportu
+
         self.spin_img_w_cm = QDoubleSpinBox()
         self.spin_img_w_cm.setRange(0.0, 200.0)
         self.spin_img_w_cm.setDecimals(2)
@@ -3530,7 +3539,25 @@ class MainWindow(QMainWindow):
         self.spin_img_w_cm.setEnabled(False)
         self.spin_img_h_cm.setEnabled(False)
 
-        self.form_layout.addRow("Rozměr obrázku (cm):", img_size_row)
+        self.lbl_img_export_size = QLabel("Velikost pro export (cm):")
+        self.img_size_row = img_size_row
+        self.form_layout.addRow(self.lbl_img_export_size, self.img_size_row)
+
+        self.chk_img_keep_aspect = QCheckBox("Zachovat poměr stran")
+        self.chk_img_keep_aspect.setChecked(True)
+        self.chk_img_keep_aspect.setEnabled(False)
+        self.chk_img_keep_aspect.setVisible(False)
+        self.form_layout.addRow(self.chk_img_keep_aspect)
+
+        # Interní pomocné flagy pro synchronizaci rozměrů obrázku (aby nevznikaly smyčky signálů)
+        self._img_size_sync_block = False
+        self._img_ratio_hw = None  # height/width poměr z pixelů aktuálního obrázku
+
+        # defaultně skryté – zobrazí se jen když otázka má obrázek
+        self.lbl_img_actual_size_label.setVisible(False)
+        self.lbl_img_actual_size.setVisible(False)
+        self.lbl_img_export_size.setVisible(False)
+        self.img_size_row.setVisible(False)
         self.form_layout.addRow("Body (klasická):", self.spin_points)
         self.form_layout.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
         self.form_layout.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
@@ -3788,6 +3815,7 @@ class MainWindow(QMainWindow):
                     image_path=q_args.get("image_path", ""),
                     image_width_cm=float(q_args.get("image_width_cm", 0.0) or 0.0),
                     image_height_cm=float(q_args.get("image_height_cm", 0.0) or 0.0),
+                    image_keep_aspect=bool(q_args.get("image_keep_aspect", True)),
                 )
 
             def dict_to_subgroup(d: dict) -> Subgroup:
@@ -4451,6 +4479,8 @@ class MainWindow(QMainWindow):
             self.spin_img_w_cm.setEnabled(enabled and has_img)
         if hasattr(self, "spin_img_h_cm"):
             self.spin_img_h_cm.setEnabled(enabled and has_img)
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.setEnabled(enabled and has_img)
         self.spin_points.setEnabled(enabled)
         self.spin_bonus_correct.setEnabled(enabled and self.combo_type.currentIndex() == 1)
         self.spin_bonus_wrong.setEnabled(enabled and self.combo_type.currentIndex() == 1)
@@ -4480,6 +4510,13 @@ class MainWindow(QMainWindow):
         self.image_path_edit.textChanged.connect(self._autosave_schedule)
         self.spin_img_w_cm.valueChanged.connect(self._autosave_schedule)
         self.spin_img_h_cm.valueChanged.connect(self._autosave_schedule)
+        # Synchronizace rozměrů obrázku (poměr stran)
+        self.spin_img_w_cm.valueChanged.connect(self._on_export_img_w_changed)
+        self.spin_img_h_cm.valueChanged.connect(self._on_export_img_h_changed)
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.stateChanged.connect(self._on_keep_aspect_changed)
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.stateChanged.connect(self._autosave_schedule)
         self.combo_type.currentIndexChanged.connect(self._on_type_changed_ui)
         self.spin_points.valueChanged.connect(self._autosave_schedule)
         self.spin_bonus_correct.valueChanged.connect(self._autosave_schedule)
@@ -4768,6 +4805,7 @@ class MainWindow(QMainWindow):
             image_path=q.get("image_path", ""),
             image_width_cm=float(q.get("image_width_cm", 0.0) or 0.0),
             image_height_cm=float(q.get("image_height_cm", 0.0) or 0.0),
+            image_keep_aspect=bool(q.get("image_keep_aspect", True)),
         )
 
     def _serialize_group(self, g: Group) -> dict:
@@ -4831,6 +4869,154 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return None
+
+
+    def _get_image_actual_size_cm(self, path: str) -> Optional[tuple[float, float, int, int, bool, float, float]]:
+        """
+        Vrátí (w_cm, h_cm, w_px, h_px, has_dpi, dpi_x, dpi_y) pro informativní zobrazení.
+        Pokud obrázek neobsahuje DPI, použije se fallback 96 DPI.
+        """
+        try:
+            img = QImage(path)
+            if img.isNull():
+                return None
+            w_px = int(img.width())
+            h_px = int(img.height())
+            dpmx = int(img.dotsPerMeterX())
+            dpmy = int(img.dotsPerMeterY())
+            if dpmx > 0 and dpmy > 0:
+                # cm = px * 100 / dots_per_meter
+                w_cm = (w_px * 100.0) / float(dpmx)
+                h_cm = (h_px * 100.0) / float(dpmy)
+                dpi_x = float(dpmx) * 0.0254
+                dpi_y = float(dpmy) * 0.0254
+                return (float(w_cm), float(h_cm), w_px, h_px, True, float(dpi_x), float(dpi_y))
+            # fallback
+            dpi_x = 96.0
+            dpi_y = 96.0
+            w_cm = (w_px / dpi_x) * 2.54
+            h_cm = (h_px / dpi_y) * 2.54
+            return (float(w_cm), float(h_cm), w_px, h_px, False, float(dpi_x), float(dpi_y))
+        except Exception:
+            return None
+
+    def _set_image_size_rows_visible(self, has_img: bool) -> None:
+        """Zobrazí/skryje informativní a exportní rozměry obrázku v editoru."""
+        if hasattr(self, "lbl_img_actual_size_label"):
+            self.lbl_img_actual_size_label.setVisible(bool(has_img))
+        if hasattr(self, "lbl_img_actual_size"):
+            self.lbl_img_actual_size.setVisible(bool(has_img))
+        if hasattr(self, "lbl_img_export_size"):
+            self.lbl_img_export_size.setVisible(bool(has_img))
+        if hasattr(self, "img_size_row"):
+            self.img_size_row.setVisible(bool(has_img))
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.setVisible(bool(has_img))
+
+
+    def _update_current_image_ratio_cache(self, path: str) -> None:
+        """Aktualizuje cache poměru stran (height/width) pro aktuální obrázek."""
+        self._img_ratio_hw = None
+        try:
+            px = self._get_image_px_size(path) if path else None
+            if px and px[0] > 0 and px[1] > 0:
+                self._img_ratio_hw = float(px[1]) / float(px[0])
+        except Exception:
+            self._img_ratio_hw = None
+
+    def _on_keep_aspect_changed(self, _state: int) -> None:
+        """Po zapnutí 'Zachovat poměr stran' dopočítá druhý rozměr podle obrázku."""
+        if getattr(self, "_img_size_sync_block", False):
+            return
+        if not hasattr(self, "chk_img_keep_aspect") or not self.chk_img_keep_aspect.isChecked():
+            return
+        full_img = getattr(self, "_current_image_full_path", "") or ""
+        if not (full_img and os.path.exists(full_img)):
+            return
+
+        self._update_current_image_ratio_cache(full_img)
+        if not self._img_ratio_hw or self._img_ratio_hw <= 0:
+            return
+
+        w = float(self.spin_img_w_cm.value())
+        h = float(self.spin_img_h_cm.value())
+
+        # pokud nejsou rozměry nastavené, nastavíme rozumný default
+        if w <= 0.0 and h <= 0.0:
+            w = 14.0
+            h = w * self._img_ratio_hw
+
+        # preferujeme šířku jako řídící
+        if w > 0.0:
+            self._img_size_sync_block = True
+            try:
+                self.spin_img_h_cm.blockSignals(True)
+                self.spin_img_h_cm.setValue(round(float(w * self._img_ratio_hw), 2))
+                self.spin_img_h_cm.blockSignals(False)
+            finally:
+                self._img_size_sync_block = False
+        elif h > 0.0:
+            self._img_size_sync_block = True
+            try:
+                self.spin_img_w_cm.blockSignals(True)
+                self.spin_img_w_cm.setValue(round(float(h / self._img_ratio_hw), 2))
+                self.spin_img_w_cm.blockSignals(False)
+            finally:
+                self._img_size_sync_block = False
+
+    def _on_export_img_w_changed(self, value: float) -> None:
+        """Když uživatel změní šířku, a je zapnutý poměr stran, dopočítá výšku."""
+        if getattr(self, "_img_size_sync_block", False):
+            return
+        if not hasattr(self, "chk_img_keep_aspect") or not self.chk_img_keep_aspect.isChecked():
+            return
+
+        full_img = getattr(self, "_current_image_full_path", "") or ""
+        if not (full_img and os.path.exists(full_img)):
+            return
+
+        self._update_current_image_ratio_cache(full_img)
+        if not self._img_ratio_hw or self._img_ratio_hw <= 0:
+            return
+
+        w = float(value)
+        h = 0.0 if w <= 0.0 else (w * self._img_ratio_hw)
+
+        self._img_size_sync_block = True
+        try:
+            self.spin_img_h_cm.blockSignals(True)
+            self.spin_img_h_cm.setValue(round(float(h), 2))
+            self.spin_img_h_cm.blockSignals(False)
+        finally:
+            self._img_size_sync_block = False
+
+    def _on_export_img_h_changed(self, value: float) -> None:
+        """Když uživatel změní výšku, a je zapnutý poměr stran, dopočítá šířku."""
+        if getattr(self, "_img_size_sync_block", False):
+            return
+        if not hasattr(self, "chk_img_keep_aspect") or not self.chk_img_keep_aspect.isChecked():
+            return
+
+        full_img = getattr(self, "_current_image_full_path", "") or ""
+        if not (full_img and os.path.exists(full_img)):
+            return
+
+        self._update_current_image_ratio_cache(full_img)
+        if not self._img_ratio_hw or self._img_ratio_hw <= 0:
+            return
+
+        h = float(value)
+        w = 0.0 if h <= 0.0 else (h / self._img_ratio_hw)
+
+        self._img_size_sync_block = True
+        try:
+            self.spin_img_w_cm.blockSignals(True)
+            self.spin_img_w_cm.setValue(round(float(w), 2))
+            self.spin_img_w_cm.blockSignals(False)
+        finally:
+            self._img_size_sync_block = False
+
+
 
     def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str, has_image: bool = False) -> None:
         """Aplikuje vizuální styl na položku otázky (ikona, barva, font)."""
@@ -5261,6 +5447,19 @@ class MainWindow(QMainWindow):
             self.combo_type.setCurrentIndex(0)
             self.title_edit.clear()
             self.image_path_edit.clear()
+            self.image_path_edit.setToolTip("")
+            if hasattr(self, "spin_img_w_cm"):
+                self.spin_img_w_cm.setValue(0.0)
+                self.spin_img_h_cm.setValue(0.0)
+                self.spin_img_w_cm.setEnabled(False)
+                self.spin_img_h_cm.setEnabled(False)
+                if hasattr(self, "chk_img_keep_aspect"):
+                    self.chk_img_keep_aspect.setChecked(True)
+                    self.chk_img_keep_aspect.setEnabled(False)
+            if hasattr(self, "lbl_img_actual_size"):
+                self.lbl_img_actual_size.setText("")
+            if hasattr(self, "_set_image_size_rows_visible"):
+                self._set_image_size_rows_visible(False)
             self.edit_correct_answer.clear() 
             self.table_funny.setRowCount(0) 
         finally:
@@ -5320,6 +5519,9 @@ class MainWindow(QMainWindow):
 
         if visible:
             self._on_type_changed_ui()
+            # Zajistit, že informace/rozměry obrázku se zobrazí jen pokud otázka skutečně má obrázek
+            full_img = getattr(self, "_current_image_full_path", "") or ""
+            self._set_image_size_rows_visible(bool(full_img and os.path.exists(full_img)))
 
     def _load_question_to_editor(self, q: Question) -> None:
         # ID nulujeme i zde pro jistotu
@@ -5338,6 +5540,7 @@ class MainWindow(QMainWindow):
             self.image_path_edit,
             self.spin_img_w_cm,
             self.spin_img_h_cm,
+            self.chk_img_keep_aspect,
             self.edit_correct_answer,
             self.table_funny
         ]
@@ -5366,6 +5569,8 @@ class MainWindow(QMainWindow):
             w_cm = float(getattr(q, "image_width_cm", 0.0) or 0.0)
             h_cm = float(getattr(q, "image_height_cm", 0.0) or 0.0)
             if full_path and os.path.exists(full_path):
+                if hasattr(self, "_update_current_image_ratio_cache"):
+                    self._update_current_image_ratio_cache(full_path)
                 px = self._get_image_px_size(full_path)
                 if w_cm <= 0.0:
                     w_cm = 14.0
@@ -5376,11 +5581,31 @@ class MainWindow(QMainWindow):
                 self.spin_img_h_cm.setValue(h_cm)
                 self.spin_img_w_cm.setEnabled(True)
                 self.spin_img_h_cm.setEnabled(True)
+                if hasattr(self, "chk_img_keep_aspect"):
+                    self.chk_img_keep_aspect.setEnabled(True)
+                    self.chk_img_keep_aspect.setChecked(bool(getattr(q, "image_keep_aspect", True)))
+
+                # Informativní: aktuální (fyzická) velikost dle DPI v souboru (nebo fallback)
+                if hasattr(self, "lbl_img_actual_size"):
+                    info = self._get_image_actual_size_cm(full_path)
+                    if info:
+                        w_act, h_act, w_px, h_px, has_dpi, dpi_x, dpi_y = info
+                        src = f"DPI {dpi_x:.0f}×{dpi_y:.0f}" if has_dpi else "DPI default 96"
+                        self.lbl_img_actual_size.setText(f"{w_act:.2f} × {h_act:.2f} cm ({w_px}×{h_px} px, {src})")
+                    else:
+                        self.lbl_img_actual_size.setText("")
+
+                self._set_image_size_rows_visible(True)
             else:
                 self.spin_img_w_cm.setValue(0.0)
                 self.spin_img_h_cm.setValue(0.0)
                 self.spin_img_w_cm.setEnabled(False)
                 self.spin_img_h_cm.setEnabled(False)
+
+                if hasattr(self, "lbl_img_actual_size"):
+                    self.lbl_img_actual_size.setText("")
+
+                self._set_image_size_rows_visible(False)
 
             self.edit_correct_answer.setPlainText(q.correct_answer or "")
 
@@ -5486,6 +5711,10 @@ class MainWindow(QMainWindow):
                         q.image_path = final_path
 
                         # Rozměry obrázku (cm) pro export do DOCX
+                        if hasattr(self, "chk_img_keep_aspect"):
+                            q.image_keep_aspect = bool(self.chk_img_keep_aspect.isChecked())
+                        else:
+                            q.image_keep_aspect = True
                         if final_path and os.path.exists(final_path):
                             q.image_width_cm = float(self.spin_img_w_cm.value())
                             q.image_height_cm = float(self.spin_img_h_cm.value())
@@ -5508,6 +5737,21 @@ class MainWindow(QMainWindow):
                                 self.lbl_image_preview.clear()
                                 self.lbl_image_preview.hide()
                         # ------------------------------------------
+
+                        # NOVÉ: Informativní rozměr + viditelnost řádků (při ruční editaci cesty)
+                        has_img = bool(final_path and os.path.exists(final_path))
+                        if hasattr(self, "lbl_img_actual_size"):
+                            if has_img:
+                                info = self._get_image_actual_size_cm(final_path)
+                                if info:
+                                    w_act, h_act, w_px, h_px, has_dpi, dpi_x, dpi_y = info
+                                    src = f"DPI {dpi_x:.0f}×{dpi_y:.0f}" if has_dpi else "DPI default 96"
+                                    self.lbl_img_actual_size.setText(f"{w_act:.2f} × {h_act:.2f} cm ({w_px}×{h_px} px, {src})")
+                                else:
+                                    self.lbl_img_actual_size.setText("")
+                            else:
+                                self.lbl_img_actual_size.setText("")
+                        self._set_image_size_rows_visible(has_img)
 
                         # Uložení vtipných odpovědí z tabulky
                         new_funny: List[FunnyAnswer] = []
@@ -5605,6 +5849,17 @@ class MainWindow(QMainWindow):
             if hasattr(self, "lbl_image_preview"):
                 self.lbl_image_preview.clear()
                 self.lbl_image_preview.hide()
+
+            # NOVÉ: Vyčistit rozměry obrázku (info + export)
+            self.image_path_edit.setToolTip("")
+            if hasattr(self, "spin_img_w_cm"):
+                self.spin_img_w_cm.setValue(0.0)
+                self.spin_img_h_cm.setValue(0.0)
+                self.spin_img_w_cm.setEnabled(False)
+                self.spin_img_h_cm.setEnabled(False)
+            if hasattr(self, "lbl_img_actual_size"):
+                self.lbl_img_actual_size.setText("")
+            self._set_image_size_rows_visible(False)
 
         finally:
             for w in widgets:
@@ -5837,9 +6092,26 @@ class MainWindow(QMainWindow):
             "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic);;All files (*)",
         )
         if fn:
-            # Uložíme full-path i bokem (v editoru se jinak někdy drží jen basename)
+            # Uložíme full-path i bokem (v editoru se drží jen basename)
             self._current_image_full_path = fn
-            self.image_path_edit.setText(fn)
+            if hasattr(self, "_update_current_image_ratio_cache"):
+                self._update_current_image_ratio_cache(fn)
+
+            # V editoru zobrazíme jen název souboru, plnou cestu necháme v tooltipu
+            self.image_path_edit.setText(os.path.basename(fn))
+            self.image_path_edit.setToolTip(fn)
+
+            # Informativní: aktuální velikost dle DPI v souboru (nebo fallback)
+            if hasattr(self, "lbl_img_actual_size"):
+                info = self._get_image_actual_size_cm(fn)
+                if info:
+                    w_act, h_act, w_px, h_px, has_dpi, dpi_x, dpi_y = info
+                    src = f"DPI {dpi_x:.0f}×{dpi_y:.0f}" if has_dpi else "DPI default 96"
+                    self.lbl_img_actual_size.setText(f"{w_act:.2f} × {h_act:.2f} cm ({w_px}×{h_px} px, {src})")
+                else:
+                    self.lbl_img_actual_size.setText("")
+
+            self._set_image_size_rows_visible(True)
 
             # Default: 14 cm na šířku, výšku dopočítáme dle poměru stran (aby to hned dávalo smysl)
             px = self._get_image_px_size(fn)
@@ -5851,6 +6123,8 @@ class MainWindow(QMainWindow):
             if hasattr(self, "spin_img_w_cm"):
                 self.spin_img_w_cm.setEnabled(True)
                 self.spin_img_h_cm.setEnabled(True)
+                if hasattr(self, "chk_img_keep_aspect"):
+                    self.chk_img_keep_aspect.setEnabled(True)
                 self.spin_img_w_cm.setValue(w_cm)
                 self.spin_img_h_cm.setValue(h_cm)
 
@@ -5862,11 +6136,21 @@ class MainWindow(QMainWindow):
             return
         self._current_image_full_path = ""
         self.image_path_edit.clear()
+        self.image_path_edit.setToolTip("")
+
         if hasattr(self, "spin_img_w_cm"):
             self.spin_img_w_cm.setValue(0.0)
             self.spin_img_h_cm.setValue(0.0)
             self.spin_img_w_cm.setEnabled(False)
             self.spin_img_h_cm.setEnabled(False)
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.setChecked(True)
+            self.chk_img_keep_aspect.setEnabled(False)
+
+        if hasattr(self, "lbl_img_actual_size"):
+            self.lbl_img_actual_size.setText("")
+        self._set_image_size_rows_visible(False)
+
         self._autosave_schedule()
 
     # -------------------- Filtr --------------------
