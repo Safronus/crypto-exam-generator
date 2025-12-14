@@ -49,7 +49,7 @@ from PySide6.QtGui import (
     QColor,
     QPalette, QTextDocument,
     QFont, QPen, 
-    QPixmap, QPainter, QIcon, QBrush, QPainterPath
+    QPixmap, QImage, QImageReader, QPainter, QIcon, QBrush, QPainterPath
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -184,6 +184,8 @@ class Question:
     correct_answer: str = ""
     funny_answers: List[FunnyAnswer] = field(default_factory=list)
     image_path: str = ""  # cesta k obrázku (volitelné)
+    image_width_cm: float = 0.0  # cílová šířka vloženého obrázku v DOCX (cm), 0 = default
+    image_height_cm: float = 0.0  # cílová výška vloženého obrázku v DOCX (cm), 0 = default/auto
 
     @staticmethod
     def new_default(q_type: str = "classic") -> "Question":
@@ -2967,7 +2969,7 @@ class ExportWizard(QWizard):
                     q = self.owner._find_question_by_id(qid)
                     if q:
                         img_path = getattr(q, "image_path", None)
-                        rich_map[ph] = (q.text_html, img_path)
+                        rich_map[ph] = (q.text_html, img_path, float(getattr(q, "image_width_cm", 0.0) or 0.0), float(getattr(q, "image_height_cm", 0.0) or 0.0))
                     else:
                         rich_map[ph] = ("", None)
                 # ----------------------------------------
@@ -3497,6 +3499,38 @@ class MainWindow(QMainWindow):
         self.form_layout.addRow("Název otázky:", self.title_edit)
         self.form_layout.addRow("Typ otázky:", self.combo_type)
         self.form_layout.addRow("Obrázek:", img_row)
+
+        # Rozměry obrázku v DOCX (cm) – použije se při exportu
+        self.spin_img_w_cm = QDoubleSpinBox()
+        self.spin_img_w_cm.setRange(0.0, 200.0)
+        self.spin_img_w_cm.setDecimals(2)
+        self.spin_img_w_cm.setSingleStep(0.10)
+        self.spin_img_w_cm.setSuffix(" cm")
+        self.spin_img_w_cm.setValue(14.00)
+
+        self.spin_img_h_cm = QDoubleSpinBox()
+        self.spin_img_h_cm.setRange(0.0, 200.0)
+        self.spin_img_h_cm.setDecimals(2)
+        self.spin_img_h_cm.setSingleStep(0.10)
+        self.spin_img_h_cm.setSuffix(" cm")
+        self.spin_img_h_cm.setValue(0.00)
+
+        img_size_row = QWidget()
+        img_size_l = QHBoxLayout(img_size_row)
+        img_size_l.setContentsMargins(0, 0, 0, 0)
+        img_size_l.setSpacing(6)
+        img_size_l.addWidget(QLabel("Šířka:"), 0)
+        img_size_l.addWidget(self.spin_img_w_cm, 0)
+        img_size_l.addSpacing(12)
+        img_size_l.addWidget(QLabel("Výška:"), 0)
+        img_size_l.addWidget(self.spin_img_h_cm, 0)
+        img_size_l.addStretch(1)
+
+        # defaultně deaktivované – aktivuje se jen když otázka má obrázek
+        self.spin_img_w_cm.setEnabled(False)
+        self.spin_img_h_cm.setEnabled(False)
+
+        self.form_layout.addRow("Rozměr obrázku (cm):", img_size_row)
         self.form_layout.addRow("Body (klasická):", self.spin_points)
         self.form_layout.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
         self.form_layout.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
@@ -3751,7 +3785,9 @@ class MainWindow(QMainWindow):
                     created_at=q_args.get("created_at", ""),
                     correct_answer=q_args.get("correct_answer", ""),
                     funny_answers=f_answers,
-                    image_path=q_args.get("image_path", "")
+                    image_path=q_args.get("image_path", ""),
+                    image_width_cm=float(q_args.get("image_width_cm", 0.0) or 0.0),
+                    image_height_cm=float(q_args.get("image_height_cm", 0.0) or 0.0),
                 )
 
             def dict_to_subgroup(d: dict) -> Subgroup:
@@ -4408,6 +4444,13 @@ class MainWindow(QMainWindow):
         self.image_path_edit.setEnabled(enabled)
         self.btn_choose_image.setEnabled(enabled)
         self.btn_clear_image.setEnabled(enabled)
+        # Rozměry obrázku povolíme jen pokud je nastaven a existuje
+        full_img = getattr(self, "_current_image_full_path", "") or ""
+        has_img = bool(full_img and os.path.exists(full_img))
+        if hasattr(self, "spin_img_w_cm"):
+            self.spin_img_w_cm.setEnabled(enabled and has_img)
+        if hasattr(self, "spin_img_h_cm"):
+            self.spin_img_h_cm.setEnabled(enabled and has_img)
         self.spin_points.setEnabled(enabled)
         self.spin_bonus_correct.setEnabled(enabled and self.combo_type.currentIndex() == 1)
         self.spin_bonus_wrong.setEnabled(enabled and self.combo_type.currentIndex() == 1)
@@ -4435,6 +4478,8 @@ class MainWindow(QMainWindow):
         # Autosave triggers
         self.title_edit.textChanged.connect(self._autosave_schedule)
         self.image_path_edit.textChanged.connect(self._autosave_schedule)
+        self.spin_img_w_cm.valueChanged.connect(self._autosave_schedule)
+        self.spin_img_h_cm.valueChanged.connect(self._autosave_schedule)
         self.combo_type.currentIndexChanged.connect(self._on_type_changed_ui)
         self.spin_points.valueChanged.connect(self._autosave_schedule)
         self.spin_bonus_correct.valueChanged.connect(self._autosave_schedule)
@@ -4721,6 +4766,8 @@ class MainWindow(QMainWindow):
             correct_answer=q.get("correct_answer", ""),
             funny_answers=f_answers,
             image_path=q.get("image_path", ""),
+            image_width_cm=float(q.get("image_width_cm", 0.0) or 0.0),
+            image_height_cm=float(q.get("image_height_cm", 0.0) or 0.0),
         )
 
     def _serialize_group(self, g: Group) -> dict:
@@ -4766,6 +4813,24 @@ class MainWindow(QMainWindow):
         painter.drawText(pix.rect(), Qt.AlignCenter, text)
         painter.end()
         return QIcon(pix)
+
+
+    def _get_image_px_size(self, path: str) -> Optional[tuple[int, int]]:
+        """Vrátí (šířka_px, výška_px) obrázku, nebo None."""
+        try:
+            reader = QImageReader(path)
+            size = reader.size()
+            if size.isValid():
+                return (int(size.width()), int(size.height()))
+        except Exception:
+            pass
+        try:
+            img = QImage(path)
+            if not img.isNull():
+                return (int(img.width()), int(img.height()))
+        except Exception:
+            pass
+        return None
 
     def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str, has_image: bool = False) -> None:
         """Aplikuje vizuální styl na položku otázky (ikona, barva, font)."""
@@ -5271,6 +5336,8 @@ class MainWindow(QMainWindow):
             self.text_edit,
             self.title_edit,
             self.image_path_edit,
+            self.spin_img_w_cm,
+            self.spin_img_h_cm,
             self.edit_correct_answer,
             self.table_funny
         ]
@@ -5294,6 +5361,26 @@ class MainWindow(QMainWindow):
             else:
                 self.image_path_edit.clear()
                 self.image_path_edit.setToolTip("")
+
+            # Rozměry obrázku (cm) – pokud nejsou uložené, nastavíme defaultně 14 cm na šířku a dopočítáme výšku dle poměru
+            w_cm = float(getattr(q, "image_width_cm", 0.0) or 0.0)
+            h_cm = float(getattr(q, "image_height_cm", 0.0) or 0.0)
+            if full_path and os.path.exists(full_path):
+                px = self._get_image_px_size(full_path)
+                if w_cm <= 0.0:
+                    w_cm = 14.0
+                if h_cm <= 0.0 and px and px[0] > 0:
+                    h_cm = round(w_cm * (px[1] / px[0]), 2)
+
+                self.spin_img_w_cm.setValue(w_cm)
+                self.spin_img_h_cm.setValue(h_cm)
+                self.spin_img_w_cm.setEnabled(True)
+                self.spin_img_h_cm.setEnabled(True)
+            else:
+                self.spin_img_w_cm.setValue(0.0)
+                self.spin_img_h_cm.setValue(0.0)
+                self.spin_img_w_cm.setEnabled(False)
+                self.spin_img_h_cm.setEnabled(False)
 
             self.edit_correct_answer.setPlainText(q.correct_answer or "")
 
@@ -5397,6 +5484,14 @@ class MainWindow(QMainWindow):
                             self._current_image_full_path = final_path
                         
                         q.image_path = final_path
+
+                        # Rozměry obrázku (cm) pro export do DOCX
+                        if final_path and os.path.exists(final_path):
+                            q.image_width_cm = float(self.spin_img_w_cm.value())
+                            q.image_height_cm = float(self.spin_img_h_cm.value())
+                        else:
+                            q.image_width_cm = 0.0
+                            q.image_height_cm = 0.0
 
                         # --- NOVÉ: OKAMŽITÁ AKTUALIZACE NÁHLEDU ---
                         if hasattr(self, "lbl_image_preview"):
@@ -5742,14 +5837,36 @@ class MainWindow(QMainWindow):
             "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic);;All files (*)",
         )
         if fn:
+            # Uložíme full-path i bokem (v editoru se jinak někdy drží jen basename)
+            self._current_image_full_path = fn
             self.image_path_edit.setText(fn)
+
+            # Default: 14 cm na šířku, výšku dopočítáme dle poměru stran (aby to hned dávalo smysl)
+            px = self._get_image_px_size(fn)
+            w_cm = 14.0
+            h_cm = 0.0
+            if px and px[0] > 0:
+                h_cm = round(w_cm * (px[1] / px[0]), 2)
+
+            if hasattr(self, "spin_img_w_cm"):
+                self.spin_img_w_cm.setEnabled(True)
+                self.spin_img_h_cm.setEnabled(True)
+                self.spin_img_w_cm.setValue(w_cm)
+                self.spin_img_h_cm.setValue(h_cm)
+
             self._autosave_schedule()
 
     def _clear_question_image(self) -> None:
         """Odebere obrázek z aktuální otázky."""
         if not getattr(self, "_current_question_id", None):
             return
+        self._current_image_full_path = ""
         self.image_path_edit.clear()
+        if hasattr(self, "spin_img_w_cm"):
+            self.spin_img_w_cm.setValue(0.0)
+            self.spin_img_h_cm.setValue(0.0)
+            self.spin_img_w_cm.setEnabled(False)
+            self.spin_img_h_cm.setEnabled(False)
         self._autosave_schedule()
 
     # -------------------- Filtr --------------------
@@ -6356,7 +6473,7 @@ class MainWindow(QMainWindow):
         """
         Generuje DOCX. rich_repl_html může být:
          - Dict[str, str] -> {placeholder: html_content}
-         - Dict[str, tuple] -> {placeholder: (html_content, image_path)}
+         - Dict[str, tuple] -> {placeholder: (html_content, image_path[, image_width_cm, image_height_cm])}
         """
         import docx
         from docx.shared import Pt, Cm, RGBColor
@@ -6366,7 +6483,7 @@ class MainWindow(QMainWindow):
         
         for ph, val in rich_repl_html.items():
             if isinstance(val, tuple):
-                html_part, img_path = val
+                html_part, img_path = val[0], val[1]
                 if img_path:
                     img_check = Path(img_path).exists() if isinstance(img_path, str) else False
 
@@ -6405,7 +6522,7 @@ class MainWindow(QMainWindow):
             p_elem.append(new_run)
 
         # -- Helper: Vložení Rich Text bloku + Obrázku --
-        def insert_rich_question_block(paragraph, html_content, image_path=None):
+        def insert_rich_question_block(paragraph, html_content, image_path=None, image_w_cm: float = 0.0, image_h_cm: float = 0.0):
             
             # 1. Parse HTML
             paras_data = parse_html_to_paragraphs(html_content)
@@ -6519,7 +6636,18 @@ class MainWindow(QMainWindow):
                 
                 try:
                     run = img_p.add_run()
-                    run.add_picture(str(final_img_path), width=Cm(14)) 
+                    # Pokud je 0, zachováme původní default (14 cm). Pokud je výška 0, necháme Word dopočítat poměr.
+                    w_use = float(image_w_cm or 0.0)
+                    h_use = float(image_h_cm or 0.0)
+                    if w_use <= 0.0 and h_use <= 0.0:
+                        w_use = 14.0
+
+                    if w_use > 0.0 and h_use > 0.0:
+                        run.add_picture(str(final_img_path), width=Cm(w_use), height=Cm(h_use))
+                    elif w_use > 0.0:
+                        run.add_picture(str(final_img_path), width=Cm(w_use))
+                    else:
+                        run.add_picture(str(final_img_path), height=Cm(h_use)) 
                 except Exception as e:
                     print(f"[ERROR] Chyba při vkládání obrázku: {e}")
                 finally:
@@ -6548,16 +6676,16 @@ class MainWindow(QMainWindow):
             
             for ph, val in rich_repl_html.items():
                 if isinstance(val, tuple):
-                    html_content, img_path = val
+                    html_content, img_path = val[0], val[1]
                 else:
                     html_content, img_path = val, None
 
                 if txt_clean == f"<{ph}>" or txt_clean == f"{{{ph}}}":
-                    matched_rich = (html_content, img_path)
+                    matched_rich = (html_content, img_path, float((val[2] if len(val) > 2 else 0.0) or 0.0), float((val[3] if len(val) > 3 else 0.0) or 0.0))
                     break
             
             if matched_rich:
-                insert_rich_question_block(p, matched_rich[0], matched_rich[1])
+                insert_rich_question_block(p, matched_rich[0], matched_rich[1], matched_rich[2], matched_rich[3])
                 return
 
             # 2. INLINE CHECK (zkráceno, bez obrázků)
