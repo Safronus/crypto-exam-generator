@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.0.3"
+APP_VERSION = "8.0.5"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -522,7 +522,221 @@ class DnDTree(QTreeWidget):
 
     def dropEvent(self, event) -> None:
         ids_before = self.owner._selected_question_ids()
+
+        # Pokud uživatel pustí drag mimo položky (na prázdnou plochu / mimo seznam),
+        # upozorníme, že tím položku "vyhodí" ze seznamu. Po potvrzení ji opravdu smažeme.
+        try:
+            pos = event.position().toPoint()  # Qt6
+        except Exception:
+            pos = event.pos()  # fallback
+
+        target = self.itemAt(pos)
+        if target is None and self.dropIndicatorPosition() == QAbstractItemView.OnViewport:
+            mb = QMessageBox(self)
+            mb.setIcon(QMessageBox.Warning)
+            mb.setWindowTitle("Pozor")
+            mb.setText("Přesouváš položku mimo seznam.")
+            mb.setInformativeText("Tím se položka odstraní ze seznamu. Chceš pokračovat?")
+
+            mb.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            mb.setDefaultButton(QMessageBox.No)
+
+            # Tlačítka česky
+            yes_btn = mb.button(QMessageBox.Yes)
+            no_btn = mb.button(QMessageBox.No)
+            if yes_btn is not None:
+                yes_btn.setText("Ano")
+            if no_btn is not None:
+                no_btn.setText("Ne")
+
+            res = mb.exec()
+            if res != QMessageBox.Yes:
+                event.ignore()
+                self.owner.statusBar().showMessage("Přesun zrušen.", 3000)
+                return
+
+            # Uživatel potvrdil -> vybrané položky opravdu smažeme ze stromu (včetně skupin).
+            selected = list(self.selectedItems())
+            selected_set = set(selected)
+
+            def has_selected_ancestor(it) -> bool:
+                p = it.parent()
+                while p is not None:
+                    if p in selected_set:
+                        return True
+                    p = p.parent()
+                return False
+
+            def depth(it) -> int:
+                d = 0
+                p = it.parent()
+                while p is not None:
+                    d += 1
+                    p = p.parent()
+                return d
+
+            # Neodstraňovat položky, které už budou odstraněny s rodičem
+            selected = [it for it in selected if not has_selected_ancestor(it)]
+            # Odstraňovat od nejhlubších (bezpečnější)
+            selected.sort(key=depth, reverse=True)
+
+            for it in selected:
+                parent = it.parent()
+                if parent is not None:
+                    idx = parent.indexOfChild(it)
+                    if idx >= 0:
+                        parent.takeChild(idx)
+                else:
+                    idx = self.indexOfTopLevelItem(it)
+                    if idx >= 0:
+                        self.takeTopLevelItem(idx)
+
+            self.owner._sync_model_from_tree()
+            self.owner._refresh_tree()
+            self.owner.save_data()
+            self.owner.statusBar().showMessage("Položka odstraněna ze seznamu (uloženo).", 3000)
+            return
+
+        # Necháme QTreeWidget provést interní DnD
         super().dropEvent(event)
+
+        def kind_of(it) -> str:
+            meta = it.data(0, Qt.UserRole) or {}
+            if isinstance(meta, dict):
+                return meta.get("kind") or ""
+            return ""
+
+        def iter_all_items():
+            stack = []
+            for ti in range(self.topLevelItemCount()):
+                stack.append(self.topLevelItem(ti))
+            while stack:
+                it = stack.pop()
+                yield it
+                for ci in range(it.childCount() - 1, -1, -1):
+                    stack.append(it.child(ci))
+
+        def top_level_group_of(it):
+            cur = it
+            while cur is not None:
+                if kind_of(cur) == "group" and cur.parent() is None:
+                    return cur
+                cur = cur.parent()
+            return None
+
+        def nearest_group_for_top_level_index(idx: int):
+            # najdi nejbližší skupinu nad idx, jinak pod idx
+            for j in range(idx - 1, -1, -1):
+                it = self.topLevelItem(j)
+                if it is not None and kind_of(it) == "group":
+                    return it, j
+            for j in range(idx + 1, self.topLevelItemCount()):
+                it = self.topLevelItem(j)
+                if it is not None and kind_of(it) == "group":
+                    return it, j
+            return None, -1
+
+        changed = True
+        while changed:
+            changed = False
+
+            # 1) NIC nesmí být dítě "question" (cokoliv puštěné na otázku).
+            #    Nové chování:
+            #    - subgroup puštěná na otázku => vnořit do nadřazené podskupiny (tj. podskupiny, která obsahuje cílovou otázku)
+            #    - question puštěná na otázku => zůstane sourozencem (pod cílovou otázkou) ve stejné podskupině
+            for it in iter_all_items():
+                if kind_of(it) != "question":
+                    continue
+                if it.childCount() <= 0:
+                    continue
+
+                moved = it.takeChild(0)
+                if moved is None:
+                    continue
+
+                ck = kind_of(moved)
+                q_parent = it.parent()  # typicky subgroup
+
+                if ck == "question":
+                    if q_parent is not None:
+                        insert_at = q_parent.indexOfChild(it) + 1
+                        q_parent.insertChild(insert_at, moved)
+                    else:
+                        self.insertTopLevelItem(self.topLevelItemCount(), moved)
+
+                elif ck == "subgroup":
+                    # PODSKUPINA NA OTÁZKU => vnořit do nadřazené podskupiny (q_parent)
+                    if q_parent is not None:
+                        q_parent.insertChild(q_parent.childCount(), moved)
+                    else:
+                        # fallback (nemáme nadřazenou podskupinu) - dáme na top-level
+                        self.insertTopLevelItem(self.topLevelItemCount(), moved)
+
+                elif ck == "group":
+                    # skupina musí být top-level
+                    tg = top_level_group_of(it)
+                    insert_at = self.indexOfTopLevelItem(tg) + 1 if tg is not None else self.topLevelItemCount()
+                    self.insertTopLevelItem(insert_at, moved)
+
+                else:
+                    if q_parent is not None:
+                        insert_at = q_parent.indexOfChild(it) + 1
+                        q_parent.insertChild(insert_at, moved)
+                    else:
+                        self.insertTopLevelItem(self.topLevelItemCount(), moved)
+
+                changed = True
+                break
+
+            if changed:
+                continue
+
+            # 2) Top-level podskupina -> přesun do nejbližší skupiny (aby nemizela)
+            for ti in range(self.topLevelItemCount()):
+                top = self.topLevelItem(ti)
+                if top is None:
+                    continue
+                if kind_of(top) != "subgroup":
+                    continue
+
+                grp, grp_idx = nearest_group_for_top_level_index(ti)
+                if grp is None:
+                    continue
+
+                moved = self.takeTopLevelItem(ti)
+                if moved is None:
+                    continue
+
+                if grp_idx >= 0 and ti == grp_idx + 1:
+                    grp.insertChild(0, moved)
+                else:
+                    grp.insertChild(grp.childCount(), moved)
+
+                changed = True
+                break
+
+            if changed:
+                continue
+
+            # 3) Skupina nesmí být nikdy vnořená (group musí být top-level)
+            for it in iter_all_items():
+                if kind_of(it) != "group":
+                    continue
+                if it.parent() is None:
+                    continue
+
+                parent = it.parent()
+                idx = parent.indexOfChild(it)
+                if idx < 0:
+                    continue
+                moved = parent.takeChild(idx)
+                if moved is None:
+                    continue
+
+                self.insertTopLevelItem(self.topLevelItemCount(), moved)
+                changed = True
+                break
+
         self.owner._sync_model_from_tree()
         self.owner._refresh_tree()
         self.owner._reselect_questions(ids_before)
