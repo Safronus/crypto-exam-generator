@@ -5885,7 +5885,16 @@ class MainWindow(QMainWindow):
 
     def _update_selected_question_item_title(self, text: str) -> None:
         items = self.tree.selectedItems()
-        if items: items[0].setText(0, text or "Otázka")
+        if not items:
+            return
+
+        item = items[0]
+        item.setText(0, text or "Otázka")
+
+        # Po změně názvu otázky znovu seřadíme otázky v rámci stejné podskupiny
+        parent = item.parent()
+        if parent is not None:
+            parent.sortChildren(0, Qt.AscendingOrder)
 
     def _update_selected_question_item_subtitle(self, text: str) -> None:
         items = self.tree.selectedItems()
