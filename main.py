@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.0.0"
+APP_VERSION = "8.0.3"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -6308,29 +6308,38 @@ class MainWindow(QMainWindow):
 
         # Regexy
         rx_bonus_start = re.compile(r'^\s*Otázka\s+\d+.*BONUS', re.IGNORECASE)
-        
-        # Přísnější definice otázky: Musí začínat velkým písmenem a končit ?, ., nebo :
-        # Přidal jsem i konce řádků, aby to chytlo i "Uveďte příkaz..." (což nemusí mít na konci nic, pokud je to nadpis)
-        # Ale pro jistotu budeme vyžadovat, aby to nevypadalo jako odrážka.
-        rx_looks_like_question_start = re.compile(r'^[A-ZŽŠČŘĎŤŇ]') 
-        
+
+        # Podpora "1. Text ..." / "1) Text ..." (ručně psané číslování v textu)
+        rx_plain_numbered_question = re.compile(r'^\s*\d{1,3}\s*[\.)]\s+\S')
+
+        # Přísnější definice otázky: Musí začínat velkým písmenem
+        rx_looks_like_question_start = re.compile(r'^[A-ZŽŠČŘĎŤŇ]')
+
         rx_visual_bullet = re.compile(r'^\s*[\-–—•]')
         rx_not_question = re.compile(r'^(Slovník|Tabulka|Obrázek|Příklad|Body|Poznámka)', re.IGNORECASE)
 
         def html_escape(s: str) -> str:
             return _html.escape(s or "")
 
+        def strip_manual_numbering(s: str) -> str:
+            # Odstraní pouze ručně napsané "1." / "1)" na začátku
+            return re.sub(r'^\s*\d{1,3}\s*[\.)]\s+', '', (s or ""))
+
         # --- JÁDRO LOGIKY ---
         def is_start_of_new_question(p: dict) -> bool:
             text = p["text"].strip()
-            if not text: return False
-            
+            if not text:
+                return False
+
+            # 0. Ručně psané číslování "1." / "1)" -> nová otázka
+            if rx_plain_numbered_question.match(text):
+                return True
+
             # 1. Vizuální odrážka (pomlčka atd.) -> NIKDY není nová otázka
             if rx_visual_bullet.match(text):
                 return False
 
-            # 2. Začíná malým písmenem -> NIKDY není nová otázka (je to asi odpověď/pokračování)
-            #    (S výjimkou, pokud by to bylo číslované "1. něco", ale to ošetříme níže)
+            # 2. Začíná malým písmenem -> NIKDY není nová otázka
             if text[0].islower():
                 return False
 
@@ -6340,10 +6349,9 @@ class MainWindow(QMainWindow):
 
             # 4. Word číslovaný seznam (level 0)
             if p["is_numbered"] and p["ilvl"] == 0 and p["num_fmt"] != "bullet":
-                # Pokud to vypadá jako otázka (Velké písmeno) a není to vyloučené slovo
                 if rx_looks_like_question_start.match(text) and not rx_not_question.match(text):
                     return True
-            
+
             return False
 
         while i < n:
@@ -6358,36 +6366,40 @@ class MainWindow(QMainWindow):
             # -- START OTÁZKY --
             is_bonus = bool(rx_bonus_start.search(txt))
             q_type = "bonus" if is_bonus else "classic"
-            
-            clean_title = re.sub(r'^\d+\.\s*', '', txt)
-            if len(clean_title) > 60: clean_title = clean_title[:57] + "..."
-            
-            html_parts = [f"<p>{html_escape(txt)}</p>"]
-            
+
+            # Pokud je číslování ručně psané ("1."/"1)"), odstraň ho z titulku i z první věty v HTML
+            first_line_txt = strip_manual_numbering(txt)
+
+            clean_title = first_line_txt
+            if len(clean_title) > 60:
+                clean_title = clean_title[:57] + "..."
+
+            html_parts = [f"<p>{html_escape(first_line_txt)}</p>"]
+
             # -- ČTENÍ OBSAHU (Hladový režim, ale s respektem k nové otázce) --
             j = i + 1
             while j < n:
                 next_p = paragraphs[j]
                 next_txt = next_p["text"].strip()
-                
+
                 # Pokud narazíme na něco, co splňuje definici NOVÉ otázky, končíme.
                 if is_start_of_new_question(next_p):
                     break
-                
+
                 # Jinak je to součást této otázky
                 if next_txt:
                     html_parts.append(f"<p>{html_escape(next_txt)}</p>")
-                
+
                 j += 1
 
             full_html = "".join(html_parts)
-            
+
             q = Question.new_default(q_type)
             q.title = ("BONUS: " + clean_title) if is_bonus else clean_title
             q.text_html = full_html
             q.points = (0 if is_bonus else 1)
             q.bonus_correct = (1.0 if is_bonus else 0.0)
-            
+
             out.append(q)
             i = j
 
