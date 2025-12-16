@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.1.0"
+APP_VERSION = "8.1.1"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -527,14 +527,14 @@ class DnDTree(QTreeWidget):
 
     def dropEvent(self, event) -> None:
         ids_before = self.owner._selected_question_ids()
-
+    
         # Pokud uživatel pustí drag mimo položky (na prázdnou plochu / mimo seznam),
         # upozorníme, že tím položku "vyhodí" ze seznamu. Po potvrzení ji opravdu smažeme.
         try:
             pos = event.position().toPoint()  # Qt6
         except Exception:
             pos = event.pos()  # fallback
-
+    
         target = self.itemAt(pos)
         if target is None and self.dropIndicatorPosition() == QAbstractItemView.OnViewport:
             mb = QMessageBox(self)
@@ -542,10 +542,10 @@ class DnDTree(QTreeWidget):
             mb.setWindowTitle("Pozor")
             mb.setText("Přesouváš položku mimo seznam.")
             mb.setInformativeText("Tím se položka odstraní ze seznamu. Chceš pokračovat?")
-
+    
             mb.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             mb.setDefaultButton(QMessageBox.No)
-
+    
             # Tlačítka česky
             yes_btn = mb.button(QMessageBox.Yes)
             no_btn = mb.button(QMessageBox.No)
@@ -553,17 +553,17 @@ class DnDTree(QTreeWidget):
                 yes_btn.setText("Ano")
             if no_btn is not None:
                 no_btn.setText("Ne")
-
+    
             res = mb.exec()
             if res != QMessageBox.Yes:
                 event.ignore()
                 self.owner.statusBar().showMessage("Přesun zrušen.", 3000)
                 return
-
+    
             # Uživatel potvrdil -> vybrané položky opravdu smažeme ze stromu (včetně skupin).
             selected = list(self.selectedItems())
             selected_set = set(selected)
-
+    
             def has_selected_ancestor(it) -> bool:
                 p = it.parent()
                 while p is not None:
@@ -571,7 +571,7 @@ class DnDTree(QTreeWidget):
                         return True
                     p = p.parent()
                 return False
-
+    
             def depth(it) -> int:
                 d = 0
                 p = it.parent()
@@ -579,38 +579,26 @@ class DnDTree(QTreeWidget):
                     d += 1
                     p = p.parent()
                 return d
-
+    
             # Neodstraňovat položky, které už budou odstraněny s rodičem
             selected = [it for it in selected if not has_selected_ancestor(it)]
             # Odstraňovat od nejhlubších (bezpečnější)
             selected.sort(key=depth, reverse=True)
-
-            for it in selected:
-                parent = it.parent()
-                if parent is not None:
-                    idx = parent.indexOfChild(it)
-                    if idx >= 0:
-                        parent.takeChild(idx)
-                else:
-                    idx = self.indexOfTopLevelItem(it)
-                    if idx >= 0:
-                        self.takeTopLevelItem(idx)
-
-            self.owner._sync_model_from_tree()
-            self.owner._refresh_tree()
-            self.owner.save_data()
-            self.owner.statusBar().showMessage("Položka odstraněna ze seznamu (uloženo).", 3000)
+    
+            # ZMĚNA: místo ručního odmazání ze stromu + _sync_model_from_tree uložíme do koše a smažeme z modelu
+            self.owner._trash_delete_tree_items(selected)
+            self.owner._reselect_questions(ids_before)
             return
-
+    
         # Necháme QTreeWidget provést interní DnD
         super().dropEvent(event)
-
+    
         def kind_of(it) -> str:
             meta = it.data(0, Qt.UserRole) or {}
             if isinstance(meta, dict):
                 return meta.get("kind") or ""
             return ""
-
+    
         def iter_all_items():
             stack = []
             for ti in range(self.topLevelItemCount()):
@@ -620,7 +608,7 @@ class DnDTree(QTreeWidget):
                 yield it
                 for ci in range(it.childCount() - 1, -1, -1):
                     stack.append(it.child(ci))
-
+    
         def top_level_group_of(it):
             cur = it
             while cur is not None:
@@ -628,7 +616,7 @@ class DnDTree(QTreeWidget):
                     return cur
                 cur = cur.parent()
             return None
-
+    
         def nearest_group_for_top_level_index(idx: int):
             # najdi nejbližší skupinu nad idx, jinak pod idx
             for j in range(idx - 1, -1, -1):
@@ -640,11 +628,11 @@ class DnDTree(QTreeWidget):
                 if it is not None and kind_of(it) == "group":
                     return it, j
             return None, -1
-
+    
         changed = True
         while changed:
             changed = False
-
+    
             # 1) NIC nesmí být dítě "question" (cokoliv puštěné na otázku).
             #    Nové chování:
             #    - subgroup puštěná na otázku => vnořit do nadřazené podskupiny (tj. podskupiny, která obsahuje cílovou otázku)
@@ -654,21 +642,21 @@ class DnDTree(QTreeWidget):
                     continue
                 if it.childCount() <= 0:
                     continue
-
+    
                 moved = it.takeChild(0)
                 if moved is None:
                     continue
-
+    
                 ck = kind_of(moved)
                 q_parent = it.parent()  # typicky subgroup
-
+    
                 if ck == "question":
                     if q_parent is not None:
                         insert_at = q_parent.indexOfChild(it) + 1
                         q_parent.insertChild(insert_at, moved)
                     else:
                         self.insertTopLevelItem(self.topLevelItemCount(), moved)
-
+    
                 elif ck == "subgroup":
                     # PODSKUPINA NA OTÁZKU => vnořit do nadřazené podskupiny (q_parent)
                     if q_parent is not None:
@@ -676,26 +664,26 @@ class DnDTree(QTreeWidget):
                     else:
                         # fallback (nemáme nadřazenou podskupinu) - dáme na top-level
                         self.insertTopLevelItem(self.topLevelItemCount(), moved)
-
+    
                 elif ck == "group":
                     # skupina musí být top-level
                     tg = top_level_group_of(it)
                     insert_at = self.indexOfTopLevelItem(tg) + 1 if tg is not None else self.topLevelItemCount()
                     self.insertTopLevelItem(insert_at, moved)
-
+    
                 else:
                     if q_parent is not None:
                         insert_at = q_parent.indexOfChild(it) + 1
                         q_parent.insertChild(insert_at, moved)
                     else:
                         self.insertTopLevelItem(self.topLevelItemCount(), moved)
-
+    
                 changed = True
                 break
-
+    
             if changed:
                 continue
-
+    
             # 2) Top-level podskupina -> přesun do nejbližší skupiny (aby nemizela)
             for ti in range(self.topLevelItemCount()):
                 top = self.topLevelItem(ti)
@@ -703,33 +691,33 @@ class DnDTree(QTreeWidget):
                     continue
                 if kind_of(top) != "subgroup":
                     continue
-
+    
                 grp, grp_idx = nearest_group_for_top_level_index(ti)
                 if grp is None:
                     continue
-
+    
                 moved = self.takeTopLevelItem(ti)
                 if moved is None:
                     continue
-
+    
                 if grp_idx >= 0 and ti == grp_idx + 1:
                     grp.insertChild(0, moved)
                 else:
                     grp.insertChild(grp.childCount(), moved)
-
+    
                 changed = True
                 break
-
+    
             if changed:
                 continue
-
+    
             # 3) Skupina nesmí být nikdy vnořená (group musí být top-level)
             for it in iter_all_items():
                 if kind_of(it) != "group":
                     continue
                 if it.parent() is None:
                     continue
-
+    
                 parent = it.parent()
                 idx = parent.indexOfChild(it)
                 if idx < 0:
@@ -737,11 +725,11 @@ class DnDTree(QTreeWidget):
                 moved = parent.takeChild(idx)
                 if moved is None:
                     continue
-
+    
                 self.insertTopLevelItem(self.topLevelItemCount(), moved)
                 changed = True
                 break
-
+    
         self.owner._sync_model_from_tree()
         self.owner._refresh_tree()
         self.owner._reselect_questions(ids_before)
@@ -3522,13 +3510,34 @@ class MainWindow(QMainWindow):
         self.table_trash.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table_trash.setSortingEnabled(True)
         self.table_trash.verticalHeader().setVisible(False)
+        self.table_trash.setShowGrid(False)
+        self.table_trash.setAlternatingRowColors(True)
+    
+        self.table_trash.setStyleSheet("""
+            QTableWidget {
+                background-color: #121212;
+                color: #e0e0e0;
+                gridline-color: #333333;
+                border: 1px solid #333;
+                font-family: 'Consolas', 'Monospace', 'Courier New';
+                selection-background-color: #c62828;
+                selection-color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #1e1e1e;
+                color: #9e9e9e;
+                padding: 4px;
+                border: 1px solid #333;
+                font-weight: bold;
+            }
+        """)
     
         self.table_trash.setHorizontalHeaderLabels([
             "NÁZEV OTÁZKY",
             "TYP",
             "SMAZÁNO",
             "PŮVODNÍ SKUPINA",
-            "PŮVODNÍ PODSKUPINA",
+            "PŮVODNÍ CESTA (PODSKUPINY)",
         ])
         header = self.table_trash.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
@@ -5664,7 +5673,7 @@ class MainWindow(QMainWindow):
                 to_delete_g_ids.add(meta.get("id"))
                 selected_group_ids.append(meta.get("id"))
     
-        def add_question_to_trash(q: Question, gid: str, sgid: str, gname: str, sgname: str) -> None:
+        def add_question_to_trash(q: Question, gid: str, sgid: str, gname: str, sgname: str, sg_path: str) -> None:
             if not q or not q.id:
                 return
             if q.id in seen_qids:
@@ -5677,21 +5686,27 @@ class MainWindow(QMainWindow):
                 "source_group_name": gname or "",
                 "source_subgroup_id": sgid or "",
                 "source_subgroup_name": sgname or "",
+                "source_subgroup_path": sg_path or "",
             })
     
-        def collect_questions_under_subgroups(subgroups: List[Subgroup], gid: str, gname: str) -> None:
+        def collect_questions_under_subgroups(subgroups: List[Subgroup], gid: str, gname: str, path_names: List[str], path_ids: List[str]) -> None:
             for sg in subgroups:
+                p_names = list(path_names) + [sg.name]
+                p_ids = list(path_ids) + [sg.id]
+                sg_path = " / ".join([n for n in p_names if n])
+    
                 for q in sg.questions:
-                    add_question_to_trash(q, gid, sg.id, gname, sg.name)
+                    add_question_to_trash(q, gid, sg.id, gname, sg.name, sg_path)
+    
                 if sg.subgroups:
-                    collect_questions_under_subgroups(sg.subgroups, gid, gname)
+                    collect_questions_under_subgroups(sg.subgroups, gid, gname, p_names, p_ids)
     
         # 1) Skupiny
         for gid in selected_group_ids:
             g = self._find_group(gid)
             if not g:
                 continue
-            collect_questions_under_subgroups(g.subgroups, g.id, g.name)
+            collect_questions_under_subgroups(g.subgroups, g.id, g.name, [], [])
     
         # 2) Podskupiny (včetně vnořených)
         for meta in selected_subgroup_metas:
@@ -5702,7 +5717,8 @@ class MainWindow(QMainWindow):
             sg = self._find_subgroup(gid, sgid)
             if not sg:
                 continue
-            collect_questions_under_subgroups([sg], gid, gname)
+            # pro „mazu podskupinu“ je kořen cesty tato podskupina (včetně jejích vnořených)
+            collect_questions_under_subgroups([sg], gid, gname, [], [])
     
         # 3) Konkrétní otázky
         for meta in selected_question_metas:
@@ -5718,7 +5734,9 @@ class MainWindow(QMainWindow):
             gname = g.name if g else ""
             sg = self._find_subgroup(gid, sgid)
             sgname = sg.name if sg else ""
-            add_question_to_trash(q, gid, sgid, gname, sgname)
+            # u konkrétní otázky neumíme bez extra helperů rekonstruovat nadřazené podskupiny,
+            # proto aspoň leaf (zbytek doplníme při sběru z rekurzí)
+            add_question_to_trash(q, gid, sgid, gname, sgid, sgname)
     
         if trash_records:
             self.root.trash.extend(trash_records)
@@ -5731,7 +5749,7 @@ class MainWindow(QMainWindow):
         for g in self.root.groups:
             # Filtrace podskupin v této skupině
             g.subgroups = [sg for sg in g.subgroups if sg.id not in to_delete_sg_ids]
-            
+    
             # Rekurzivní čištění uvnitř podskupin (pro otázky a vnořené podskupiny)
             self._clean_subgroups_recursive(g.subgroups, to_delete_sg_ids, to_delete_q_ids)
     
@@ -7710,9 +7728,19 @@ class MainWindow(QMainWindow):
         qtype = qd.get("type", "classic")
         deleted_at = rec.get("deleted_at", "")
         gname = rec.get("source_group_name", "")
-        sgname = rec.get("source_subgroup_name", "")
+        sg_path = rec.get("source_subgroup_path", "")
+        if not isinstance(sg_path, str) or not sg_path:
+            sg_path = rec.get("source_subgroup_name", "")
     
+        # NOVÉ: náhled bez HTML značek
         text_html = qd.get("text_html", "") or ""
+        try:
+            doc = QTextDocument()
+            doc.setHtml(text_html)
+            text_plain = doc.toPlainText()
+        except Exception:
+            text_plain = text_html
+    
         correct_answer = qd.get("correct_answer", "") or ""
     
         txt = []
@@ -7720,10 +7748,10 @@ class MainWindow(QMainWindow):
         txt.append(f"Typ: {'BONUS' if qtype == 'bonus' else 'Klasická'}")
         txt.append(f"Smazáno: {deleted_at}")
         txt.append(f"Původní skupina: {gname}")
-        txt.append(f"Původní podskupina: {sgname}")
+        txt.append(f"Původní cesta (podskupiny): {sg_path}")
         txt.append("")
-        txt.append("Obsah (HTML uložené):")
-        txt.append(text_html)
+        txt.append("Obsah:")
+        txt.append(text_plain)
         if correct_answer:
             txt.append("")
             txt.append("Správná odpověď:")
@@ -7763,11 +7791,11 @@ class MainWindow(QMainWindow):
         if not isinstance(trash_list, list):
             trash_list = []
     
+        # Zobrazíme nejnovější nahoře
         def sort_key(r: dict) -> str:
             if isinstance(r, dict):
                 return str(r.get("deleted_at", ""))
             return ""
-    
         rows = sorted(trash_list, key=sort_key, reverse=True)
     
         self.table_trash.setSortingEnabled(False)
@@ -7786,7 +7814,10 @@ class MainWindow(QMainWindow):
             type_txt = "BONUS" if qtype == "bonus" else "Klasická"
             deleted_at = rec.get("deleted_at", "")
             gname = rec.get("source_group_name", "")
-            sgname = rec.get("source_subgroup_name", "")
+            # NOVÉ: celá cesta podskupin (fallback na původní název)
+            sg_path = rec.get("source_subgroup_path", "")
+            if not isinstance(sg_path, str) or not sg_path:
+                sg_path = rec.get("source_subgroup_name", "")
     
             row = self.table_trash.rowCount()
             self.table_trash.insertRow(row)
@@ -7797,16 +7828,134 @@ class MainWindow(QMainWindow):
             it_type = QTableWidgetItem(type_txt)
             it_deleted = QTableWidgetItem(deleted_at)
             it_g = QTableWidgetItem(gname)
-            it_sg = QTableWidgetItem(sgname)
+            it_path = QTableWidgetItem(sg_path)
     
             self.table_trash.setItem(row, 0, it_title)
             self.table_trash.setItem(row, 1, it_type)
             self.table_trash.setItem(row, 2, it_deleted)
             self.table_trash.setItem(row, 3, it_g)
-            self.table_trash.setItem(row, 4, it_sg)
+            self.table_trash.setItem(row, 4, it_path)
     
         self.table_trash.setSortingEnabled(True)
+    
+        # Fit sloupců na obsah (kromě názvu otázky)
+        header = self.table_trash.horizontalHeader()
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+    
         self._on_trash_selection_changed()
+        
+    def _trash_delete_tree_items(self, items: List[QTreeWidgetItem]) -> None:
+        """Smaže zvolené položky do Koše (bez dalšího potvrzování). Používá se pro DnD vyhození mimo seznam."""
+        if not items:
+            return
+    
+        if not hasattr(self.root, "trash") or not isinstance(getattr(self.root, "trash", None), list):
+            self.root.trash = []
+    
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        trash_records: List[dict] = []
+        seen_qids: set[str] = set()
+    
+        selected_question_metas: List[dict] = []
+        selected_subgroup_metas: List[dict] = []
+        selected_group_ids: List[str] = []
+    
+        to_delete_q_ids = set()
+        to_delete_sg_ids = set()
+        to_delete_g_ids = set()
+    
+        for it in items:
+            meta = it.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind")
+            if kind == "question":
+                to_delete_q_ids.add(meta.get("id"))
+                selected_question_metas.append(meta)
+            elif kind == "subgroup":
+                to_delete_sg_ids.add(meta.get("id"))
+                selected_subgroup_metas.append(meta)
+            elif kind == "group":
+                to_delete_g_ids.add(meta.get("id"))
+                selected_group_ids.append(meta.get("id"))
+    
+        def add_question_to_trash(q: Question, gid: str, sgid: str, gname: str, sgname: str, sg_path: str) -> None:
+            if not q or not q.id:
+                return
+            if q.id in seen_qids:
+                return
+            seen_qids.add(q.id)
+            trash_records.append({
+                "question": asdict(q),
+                "deleted_at": now_iso,
+                "source_group_id": gid or "",
+                "source_group_name": gname or "",
+                "source_subgroup_id": sgid or "",
+                "source_subgroup_name": sgname or "",
+                "source_subgroup_path": sg_path or "",
+            })
+    
+        def collect_questions_under_subgroups(subgroups: List[Subgroup], gid: str, gname: str, path_names: List[str]) -> None:
+            for sg in subgroups:
+                p_names = list(path_names) + [sg.name]
+                sg_path = " / ".join([n for n in p_names if n])
+    
+                for q in sg.questions:
+                    add_question_to_trash(q, gid, sg.id, gname, sg.name, sg_path)
+    
+                if sg.subgroups:
+                    collect_questions_under_subgroups(sg.subgroups, gid, gname, p_names)
+    
+        # 1) Skupiny
+        for gid in selected_group_ids:
+            g = self._find_group(gid)
+            if not g:
+                continue
+            collect_questions_under_subgroups(g.subgroups, g.id, g.name, [])
+    
+        # 2) Podskupiny
+        for meta in selected_subgroup_metas:
+            gid = meta.get("parent_group_id") or ""
+            sgid = meta.get("id") or ""
+            g = self._find_group(gid)
+            gname = g.name if g else ""
+            sg = self._find_subgroup(gid, sgid)
+            if not sg:
+                continue
+            collect_questions_under_subgroups([sg], gid, gname, [])
+    
+        # 3) Konkrétní otázky
+        for meta in selected_question_metas:
+            gid = meta.get("parent_group_id") or ""
+            sgid = meta.get("parent_subgroup_id") or ""
+            qid = meta.get("id") or ""
+            if not qid:
+                continue
+            q = self._find_question(gid, sgid, qid)
+            if not q:
+                continue
+            g = self._find_group(gid)
+            gname = g.name if g else ""
+            sg = self._find_subgroup(gid, sgid)
+            sgname = sg.name if sg else ""
+            add_question_to_trash(q, gid, sgid, gname, sgname, sgname)
+    
+        if trash_records:
+            self.root.trash.extend(trash_records)
+    
+        # Smazání z modelu
+        self.root.groups = [g for g in self.root.groups if g.id not in to_delete_g_ids]
+        for g in self.root.groups:
+            g.subgroups = [sg for sg in g.subgroups if sg.id not in to_delete_sg_ids]
+            self._clean_subgroups_recursive(g.subgroups, to_delete_sg_ids, to_delete_q_ids)
+    
+        self._refresh_tree()
+        self._refresh_trash_table()
+        self._clear_editor()
+        self.save_data()
+        self.statusBar().showMessage("Položka odstraněna ze seznamu (uloženo do Koše).", 3000)
 
     # -------------------- Pomocné --------------------
 
