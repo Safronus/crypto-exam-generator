@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.1.2"
+APP_VERSION = "8.1.3"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -4286,7 +4286,7 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table_history.setColumnWidth(2, 220)
-
+    
         self.table_history.setRowCount(0)
         self.table_history.setSortingEnabled(False)
         
@@ -4312,7 +4312,7 @@ class MainWindow(QMainWindow):
             p.drawRect(8, 8, 14, 16)
             p.end()
             return QIcon(pix)
-
+    
         for entry in history:
             row = self.table_history.rowCount()
             self.table_history.insertRow(row)
@@ -4337,7 +4337,7 @@ class MainWindow(QMainWindow):
                     dt = datetime.fromisoformat(raw_date)
                     date_str = dt.strftime("%Y-%m-%d %H:%M")
             except: pass
-
+    
             # 1. TYP (Ikona + Počet)
             if is_multi:
                 icon = get_stack_icon(QColor("#ff9800")) # Oranžový balík
@@ -4347,7 +4347,7 @@ class MainWindow(QMainWindow):
                 icon = self.style().standardIcon(QStyle.SP_FileIcon)
                 text_type = "01x"
                 color_type = QColor("#9e9e9e")
-
+    
             item_type = QTableWidgetItem(text_type)
             item_type.setIcon(icon)
             item_type.setForeground(QBrush(color_type))
@@ -4355,7 +4355,7 @@ class MainWindow(QMainWindow):
             item_type.setTextAlignment(Qt.AlignCenter)
             item_type.setFlags(item_type.flags() ^ Qt.ItemIsEditable)
             self.table_history.setItem(row, 0, item_type)
-
+    
             # 2. SOUBOR
             item_fn = QTableWidgetItem(clean_fn)
             item_fn.setForeground(QBrush(QColor("#80d8ff")))
@@ -4375,7 +4375,7 @@ class MainWindow(QMainWindow):
             item_hash.setToolTip(h)
             item_hash.setFlags(item_hash.flags() ^ Qt.ItemIsEditable)
             self.table_history.setItem(row, 2, item_hash)
-
+    
             # 4. DATUM
             item_date = QTableWidgetItem(f"{date_str}")
             item_date.setForeground(QBrush(QColor("#757575")))
@@ -4385,7 +4385,7 @@ class MainWindow(QMainWindow):
             self.table_history.setItem(row, 3, item_date)
             
         self.table_history.setSortingEnabled(True)
-        self.table_history.sortItems(1, Qt.AscendingOrder)
+        self.table_history.sortItems(3, Qt.DescendingOrder)  # ← třídění podle „ČASOVÁ STOPA“ (nejnovější první)
 
     def _on_history_context_menu(self, pos) -> None:
         """Zobrazí kontextové menu pro tabulku historie."""
