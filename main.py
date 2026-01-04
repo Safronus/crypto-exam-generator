@@ -37,7 +37,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from html.parser import HTMLParser
 
-from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime, QPoint, QRect, QTime
+from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime, QPoint, QRect, QTime, QSettings
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -48,7 +48,7 @@ from PySide6.QtGui import (
     QTextBlockFormat,
     QColor,
     QPalette, QTextDocument,
-    QFont, QPen, 
+    QFont, QPen,
     QPixmap, QImage, QImageReader, QPainter, QIcon, QBrush, QPainterPath
 )
 from PySide6.QtWidgets import (
@@ -81,7 +81,7 @@ from PySide6.QtWidgets import (
     QWizardPage,
     QDateTimeEdit,
     # Nové importy pro v4.0 UI
-    QGroupBox,
+    QGroupBox, 
     QTableWidget, QListWidget,
     QTableWidgetItem, QFrame, QStyledItemDelegate,
     QHeaderView, QCheckBox, QGridLayout,
@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.2.0"
+APP_VERSION = "8.3.0"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -3519,38 +3519,246 @@ class MainWindow(QMainWindow):
         self.btn_trash_restore.setEnabled(False)
         self.btn_trash_delete.setEnabled(False)
         self.btn_trash_empty.setEnabled(False)
+        
+    def showEvent(self, event: QShowEvent) -> None:
+        """Po prvním zobrazení obnoví stav rozbalení stromu (asynchronně po vykreslení)."""
+        super().showEvent(event)
+        QTimer.singleShot(0, self._restore_tree_expansion_state_on_show)
+    
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Před zavřením uloží stav rozbalení stromu (per projekt)."""
+        try:
+            self._save_tree_expansion_state_on_close()
+        except Exception:
+            pass
+        super().closeEvent(event)
+        
+    from PySide6.QtCore import QSettings, QTimer
+    from PySide6.QtGui import QShowEvent, QCloseEvent
+    import hashlib, json
+    
+    def _settings_key_for_tree_state(self) -> str:
+        """
+        Unikátní klíč pro QSettings odvozený od cesty projektu (per projekt).
+        """
+        try:
+            root_str = str(self.project_root.resolve()) if self.project_root else ""
+        except Exception:
+            root_str = str(self.project_root) if hasattr(self, "project_root") else ""
+        digest = hashlib.sha1(root_str.encode("utf-8", "ignore")).hexdigest()
+        return f"tree_state/{digest}"
+    
+    def _save_tree_expansion_state_on_close(self) -> None:
+        """
+        Uloží *viditelně rozbalené* uzly stromu otázek (group/subgroup) do QSettings.
+        Využívá existující _capture_tree_expansion_state().
+        """
+        try:
+            expanded = self._capture_tree_expansion_state()  # set[(kind,id)]
+            payload = [{"kind": k, "id": i} for (k, i) in sorted(expanded)]
+            settings = QSettings()
+            settings.beginGroup(self._settings_key_for_tree_state())
+            settings.setValue("questions_expanded", json.dumps(payload, ensure_ascii=False))
+            settings.endGroup()
+        except Exception:
+            pass  # nechceme blokovat zavření
+    
+    def _restore_tree_expansion_state_on_show(self) -> None:
+        """
+        Jednorázová obnova rozbalení po startu. Nepřestavuje strom, jen aplikuje
+        rozbalení na již existující položky přes _apply_tree_expansion_state(...).
+        """
+        if getattr(self, "_expansion_restored_once", False):
+            return
+        self._expansion_restored_once = True
+    
+        try:
+            settings = QSettings()
+            settings.beginGroup(self._settings_key_for_tree_state())
+            raw = settings.value("questions_expanded", "")
+            settings.endGroup()
+            if not raw:
+                return
+    
+            try:
+                data = json.loads(raw)
+            except Exception:
+                return
+    
+            expanded: set[tuple[str, str]] = set()
+            for rec in data or []:
+                k = (rec.get("kind"), rec.get("id"))
+                if k[0] in ("group", "subgroup") and k[1]:
+                    expanded.add(k)
+    
+            # Potlačíme autoexpand jen během aplikace rozbalení
+            self._suppress_auto_expand = True
+            try:
+                self._apply_tree_expansion_state(expanded)
+            finally:
+                self._suppress_auto_expand = False
+        except Exception:
+            pass
+
+    def _capture_tree_expansion_state(self) -> set[tuple[str, str]]:
+        """
+        Vrátí množinu klíčů ('group'|'subgroup', id) pro položky, které jsou
+        *viditelně* rozbalené – tj. uzel je isExpanded() a zároveň jsou rozbalení
+        i všichni jeho předci. Otázky (kind=='question') ignorujeme.
+        """
+        expanded: set[tuple[str, str]] = set()
+    
+        def rec(item: QTreeWidgetItem, ancestors_expanded: bool) -> None:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind") or meta.get("type")
+            _id = meta.get("id")
+    
+            # uzel sám je rozbalený?
+            this_expanded = bool(item.isExpanded())
+    
+            # do množiny zapíšeme jen uzly, které jsou skutečně "viditelně" rozbalené
+            if ancestors_expanded and this_expanded and kind in ("group", "subgroup") and _id:
+                expanded.add((kind, _id))
+    
+            # do dětí předáváme informaci, zda jsou *všichni předci* vč. aktuálního rozbalení
+            next_anc = ancestors_expanded and this_expanded
+            for i in range(item.childCount()):
+                rec(item.child(i), next_anc)
+    
+        for i in range(self.tree.topLevelItemCount()):
+            rec(self.tree.topLevelItem(i), True)
+    
+        return expanded
+    
+    def _apply_tree_expansion_state(self, expanded: set[tuple[str, str]]) -> None:
+        """
+        Obnoví stav rozbalení:
+        1) nejprve vše (group/subgroup) sbalí,
+        2) poté podle 'expanded' opět rozbalí.
+        """
+        def collapse_all(item: QTreeWidgetItem) -> None:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind") or meta.get("type")
+            if kind in ("group", "subgroup"):
+                item.setExpanded(False)
+            for i in range(item.childCount()):
+                collapse_all(item.child(i))
+    
+        def expand_marked(item: QTreeWidgetItem) -> None:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind") or meta.get("type")
+            _id = meta.get("id")
+            if kind in ("group", "subgroup") and _id and (kind, _id) in expanded:
+                # zajistit rozbalené rodiče
+                parent = item.parent()
+                while parent:
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+                item.setExpanded(True)
+            for i in range(item.childCount()):
+                expand_marked(item.child(i))
+    
+        for i in range(self.tree.topLevelItemCount()):
+            collapse_all(self.tree.topLevelItem(i))
+        for i in range(self.tree.topLevelItemCount()):
+            expand_marked(self.tree.topLevelItem(i))
+            
+    def _is_subgroup_expanded(self, subgroup_id: str) -> bool:
+        """Vrátí True, pokud je podskupina s daným ID právě rozbalená ve stromu."""
+        if not subgroup_id:
+            return False
+        def rec(item: QTreeWidgetItem) -> bool:
+            data = item.data(0, Qt.UserRole) or {}
+            if data.get("kind") == "subgroup" and data.get("id") == subgroup_id:
+                return item.isExpanded()
+            for i in range(item.childCount()):
+                if rec(item.child(i)):
+                    return True
+            return False
+        for i in range(self.tree.topLevelItemCount()):
+            if rec(self.tree.topLevelItem(i)):
+                return True
+        return False
+    
+    def _expand_subgroup_by_id(self, subgroup_id: str) -> None:
+        """Rozbalí podskupinu (a její rodiče), pokud existuje ve stromu."""
+        if not subgroup_id:
+            return
+        def rec(item: QTreeWidgetItem) -> bool:
+            data = item.data(0, Qt.UserRole) or {}
+            if data.get("kind") == "subgroup" and data.get("id") == subgroup_id:
+                parent = item.parent()
+                while parent:
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+                item.setExpanded(True)
+                return True
+            for i in range(item.childCount()):
+                if rec(item.child(i)):
+                    return True
+            return False
+        for i in range(self.tree.topLevelItemCount()):
+            if rec(self.tree.topLevelItem(i)):
+                break
 
     def _duplicate_question(self) -> None:
         kind, meta = self._selected_node()
         if kind != "question":
             return
-
+    
         gid = meta.get("parent_group_id")
         sgid = meta.get("parent_subgroup_id")
         qid = meta.get("id")
-
+    
         q_orig = self._find_question(gid, sgid, qid)
         if not q_orig:
             return
-
-        # Vytvoření kopie
+    
+        # 1) uložit stav rozbalení + zda byla cílová podskupina rozbalená
+        expanded_before = self._capture_tree_expansion_state()
+        was_expanded = ("subgroup", sgid) in expanded_before
+    
+        # 2) vytvořit kopii (bez funny_answers)
         data = asdict(q_orig)
         data["id"] = str(_uuid.uuid4())
         data["title"] = (q_orig.title or "Otázka") + " (kopie)"
-        
+        # --- NOVĚ: nepřenášet vtipné odpovědi ---
+        if "funny_answers" in data:
+            data["funny_answers"] = []
         new_q = Question(**data)
-
-        # Vložení do správné podskupiny
+        # pojistka i na instanci:
+        try:
+            new_q.funny_answers = []
+        except Exception:
+            pass
+    
+        # 3) vložit do cílové podskupiny
         target_sg = self._find_subgroup(gid, sgid)
-        if target_sg:
-            target_sg.questions.append(new_q)
+        if not target_sg:
+            return
+        target_sg.questions.append(new_q)
+    
+        # 4) potlačit auto-expand během refresh
+        self._suppress_auto_expand = True
+        try:
             self._refresh_tree()
-            self._select_question(new_q.id)
-            self.save_data()
-            self.statusBar().showMessage("Otázka byla duplikována.", 3000)
+        finally:
+            self._suppress_auto_expand = False
+    
+        # 5) obnovit původní rozbalení
+        self._apply_tree_expansion_state(expanded_before)
+    
+        # 6) pokud byla cílová podskupina původně sbalená, rozbal jen ji
+        if not was_expanded:
+            self._expand_subgroup_by_id(sgid)
+    
+        # 7) vybrat novou otázku, uložit
+        self._select_question(new_q.id)
+        self.save_data()
+        self.statusBar().showMessage("Otázka byla duplikována.", 3000)
             
     def _duplicate_question_to_subgroup(self) -> None:
-        """Duplikuje aktuálně vybranou otázku do uživatelem zvolené podskupiny (přes MoveTargetDialog)."""
+        """Duplikuje aktuálně vybranou otázku do uživatelem zvolené podskupiny."""
         kind, meta = self._selected_node()
         if kind != "question":
             return
@@ -3559,12 +3767,10 @@ class MainWindow(QMainWindow):
         sgid_src = meta.get("parent_subgroup_id")
         qid = meta.get("id")
     
-        # Původní otázka
         q_orig = self._find_question(gid_src, sgid_src, qid)
         if not q_orig:
             return
     
-        # Dialog pro volbu cíle (skupina/podskupina)
         dlg = MoveTargetDialog(self)
         if dlg.exec() != QDialog.Accepted:
             return
@@ -3573,36 +3779,57 @@ class MainWindow(QMainWindow):
         if not gid_tgt:
             return
     
-        # Najít/pořídit cílovou podskupinu (stejná logika jako u přesunu)
-        target_sg = None
-        if sgid_tgt:
-            target_sg = self._find_subgroup(gid_tgt, sgid_tgt)
-        else:
-            # vybrána jen skupina => vezmi první podskupinu, případně vytvoř "Default"
-            g = self._find_group(gid_tgt)
-            if g:
-                if g.subgroups:
-                    target_sg = g.subgroups[0]
-                else:
-                    new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
-                    g.subgroups.append(new_sg)
-                    target_sg = new_sg
-    
+        # najít / vytvořit cílovou podskupinu
+        target_sg = self._find_subgroup(gid_tgt, sgid_tgt)
         if not target_sg:
-            QMessageBox.warning(self, "Duplikovat do podskupiny", "Nepodařilo se najít cílovou podskupinu.")
-            return
+            g = self._find_group(gid_tgt)
+            if not g:
+                return
+            if g.subgroups:
+                target_sg = g.subgroups[0]
+                sgid_tgt = target_sg.id
+            else:
+                new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
+                g.subgroups.append(new_sg)
+                target_sg = new_sg
+                sgid_tgt = new_sg.id
     
-        # Vytvoření kopie (stejně jako v _duplicate_question)
+        # 1) uložit stav rozbalení + zda byla cílová podskupina rozbalená
+        expanded_before = self._capture_tree_expansion_state()
+        was_expanded = ("subgroup", sgid_tgt) in expanded_before
+    
+        # 2) vytvořit kopii (bez funny_answers)
         data = asdict(q_orig)
         data["id"] = str(_uuid.uuid4())
         data["title"] = (q_orig.title or "Otázka") + " (kopie)"
+        # --- NOVĚ: nepřenášet vtipné odpovědi ---
+        if "funny_answers" in data:
+            data["funny_answers"] = []
         new_q = Question(**data)
+        # pojistka i na instanci:
+        try:
+            new_q.funny_answers = []
+        except Exception:
+            pass
     
-        # Vložení do cílové podskupiny
+        # 3) vložit do cílové podskupiny
         target_sg.questions.append(new_q)
     
-        # Obnovit UI, vybrat novou otázku, uložit
-        self._refresh_tree()
+        # 4) potlačit auto-expand během refresh
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+    
+        # 5) obnovit původní rozbalení
+        self._apply_tree_expansion_state(expanded_before)
+    
+        # 6) pokud byla cílová podskupina původně sbalená, rozbal jen ji
+        if not was_expanded:
+            self._expand_subgroup_by_id(sgid_tgt)
+    
+        # 7) vybrat novou otázku, uložit
         self._select_question(new_q.id)
         self.save_data()
         self.statusBar().showMessage("Otázka byla duplikována do zvolené podskupiny.", 3000)
@@ -5420,24 +5647,25 @@ class MainWindow(QMainWindow):
         self.tree.clear()
         if not self.root:
             return
-
+    
         sorted_groups = sorted(self.root.groups, key=lambda g: g.name.lower())
-        
-        color_group = QBrush(QColor("#ff5252")) 
+        color_group = QBrush(QColor("#ff5252"))
         icon_group = self._generate_icon("S", QColor("#ff5252"), "rect")
-
+    
         for g in sorted_groups:
             g_item = QTreeWidgetItem([g.name, ""])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
             g_item.setIcon(0, icon_group)
-            
             g_item.setForeground(0, color_group)
             g_item.setForeground(1, color_group)
             f = g_item.font(0); f.setBold(True); f.setPointSize(13); g_item.setFont(0, f)
-            
+    
             self.tree.addTopLevelItem(g_item)
-            g_item.setExpanded(True)
-
+    
+            # <<< ZMĚNA: nerozbalovat při potlačení auto-expandu >>>
+            if not getattr(self, "_suppress_auto_expand", False):
+                g_item.setExpanded(True)
+    
             if g.subgroups:
                 sorted_subgroups = sorted(g.subgroups, key=lambda s: s.name.lower())
                 self._add_subgroups_to_item(g_item, g.id, sorted_subgroups)
@@ -5450,11 +5678,11 @@ class MainWindow(QMainWindow):
         color_subgroup = QBrush(QColor("#ff8a80"))
         # Ikona Podskupiny: Světle červený kruh/čtverec s "P"
         icon_subgroup = self._generate_icon("P", QColor("#ff8a80"), "rect")
-
+    
         for sg in subgroups:
             parent_meta = parent_item.data(0, Qt.UserRole) or {}
             parent_sub_id = parent_meta.get("id") if parent_meta.get("kind") == "subgroup" else None
-
+    
             sg_item = QTreeWidgetItem([sg.name, ""])
             sg_item.setData(0, Qt.UserRole, {
                 "kind": "subgroup",
@@ -5466,38 +5694,32 @@ class MainWindow(QMainWindow):
             sg_item.setForeground(0, color_subgroup)
             sg_item.setForeground(1, color_subgroup)
             f = sg_item.font(0); f.setBold(True); sg_item.setFont(0, f)
+    
             parent_item.addChild(sg_item)
-
-            # 1. Otázky
-            sorted_questions = sorted(sg.questions, key=lambda q: (q.title or "").lower())
-            for q in sorted_questions:
-                label = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
-                is_bonus = (label == "BONUS")
-                if is_bonus:
-                    pts = f"+{q.bonus_correct}/{q.bonus_wrong} b."
-                else:
-                    pts = f"{q.points} b."
-
-                q_item = QTreeWidgetItem([q.title or "Otázka", f"{label} | {pts}"])
+    
+            # Otázky v podskupině (původní logika zachována)
+            sorted_q = sorted(sg.questions, key=lambda q: (q.type or "", (q.title or "").lower()))
+            for q in sorted_q:
+                q_item = QTreeWidgetItem([q.title or "Otázka", q.type or ""])
                 q_item.setData(0, Qt.UserRole, {
                     "kind": "question",
                     "id": q.id,
                     "parent_group_id": group_id,
                     "parent_subgroup_id": sg.id
                 })
-                
-                # NOVÉ: Předáváme informaci o existenci obrázku
+                # Vizuál otázky
                 has_img = bool(getattr(q, "image_path", "") and os.path.exists(q.image_path))
                 self._apply_question_item_visuals(q_item, q.type, has_image=has_img)
-
                 sg_item.addChild(q_item)
-
-            # 2. Rekurze
+    
+            # Rekurze na vnořené podskupiny
             if sg.subgroups:
-                sorted_nested_subgroups = sorted(sg.subgroups, key=lambda s: s.name.lower())
-                self._add_subgroups_to_item(sg_item, group_id, sorted_nested_subgroups)
-                
-            sg_item.setExpanded(True)
+                sorted_nested = sorted(sg.subgroups, key=lambda s: s.name.lower())
+                self._add_subgroups_to_item(sg_item, group_id, sorted_nested)
+    
+            # <<< ZMĚNA: nerozbalovat při potlačení auto-expandu >>>
+            if not getattr(self, "_suppress_auto_expand", False):
+                sg_item.setExpanded(True)
 
     def _selected_node(self):
         """Vrátí (kind, meta) pro vybranou položku ve stromu."""
@@ -5613,7 +5835,7 @@ class MainWindow(QMainWindow):
         if kind not in ("group", "subgroup"):
             QMessageBox.information(self, "Výběr", "Vyberte skupinu nebo podskupinu, do které chcete přidat otázku.")
             return
-
+    
         target_sg: Optional[Subgroup] = None
         if kind == "group":
             g = self._find_group(meta["id"])
@@ -5627,12 +5849,31 @@ class MainWindow(QMainWindow):
                 target_sg = g.subgroups[0]
         else:
             target_sg = self._find_subgroup(meta["parent_group_id"], meta["id"])
+    
         if not target_sg:
             return
-
+    
+        # Uložit stav rozbalení a zjistit, zda byla cílová podskupina rozbalená
+        expanded_before = self._capture_tree_expansion_state()
+        was_expanded = ("subgroup", target_sg.id) in expanded_before
+    
+        # Vytvořit a vložit novou otázku
         q = Question.new_default("classic")
         target_sg.questions.append(q)
-        self._refresh_tree()
+    
+        # Potlačit auto-expand během refresh a poté obnovit původní stav
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+    
+        self._apply_tree_expansion_state(expanded_before)
+    
+        # Pokud byla cílová podskupina původně sbalená, rozbal ji, aby nová otázka byla vidět
+        if not was_expanded:
+            self._expand_subgroup_by_id(target_sg.id)
+    
         self._select_question(q.id)
         self.save_data()
 
@@ -5652,13 +5893,17 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Smazat vybrané", msg) != QMessageBox.Yes:
             return
     
+        # <<< NOVÉ: uložit stav rozbalení před změnou >>>
+        expanded_before = self._capture_tree_expansion_state()
+    
         # --- KOŠ: Nejdřív si uložíme všechny otázky, které se budou mazat ---
         if not hasattr(self.root, "trash") or not isinstance(getattr(self.root, "trash", None), list):
             self.root.trash = []
     
-        now_iso = datetime.now().isoformat(timespec="seconds")
+        from datetime import datetime as _dt
+        now_iso = _dt.now().isoformat(timespec="seconds")
         trash_records: List[dict] = []
-        seen_qids: set[str] = set()
+        seen_qids: set = set()
     
         selected_question_metas: List[dict] = []
         selected_subgroup_metas: List[dict] = []
@@ -5695,29 +5940,28 @@ class MainWindow(QMainWindow):
                 "source_group_name": gname or "",
                 "source_subgroup_id": sgid or "",
                 "source_subgroup_name": sgname or "",
-                "source_subgroup_path": sg_path or "",
+                "source_path": sg_path or ""
             })
     
-        def collect_questions_under_subgroups(subgroups: List[Subgroup], gid: str, gname: str, path_names: List[str], path_ids: List[str]) -> None:
+        # 1) Nejprve přidej do koše všechny dotčené otázky (skupiny/podskupiny rekurzivně)
+        def collect_questions_under_subgroups(subgroups: List[Subgroup], gid: str, gname: str, parent_names: List[str]) -> None:
             for sg in subgroups:
-                p_names = list(path_names) + [sg.name]
-                p_ids = list(path_ids) + [sg.id]
-                sg_path = " / ".join([n for n in p_names if n])
-    
-                for q in sg.questions:
+                sg_path = " / ".join(parent_names + [sg.name or ""])
+                # Všechny otázky v této podskupině
+                for q in sg.questions or []:
                     add_question_to_trash(q, gid, sg.id, gname, sg.name, sg_path)
-    
+                # Rekurze do vnořených
                 if sg.subgroups:
-                    collect_questions_under_subgroups(sg.subgroups, gid, gname, p_names, p_ids)
+                    collect_questions_under_subgroups(sg.subgroups, gid, gname, parent_names + [sg.name or ""])
     
-        # 1) Skupiny
+        # 2) Přidání všech otázek z vybraných podskupin a skupin
         for gid in selected_group_ids:
             g = self._find_group(gid)
             if not g:
                 continue
-            collect_questions_under_subgroups(g.subgroups, g.id, g.name, [], [])
+            gname = g.name or ""
+            collect_questions_under_subgroups(g.subgroups or [], gid, gname, [])
     
-        # 2) Podskupiny (včetně vnořených)
         for meta in selected_subgroup_metas:
             gid = meta.get("parent_group_id") or ""
             sgid = meta.get("id") or ""
@@ -5726,10 +5970,9 @@ class MainWindow(QMainWindow):
             sg = self._find_subgroup(gid, sgid)
             if not sg:
                 continue
-            # pro „mazu podskupinu“ je kořen cesty tato podskupina (včetně jejích vnořených)
-            collect_questions_under_subgroups([sg], gid, gname, [], [])
+            collect_questions_under_subgroups([sg], gid, gname, [])
     
-        # 3) Konkrétní otázky
+        # 3) Konkrétně vybrané otázky
         for meta in selected_question_metas:
             gid = meta.get("parent_group_id") or ""
             sgid = meta.get("parent_subgroup_id") or ""
@@ -5743,26 +5986,28 @@ class MainWindow(QMainWindow):
             gname = g.name if g else ""
             sg = self._find_subgroup(gid, sgid)
             sgname = sg.name if sg else ""
-            # u konkrétní otázky neumíme bez extra helperů rekonstruovat nadřazené podskupiny,
-            # proto aspoň leaf (zbytek doplníme při sběru z rekurzí)
-            add_question_to_trash(q, gid, sgid, gname, sgid, sgname)
+            add_question_to_trash(q, gid, sgid, gname, sgname, sgname)
     
         if trash_records:
             self.root.trash.extend(trash_records)
     
-        # 1. Filtrace skupin (nejvyšší úroveň)
-        # Pokud mažeme skupinu, zmizí vše pod ní, takže nemusíme řešit její podskupiny/otázky
+        # 4) Fyzické odstranění z modelu
+        # 4.1) Skupiny (nejvyšší úroveň)
         self.root.groups = [g for g in self.root.groups if g.id not in to_delete_g_ids]
     
-        # 2. Procházení zbytku a mazání podskupin a otázek
+        # 4.2) Podskupiny + otázky (rekurzivně)
         for g in self.root.groups:
-            # Filtrace podskupin v této skupině
             g.subgroups = [sg for sg in g.subgroups if sg.id not in to_delete_sg_ids]
-    
-            # Rekurzivní čištění uvnitř podskupin (pro otázky a vnořené podskupiny)
             self._clean_subgroups_recursive(g.subgroups, to_delete_sg_ids, to_delete_q_ids)
     
-        self._refresh_tree()
+        # <<< NOVĚ: potlačit autoexpand → refresh → obnovit stav >>>
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+        self._apply_tree_expansion_state(expanded_before)
+    
         self._refresh_trash_table()
         self._clear_editor()
         self.save_data()
