@@ -26,7 +26,6 @@ Zaměřuje se na **konzistentní vzhled** (dark theme), **spolehlivý export** (
   - Obrázky: vložení s volitelnou velikostí (cm); **HEIC/HEIF** se na macOS převádí přes `sips`.
 - **Historie exportů**: přehled v záložce **Historie** se sloupci *Typ, Cílový soubor, Hash, Časová stopa*,
   tříděno **podle „Časová stopa“ sestupně** (nejnovější nahoře).
-- **Vtipné odpovědi** (záložka): přehled komentářů/reakcí k otázce; **při duplikaci otázek se záměrně nepřenášejí**.
 - **Koš**: smazané otázky se evidují v interní struktuře (pro pozdější kontrolu/diagnostiku).
 
 ---
@@ -172,7 +171,6 @@ Aplikace používá **dark theme** a je optimalizovaná pro **HiDPI/Retina** na 
 ## 📦 Changelog (výběr)
 
 - **v8.3.0** — Perzistence rozbalení stromu mezi relacemi (QSettings; per projekt).  
-- **v8.2.6** — Duplikace nepropaguje `funny_answers` (oprava pádu ve „Vtipných odpovědích“).  
 - **v8.2.5** — Přidání/Smazání otázek zachovává rozbalení; případně rozbalí jen cílovou podskupinu.  
 - **v8.2.4** — Oprava ukládání stavu (ignorují se potomci sbalených uzlů).  
 - **v8.2.3** — Obnovení přesně původního rozbalení po duplikaci.  
