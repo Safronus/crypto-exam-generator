@@ -4825,7 +4825,7 @@ class MainWindow(QMainWindow):
         self.tree_funny.setFocusPolicy(Qt.NoFocus)
 
         layout.addWidget(self.tree_funny)
-        self.left_tabs.addTab(self.tab_funny, "Hall of Shame - legendární odpovědi")
+        self.left_tabs.addTab(self.tab_funny, "legendární odpovědi")
         
         # DŮLEŽITÉ: Načíst data ihned po inicializaci
         self._refresh_funny_answers_tab()

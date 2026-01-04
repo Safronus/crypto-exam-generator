@@ -126,13 +126,6 @@ Aplikace používá **dark theme** a je optimalizovaná pro **HiDPI/Retina** na 
 
 ---
 
-## 😄 „Vtipné odpovědi“
-
-- Záložka pro správu/zobrazení „vtipných odpovědí“ (např. reakce/testimony k otázce).
-- **Duplikace otázky**: vtipné odpovědi se **nepřenášejí** (záměrně), aby nedošlo k chybě při řazení (`x.date`) a k nevhodnému duplikování komentářů.
-
----
-
 ## 🗑️ Koš (Trash)
 
 - Při hromadném mazání (`Smazat vybrané`) se dotčené otázky **zapisují do koše** s metadaty (čas smazání, zdrojová skupina/podskupina aj.).
