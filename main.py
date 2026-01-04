@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.1.1"
+APP_VERSION = "8.1.2"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -1540,60 +1540,6 @@ class ExportWizard(QWizard):
         self.text_preview_q.setStyleSheet("QTextEdit { background-color: #2e2e2e; color: #ffffff; font-size: 14px; border: 1px solid #555; padding: 5px; }")
         preview_layout.addWidget(self.text_preview_q)
         main_layout.addWidget(self.preview_box, 1)
-
-    def _refresh_slots_list(self):
-        """Vykreslí seznam slotů. V režimu Multi ukáže jen placeholdery."""
-        self.slots_list_widget.clear()
-        is_multi = (self.mode_group.checkedId() == 1)
-
-        # Helper
-        def add_slot_item(placeholder, is_bonus):
-            item = QListWidgetItem()
-            
-            if is_multi:
-                # Režim Hromadný export -> Ignorujeme výběr, vše je "Náhodné"
-                if is_bonus:
-                    txt = f"{placeholder} : [Náhodný výběr BONUS]"
-                    color = QColor("#d4a017") # Zlatavá pro bonus
-                else:
-                    txt = f"{placeholder} : [Náhodný výběr z variant]"
-                    color = QColor("#757575") # Šedá
-                
-                item.setText(txt)
-                item.setForeground(QBrush(color))
-                # Neaktivní item (nejde na něj kliknout)
-                item.setFlags(Qt.NoItemFlags) 
-                
-            else:
-                # Režim Jednotlivý export -> Ukazujeme výběr z self.selection_map
-                qid = self.selection_map.get(placeholder)
-                q = self.owner._find_question_by_id(qid) if qid else None
-                
-                if q:
-                    title = q.title or "Otázka"
-                    item.setText(f"{placeholder} : {title}")
-                    if is_bonus:
-                        item.setForeground(QBrush(QColor("#ffea00"))) # Jasná žlutá
-                    else:
-                        item.setForeground(QBrush(Qt.white))
-                    item.setToolTip(q.text_html)
-                    item.setData(Qt.UserRole, qid) # Uložíme ID pro kliknutí
-                else:
-                    item.setText(f"{placeholder} : --- NEVYPLNĚNO ---")
-                    item.setForeground(QBrush(QColor("#888888")))
-                    
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-
-            self.slots_list_widget.addItem(item)
-
-        # 1. Klasické sloty
-        for ph in self.placeholders_q:
-            add_slot_item(ph, False)
-            
-        # 2. Bonusové sloty
-        for ph in self.placeholders_b:
-            add_slot_item(ph, True)
-
 
     def _on_select_sources_clicked(self):
         # Zjistíme počet potřebných otázek ze šablony
@@ -7239,7 +7185,44 @@ class MainWindow(QMainWindow):
             
             # 1. Parse HTML
             paras_data = parse_html_to_paragraphs(html_content)
-            
+        
+            # --- ZACHYTIT STYL PLACEHOLDERU JEŠTĚ PŘED CLEAR() ---
+            from copy import deepcopy
+            from docx.shared import Pt
+            from docx.oxml.ns import qn
+        
+            template_rPr = None
+            base_font_size = None
+            try:
+                src_run = paragraph.runs[0] if paragraph.runs else None
+                if src_run is not None:
+                    # 1) pokus přes API
+                    base_font_size = src_run.font.size
+                    # 2) doplněk: čti w:sz (half-points) přímo z rPr
+                    rPr = getattr(src_run._element, "rPr", None) if getattr(src_run, "_element", None) is not None else None
+                    if rPr is not None:
+                        template_rPr = deepcopy(rPr)
+                        if base_font_size is None:
+                            sz = rPr.find(qn("w:sz"))
+                            if sz is not None and getattr(sz, "val", None):
+                                base_font_size = Pt(int(sz.val) / 2.0)
+                # 3) fallback: velikost ze stylu odstavce
+                if base_font_size is None and paragraph.style and getattr(paragraph.style.font, "size", None):
+                    base_font_size = paragraph.style.font.size
+            except Exception:
+                pass
+        
+            def _apply_placeholder_style(run) -> None:
+                """Nejprve klon rPr placeholderu (rodina + další), pak VŽDY nastav velikost písma."""
+                if template_rPr is not None:
+                    try:
+                        run._element.rPr = deepcopy(template_rPr)
+                    except Exception:
+                        pass
+                if base_font_size:
+                    run.font.size = base_font_size
+                # run.font.name NENASTAVUJEME – řídí se rPr/styl šablony
+        
             # Pokud je obsah prázdný a není ani obrázek -> vyčistit a konec
             if not paras_data and not image_path: 
                 breaks = extract_page_breaks(paragraph)
@@ -7249,7 +7232,7 @@ class MainWindow(QMainWindow):
             
             p_insert = paragraph._p
             first_p_used = False
-
+        
             # --- VLOŽENÍ TEXTU ---
             if paras_data:
                 for i, p_data in enumerate(paras_data):
@@ -7260,9 +7243,14 @@ class MainWindow(QMainWindow):
                         first_p_used = True
                     else:
                         new_p = doc.add_paragraph()
+                        # minimal-change: přenést styl odstavce (zabraňuje pádu na default 12 pt)
+                        try:
+                            new_p.style = paragraph.style
+                        except Exception:
+                            pass
                         p_insert.addnext(new_p._p)
                         p_insert = new_p._p
-
+        
                     # Zarovnání
                     align = p_data.get('align', 'left')
                     if align == 'center': new_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -7273,12 +7261,13 @@ class MainWindow(QMainWindow):
                     # Mezerování
                     new_p.paragraph_format.space_before = Pt(0)
                     new_p.paragraph_format.space_after = Pt(0)
-
+        
                     # Prefix (odrážky)
                     if p_data.get('prefix'):
                         new_p.paragraph_format.left_indent = Pt(48)
                         new_p.paragraph_format.first_line_indent = Pt(-24)
-                        new_p.add_run(p_data['prefix'])
+                        r_pref = new_p.add_run(p_data['prefix'])
+                        _apply_placeholder_style(r_pref)
                     
                     # Obsah (Runs)
                     for r_data in p_data['runs']:
@@ -7287,6 +7276,7 @@ class MainWindow(QMainWindow):
                         for idx, part in enumerate(parts):
                             if part:
                                 run = new_p.add_run(part)
+                                _apply_placeholder_style(run)  # <<< KLÍČOVÉ
                                 if r_data.get('b'): run.bold = True
                                 if r_data.get('i'): run.italic = True
                                 if r_data.get('u'): run.underline = True
@@ -7295,10 +7285,11 @@ class MainWindow(QMainWindow):
                                         rgb = r_data['color']
                                         run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
                                     except: pass
-                            
+                        
                             if idx < len(parts) - 1:
-                                run = new_p.add_run()
-                                run.add_break()
+                                br = new_p.add_run()
+                                _apply_placeholder_style(br)  # <<< KLÍČOVÉ pro run s breakem
+                                br.add_break()
             
             # --- VLOŽENÍ OBRÁZKU ---
             if image_path:
@@ -7308,11 +7299,11 @@ class MainWindow(QMainWindow):
                 
                 img_path_obj = Path(image_path) if isinstance(image_path, str) else image_path
                 final_img_path = img_path_obj
-
+        
                 if not img_path_obj.exists():
                     print(f"[ERROR]   Obrázek NEEXISTUJE! {img_path_obj}")
                     return
-
+        
                 # --- KONVERZE HEIC -> JPG (pro macOS) ---
                 is_heic = img_path_obj.suffix.lower() in ('.heic', '.heif')
                 temp_jpg = None
@@ -7333,28 +7324,34 @@ class MainWindow(QMainWindow):
                         print(f"[ERROR]   Chyba konverze HEIC: {e}")
                         # Fallback - zkusíme vložit originál, i když to asi selže
                         final_img_path = img_path_obj
-
+        
                 # Vytvoříme nový odstavec pro obrázek
                 img_p = doc.add_paragraph()
                 if not paras_data:
                     paragraph.clear()
                     img_p = paragraph
                 else:
+                    # minimal-change: zachovat styl odstavce
+                    try:
+                        img_p.style = paragraph.style
+                    except Exception:
+                        pass
                     p_insert.addnext(img_p._p)
                     p_insert = img_p._p
-
+        
                 img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 img_p.paragraph_format.space_before = Pt(6)
                 img_p.paragraph_format.space_after = Pt(6)
                 
                 try:
                     run = img_p.add_run()
+                    _apply_placeholder_style(run)  # aby vložené popisky/mezery držely velikost
                     # Pokud je 0, zachováme původní default (14 cm). Pokud je výška 0, necháme Word dopočítat poměr.
                     w_use = float(image_w_cm or 0.0)
                     h_use = float(image_h_cm or 0.0)
                     if w_use <= 0.0 and h_use <= 0.0:
                         w_use = 14.0
-
+        
                     if w_use > 0.0 and h_use > 0.0:
                         run.add_picture(str(final_img_path), width=Cm(w_use), height=Cm(h_use))
                     elif w_use > 0.0:
@@ -7369,60 +7366,87 @@ class MainWindow(QMainWindow):
                         try:
                             os.remove(temp_jpg)
                         except: pass
-
+        
             # --- OBNOVA PAGE BREAKS ---
             if 'breaks' in locals() and breaks:
                 break_p = doc.add_paragraph()
+                # minimal-change: zachovat styl i na break odstavci
+                try:
+                    break_p.style = paragraph.style
+                except Exception:
+                    pass
                 p_insert.addnext(break_p._p)
                 restore_page_breaks(break_p, breaks)
 
-
         # -- Helper: Zpracování jednoho odstavce (Inline i Block) --
         def process_paragraph(p):
+            from copy import deepcopy
+            from docx.shared import Pt
+            from docx.oxml.ns import qn
+
+            def _extract_size_from_rPr(source_run):
+                """Vrátí Pt velikost z rPr/sz (half-points) nebo None."""
+                try:
+                    rPr = getattr(source_run._element, "rPr", None)
+                    if rPr is None:
+                        return None
+                    sz = rPr.find(qn("w:sz"))
+                    if sz is not None and getattr(sz, "val", None):
+                        hp = int(sz.val)  # w:sz je v half-points
+                        return Pt(hp / 2.0)
+                except Exception:
+                    pass
+                return None
+
             full_text = p.text
             if not ("<" in full_text or "{" in full_text):
                 return
 
-            # 1. BLOCK CHECK
+            # 1) BLOCK CHECK
             txt_clean = full_text.strip()
             matched_rich = None
-            
             for ph, val in rich_repl_html.items():
                 if isinstance(val, tuple):
                     html_content, img_path = val[0], val[1]
                 else:
                     html_content, img_path = val, None
-
                 if txt_clean == f"<{ph}>" or txt_clean == f"{{{ph}}}":
-                    matched_rich = (html_content, img_path, float((val[2] if len(val) > 2 else 0.0) or 0.0), float((val[3] if len(val) > 3 else 0.0) or 0.0))
+                    matched_rich = (
+                        html_content,
+                        img_path,
+                        float((val[2] if len(val) > 2 else 0.0) or 0.0),
+                        float((val[3] if len(val) > 3 else 0.0) or 0.0),
+                    )
                     break
-            
+
             if matched_rich:
                 insert_rich_question_block(p, matched_rich[0], matched_rich[1], matched_rich[2], matched_rich[3])
                 return
 
-            # 2. INLINE CHECK (zkráceno, bez obrázků)
-            keys_found = []
+            # 2) INLINE CHECK (zkráceno, bez obrázků)
+            keys_found: list[str] = []
             for k in simple_repl.keys():
                 if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
                     keys_found.append(k)
             for k in rich_repl_html.keys():
                 if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
                     keys_found.append(k)
-            
+
             if not keys_found:
                 return
 
-            # Zbytek inline logiky (zkráceno pro délku)...
-            segments = [full_text]
-            all_repl_data = {}
-            
-            for k, v in simple_repl.items(): 
-                all_repl_data[k] = {'type': 'simple', 'val': v}
-            for k, val in rich_repl_html.items(): 
+            # NOVĚ: rozlišíme, zda jde o placeholder Otazka\d+
+            is_question_placeholder = any(re.match(r"^Otazka\d+$", k) for k in keys_found)
+
+            # Segmentace
+            segments: list = [full_text]
+            all_repl_data: dict = {}
+            for k, v in simple_repl.items():
+                all_repl_data[k] = {"type": "simple", "val": v}
+            for k, val in rich_repl_html.items():
                 html = val[0] if isinstance(val, tuple) else val
-                all_repl_data[k] = {'type': 'rich', 'val': html}
-            
+                all_repl_data[k] = {"type": "rich", "val": html}
+
             for k in keys_found:
                 info = all_repl_data[k]
                 tokens = [f"<{k}>", f"{{{k}}}"]
@@ -7432,59 +7456,120 @@ class MainWindow(QMainWindow):
                         if isinstance(seg, str):
                             parts = seg.split(token)
                             for i, part in enumerate(parts):
-                                if part: new_segments.append(part)
-                                if i < len(parts) - 1: new_segments.append(info)
+                                if part:
+                                    new_segments.append(part)
+                                if i < len(parts) - 1:
+                                    new_segments.append(info)
                         else:
                             new_segments.append(seg)
                     segments = new_segments
 
-            base_font_name = None; base_font_size = None; base_bold = None
-            if p.runs:
-                r0 = p.runs[0]
-                base_font_name = r0.font.name
-                base_font_size = r0.font.size
-                base_bold = r0.bold
+            # --- ZACHYTIT STYL PLACEHOLDERU ---
+            base_bold = None
+            template_rPr = None
+            base_font_size = None
 
+            # 2a) najdeme run, který skutečně obsahuje některý token
+            tokens_all = []
+            for k in keys_found:
+                tokens_all.extend((f"<{k}>", f"{{{k}}}"))
+
+            source_run = None
+            for run in p.runs:
+                t = run.text or ""
+                if any(tok in t for tok in tokens_all):
+                    source_run = run
+                    break
+            if source_run is None:
+                # fallback: první neprázdný run
+                for run in p.runs:
+                    if (run.text or "").strip():
+                        source_run = run
+                        break
+
+            if source_run is not None:
+                base_bold = source_run.bold
+                base_font_size = source_run.font.size
+                if base_font_size is None:
+                    xml_size = _extract_size_from_rPr(source_run)
+                    if xml_size is not None:
+                        base_font_size = xml_size
+                try:
+                    rPr = getattr(source_run._element, "rPr", None)
+                    if rPr is not None:
+                        template_rPr = deepcopy(rPr)
+                except Exception:
+                    template_rPr = None
+
+            # 2b) fallback: velikost ze stylu odstavce (typické pro bullets)
+            try:
+                if (base_font_size is None) and p.style and getattr(p.style.font, "size", None):
+                    base_font_size = p.style.font.size
+            except Exception:
+                pass
+
+            # 2c) NOVĚ: poslední fallback – jen pro Otazka\d+ defaultně 9 pt
+            if base_font_size is None and is_question_placeholder:
+                base_font_size = Pt(9)
+
+            # Vyčistit obsah, ale zachovat vlastnosti odstavce
             page_breaks = extract_page_breaks(p)
             p.clear()
-            
+
+            def _apply_placeholder_style(run):
+                """1) pokus o rPr z placeholderu, 2) VŽDY nastavit velikost, pokud ji známe."""
+                if template_rPr is not None:
+                    try:
+                        run._element.rPr = deepcopy(template_rPr)
+                    except Exception:
+                        pass
+                if base_font_size:
+                    run.font.size = base_font_size
+                # font-family úmyslně nenastavujeme – jde z rPr/stylu šablony
+
+            # Sestavení výsledku
             for seg in segments:
                 if isinstance(seg, str):
                     run = p.add_run(seg)
-                    if base_font_name: run.font.name = base_font_name
-                    if base_font_size: run.font.size = base_font_size
+                    _apply_placeholder_style(run)
                 elif isinstance(seg, dict):
-                    val = seg['val']
-                    if seg['type'] == 'simple':
+                    val = seg["val"]
+                    if seg["type"] == "simple":
                         run = p.add_run(str(val))
-                        if base_font_name: run.font.name = base_font_name
-                        if base_font_size: run.font.size = base_font_size
-                        if base_bold is not None: run.bold = base_bold
-                    elif seg['type'] == 'rich':
+                        _apply_placeholder_style(run)
+                        if base_bold is not None:
+                            run.bold = base_bold
+                    elif seg["type"] == "rich":
                         paras = parse_html_to_paragraphs(val)
                         for p_idx, p_data in enumerate(paras):
-                            if p_idx > 0: p.add_run().add_break()
-                            for r_data in p_data['runs']:
-                                text_content = r_data['text']
-                                parts = text_content.split('\n')
+                            if p_idx > 0:
+                                p.add_run().add_break()
+                            for r_data in p_data["runs"]:
+                                text_content = r_data["text"]
+                                parts = text_content.split("\n")
                                 for idx_part, part in enumerate(parts):
                                     if part:
                                         run = p.add_run(part)
-                                        if r_data.get('b'): run.bold = True
-                                        if r_data.get('i'): run.italic = True
-                                        if r_data.get('u'): run.underline = True
-                                        if r_data.get('color'):
-                                             try:
-                                                rgb = r_data['color']
-                                                run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
-                                             except: pass
-                                        if base_font_name: run.font.name = base_font_name
-                                        if base_font_size: run.font.size = base_font_size
+                                        _apply_placeholder_style(run)  # nejprve velikost/styl
+                                        # pak jen b/i/u/color
+                                        if r_data.get("b"):
+                                            run.bold = True
+                                        if r_data.get("i"):
+                                            run.italic = True
+                                        if r_data.get("u"):
+                                            run.underline = True
+                                        if r_data.get("color"):
+                                            try:
+                                                rgb = r_data["color"]
+                                                run.font.color.rgb = RGBColor(
+                                                    int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16)
+                                                )
+                                            except Exception:
+                                                pass
                                     if idx_part < len(parts) - 1:
                                         p.add_run().add_break()
-            
-            restore_page_breaks(p, page_breaks)
 
+            restore_page_breaks(p, page_breaks)
 
         # --- HLAVNÍ SMYČKA ---
         
