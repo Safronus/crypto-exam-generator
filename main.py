@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.1.3"
+APP_VERSION = "8.2.0"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -3548,6 +3548,64 @@ class MainWindow(QMainWindow):
             self._select_question(new_q.id)
             self.save_data()
             self.statusBar().showMessage("Otázka byla duplikována.", 3000)
+            
+    def _duplicate_question_to_subgroup(self) -> None:
+        """Duplikuje aktuálně vybranou otázku do uživatelem zvolené podskupiny (přes MoveTargetDialog)."""
+        kind, meta = self._selected_node()
+        if kind != "question":
+            return
+    
+        gid_src = meta.get("parent_group_id")
+        sgid_src = meta.get("parent_subgroup_id")
+        qid = meta.get("id")
+    
+        # Původní otázka
+        q_orig = self._find_question(gid_src, sgid_src, qid)
+        if not q_orig:
+            return
+    
+        # Dialog pro volbu cíle (skupina/podskupina)
+        dlg = MoveTargetDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+    
+        gid_tgt, sgid_tgt = dlg.selected_target()
+        if not gid_tgt:
+            return
+    
+        # Najít/pořídit cílovou podskupinu (stejná logika jako u přesunu)
+        target_sg = None
+        if sgid_tgt:
+            target_sg = self._find_subgroup(gid_tgt, sgid_tgt)
+        else:
+            # vybrána jen skupina => vezmi první podskupinu, případně vytvoř "Default"
+            g = self._find_group(gid_tgt)
+            if g:
+                if g.subgroups:
+                    target_sg = g.subgroups[0]
+                else:
+                    new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
+                    g.subgroups.append(new_sg)
+                    target_sg = new_sg
+    
+        if not target_sg:
+            QMessageBox.warning(self, "Duplikovat do podskupiny", "Nepodařilo se najít cílovou podskupinu.")
+            return
+    
+        # Vytvoření kopie (stejně jako v _duplicate_question)
+        data = asdict(q_orig)
+        data["id"] = str(_uuid.uuid4())
+        data["title"] = (q_orig.title or "Otázka") + " (kopie)"
+        new_q = Question(**data)
+    
+        # Vložení do cílové podskupiny
+        target_sg.questions.append(new_q)
+    
+        # Obnovit UI, vybrat novou otázku, uložit
+        self._refresh_tree()
+        self._select_question(new_q.id)
+        self.save_data()
+        self.statusBar().showMessage("Otázka byla duplikována do zvolené podskupiny.", 3000)
 
     def _build_ui(self) -> None:
         # Hlavní container
@@ -4167,6 +4225,11 @@ class MainWindow(QMainWindow):
         if kind == "question":
             act = menu.addAction("Duplikovat otázku")
             act.triggered.connect(self._duplicate_question)
+            has_action = True
+
+            # NOVÉ: Duplikovat do podskupiny
+            act_dup_to = menu.addAction("Duplikovat do podskupiny")
+            act_dup_to.triggered.connect(self._duplicate_question_to_subgroup)
             has_action = True
 
         if has_action:
