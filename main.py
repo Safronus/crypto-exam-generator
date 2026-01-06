@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.3.2"
+APP_VERSION = "8.3.3"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -6091,9 +6091,15 @@ class MainWindow(QMainWindow):
         kind, meta = self._selected_node()
         if kind not in ("group", "subgroup"):
             return
+    
         new_name = self.rename_line.text().strip()
         if not new_name:
             return
+    
+        # 1) uložit stav rozbalení před změnou
+        expanded_before = self._capture_tree_expansion_state()
+    
+        # 2) provést přejmenování v modelu (bez dalších zásahů)
         if kind == "group":
             g = self._find_group(meta["id"])
             if g:
@@ -6102,7 +6108,17 @@ class MainWindow(QMainWindow):
             sg = self._find_subgroup(meta["parent_group_id"], meta["id"])
             if sg:
                 sg.name = new_name
-        self._refresh_tree()
+    
+        # 3) potlačit auto-rozbalení během refresh
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+    
+        # 4) obnovit původní stav rozbalení
+        self._apply_tree_expansion_state(expanded_before)
+    
         self.save_data()
 
     def _on_tree_selection_changed(self) -> None:
