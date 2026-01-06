@@ -1,5 +1,9 @@
 # Crypto Exam Generator
 
+## v8.4.4 — 2026-01-06
+- Strom „Otázky“: přidána tlačítka **Sbalit vše** a **Rozbalit vše** (vedle filtru).
+  Tlačítka sbalí/rozbalí všechny skupiny i podskupiny. Neovlivňují výběr ani filtr.
+
 ## v8.4.3b — 2026-01-06
 - Filtr: po vymazání filtru se obnoví stav sbalení/rozbalení stromu tak,
   jak byl před prvním použitím filtru.

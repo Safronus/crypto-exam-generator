@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.4.1"
+APP_VERSION = "8.4.3b"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -3688,9 +3688,78 @@ class MainWindow(QMainWindow):
         self.btn_trash_empty.setEnabled(False)
         
     def showEvent(self, event: QShowEvent) -> None:
-        """Po prvním zobrazení obnoví stav rozbalení stromu (asynchronně po vykreslení)."""
+        """Po prvním zobrazení:
+        1) zachová původní obnovu stavu rozbalení přes QTimer.singleShot,
+        2) jednorázově injektuje tlačítka 'Rozbalit vše' a 'Sbalit vše' do řádku s filtrem.
+        """
+        # PŮVODNÍ CHOVÁNÍ – NECHÁNO BEZE ZMĚNY
         super().showEvent(event)
         QTimer.singleShot(0, self._restore_tree_expansion_state_on_show)
+    
+        # NOVÉ v 8.4.4: injekce tlačítek (ponecháno i v 8.4.4a)
+        if getattr(self, "_expand_collapse_buttons_injected", False):
+            return
+    
+        try:
+            # filter_edit vytváříte v _build_ui; jeho parent má QHBoxLayout s ostatními prvky
+            filter_bar = self.filter_edit.parent()
+            layout = filter_bar.layout() if filter_bar is not None else None
+            if layout is None:
+                return
+    
+            # Nevytvářet duplicitně (ochrana při vícenásobném showEvent)
+            if not hasattr(self, "btn_expand_all"):
+                self.btn_expand_all = QPushButton("Rozbalit vše")
+                self.btn_expand_all.clicked.connect(self._expand_all_tree)
+                layout.addWidget(self.btn_expand_all)
+    
+            if not hasattr(self, "btn_collapse_all"):
+                self.btn_collapse_all = QPushButton("Sbalit vše")
+                self.btn_collapse_all.clicked.connect(self._collapse_all_tree)
+                layout.addWidget(self.btn_collapse_all)
+    
+            self._expand_collapse_buttons_injected = True
+        except Exception:
+            # Bezpečný no-op: v případě potíží s nalezením layoutu neblokovat UI
+            pass
+
+    
+    def _expand_all_tree(self) -> None:
+        """
+        Rozbalí všechny uzly typu 'group' a 'subgroup' ve stromu otázek.
+        Nezasahuje do modelu, výběru ani filtru (hidden položky zůstanou skryté).
+        """
+        def rec(item: QTreeWidgetItem) -> None:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = (meta.get("kind") or meta.get("type")) if isinstance(meta, dict) else None
+            if kind in ("group", "subgroup"):
+                item.setExpanded(True)
+            for i in range(item.childCount()):
+                rec(item.child(i))
+    
+        for ti in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(ti)
+            if top is not None:
+                rec(top)
+    
+    
+    def _collapse_all_tree(self) -> None:
+        """
+        Sbalí všechny uzly typu 'group' a 'subgroup' ve stromu otázek.
+        Nezasahuje do modelu, výběru ani filtru (hidden položky zůstanou skryté).
+        """
+        def rec(item: QTreeWidgetItem) -> None:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = (meta.get("kind") or meta.get("type")) if isinstance(meta, dict) else None
+            if kind in ("group", "subgroup"):
+                item.setExpanded(False)
+            for i in range(item.childCount()):
+                rec(item.child(i))
+    
+        for ti in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(ti)
+            if top is not None:
+                rec(top)
     
     def closeEvent(self, event: QCloseEvent) -> None:
         """Před zavřením uloží stav rozbalení stromu (per projekt)."""
