@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.3.3"
+APP_VERSION = "8.3.4"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -4458,6 +4458,11 @@ class MainWindow(QMainWindow):
             act_dup_to = menu.addAction("Duplikovat do podskupiny")
             act_dup_to.triggered.connect(self._duplicate_question_to_subgroup)
             has_action = True
+            
+        if kind in ("group", "subgroup"):
+            act_rename = menu.addAction("Přejmenovat…")
+            act_rename.triggered.connect(self._rename_group_or_subgroup_dialog)
+            has_action = True
 
         if has_action:
             menu.addSeparator()
@@ -6119,6 +6124,54 @@ class MainWindow(QMainWindow):
         # 4) obnovit původní stav rozbalení
         self._apply_tree_expansion_state(expanded_before)
     
+        self.save_data()
+        
+    def _rename_group_or_subgroup_dialog(self) -> None:
+        """Kontextové přejmenování skupiny/podskupiny s uchováním stavu rozbalení."""
+        from PySide6.QtWidgets import QInputDialog
+    
+        kind, meta = self._selected_node()
+        if kind not in ("group", "subgroup"):
+            return
+    
+        # Aktuální název pro předvyplnění
+        current_name = ""
+        if kind == "group":
+            g = self._find_group(meta.get("id"))
+            if not g:
+                return
+            current_name = g.name or ""
+        else:
+            sg = self._find_subgroup(meta.get("parent_group_id"), meta.get("id"))
+            if not sg:
+                return
+            current_name = sg.name or ""
+    
+        # Dotaz na nový název
+        new_name, ok = QInputDialog.getText(self, "Přejmenovat", "Nový název:", text=current_name)
+        if not ok:
+            return
+        new_name = (new_name or "").strip()
+        if not new_name or new_name == current_name:
+            return
+    
+        # Zachovat stav rozbalení
+        expanded_before = self._capture_tree_expansion_state()
+    
+        # Změna v modelu
+        if kind == "group":
+            g.name = new_name  # g existuje viz výše
+        else:
+            sg.name = new_name  # sg existuje viz výše
+    
+        # Potlačit auto-rozbalení během refresh a obnovit stav
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+    
+        self._apply_tree_expansion_state(expanded_before)
         self.save_data()
 
     def _on_tree_selection_changed(self) -> None:
