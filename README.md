@@ -1,5 +1,9 @@
 # Crypto Exam Generator
 
+## v8.4.1 — 2026-01-06
+- Import z DOCX: nová volba **rozsahu kontroly duplicit** – buď proti **celé databázi** (původní chování),
+  nebo **jen proti cílové podskupině**. Výběr v jednoduchém dialogu.
+
 ## v8.4.0 — 2026-01-06
 - Strom „Otázky“: sloupec **Typ / body** se správně vyplní hned po startu aplikace.
 - Fix: Po editaci otázky se ve sloupci **Typ / body** u klasických otázek ztrácelo `b.`.

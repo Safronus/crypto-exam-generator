@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.4.0"
+APP_VERSION = "8.4.1"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -7435,18 +7435,36 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Chyba", "Nepodařilo se určit cílovou podskupinu.")
             return
     
-        # 2) Uložit aktuální stav rozbalení před změnou
+        # 2) Uložit aktuální stav rozbalení před změnou (zachování po importu)
         expanded_before = self._capture_tree_expansion_state()
     
-        # 3) Index existujících otázek (duplicitní ochrana)
+        # 3) Volba rozsahu kontroly duplicit (NOVÉ)
+        from PySide6.QtWidgets import QInputDialog
+        choices = ["Celá databáze (globální)", "Pouze cílová podskupina"]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Kontrola duplicit",
+            "Zkontrolovat duplicitní otázky proti:",
+            choices,
+            0,      # default: globální – zachování původního chování
+            False
+        )
+        if not ok:
+            return
+        scope_all = choice.startswith("Celá")
+    
+        # 4) Vytvoření indexu existujících otázek pro kontrolu duplicit
+        #    Jako klíč použijeme ostripovaný HTML obsah.
         existing_hashes = set()
     
         def index_questions(node):
-            # Rekurzivně projít strom
+            # Rekurzivní průchod podle typu uzlu
             if isinstance(node, RootData):
-                for gr in node.groups: index_questions(gr)
+                for gr in node.groups:
+                    index_questions(gr)
             elif isinstance(node, Group):
-                for sgr in node.subgroups: index_questions(sgr)
+                for sgr in node.subgroups:
+                    index_questions(sgr)
             elif isinstance(node, Subgroup):
                 for q in node.questions:
                     if q.text_html:
@@ -7454,12 +7472,16 @@ class MainWindow(QMainWindow):
                 for sub in node.subgroups:
                     index_questions(sub)
     
-        index_questions(self.root)
+        # NOVĚ: podle volby buď celá DB, nebo jen cílová podskupina (vč. vnoření)
+        if scope_all:
+            index_questions(self.root)
+        else:
+            index_questions(target_sg)
     
         total_imported = 0
         total_duplicates = 0
     
-        # 4) Import z vybraných DOCX souborů
+        # 5) Import z vybraných DOCX souborů
         for p in paths:
             try:
                 paras = self._extract_paragraphs_from_docx(Path(p))
@@ -7476,6 +7498,7 @@ class MainWindow(QMainWindow):
                         total_duplicates += 1
                         continue
     
+                    # Přidat otázku + aktualizovat hashset pro běžící import
                     existing_hashes.add(content_hash)
                     target_sg.questions.append(q)
                     file_imported_count += 1
@@ -7485,7 +7508,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Import – chyba", f"Soubor: {p}\n{e}")
     
-        # 5) Potlačit auto-rozbalení během refresh, obnovit stav a rozbalit pouze cílovou podskupinu
+        # 6) Refresh s potlačením auto-rozbalení + obnova stavu a rozbalení cílové podskupiny
         self._suppress_auto_expand = True
         try:
             self._refresh_tree()
@@ -7502,7 +7525,8 @@ class MainWindow(QMainWindow):
         msg = (
             f"Import dokončen do: {target_sg.name}\n\n"
             f"Úspěšně importováno: {total_imported}\n"
-            f"Duplicitních (přeskočeno): {total_duplicates}"
+            f"Duplicitních (přeskočeno): {total_duplicates}\n"
+            f"Kontrola duplicit: {'celá databáze' if scope_all else 'pouze cílová podskupina'}"
         )
         QMessageBox.information(self, "Výsledek importu", msg)
 
