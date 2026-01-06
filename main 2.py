@@ -32,12 +32,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import docx
-from docx.shared import Pt, RGBColor
+from docx.shared import Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from html.parser import HTMLParser
 
-from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime, QPoint, QRect, QTime
+from PySide6.QtCore import Qt, QSize, QSaveFile, QByteArray, QTimer, QDateTime, QPoint, QRect, QTime, QSettings
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -48,8 +48,8 @@ from PySide6.QtGui import (
     QTextBlockFormat,
     QColor,
     QPalette, QTextDocument,
-    QFont, QPen, 
-    QPixmap, QPainter, QIcon, QBrush, QPainterPath
+    QFont, QPen,
+    QPixmap, QImage, QImageReader, QPainter, QIcon, QBrush, QPainterPath
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -81,8 +81,8 @@ from PySide6.QtWidgets import (
     QWizardPage,
     QDateTimeEdit,
     # Nové importy pro v4.0 UI
-    QGroupBox,
-    QTableWidget,
+    QGroupBox, 
+    QTableWidget, QListWidget,
     QTableWidgetItem, QFrame, QStyledItemDelegate,
     QHeaderView, QCheckBox, QGridLayout,
     QTreeWidgetItemIterator, QButtonGroup,
@@ -90,8 +90,8 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_NAME = "Crypto Exam Generator"
-APP_VERSION = "7.4.1"
+APP_VERSION = "8.3.0"
+APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
 # Globální pomocné funkce
@@ -163,6 +163,11 @@ def parse_html_to_paragraphs(html: str) -> List[dict]:
 # from PySide6.QtWidgets import ..., QTableWidget, QTableWidgetItem, QAbstractItemView
 
 @dataclass
+class RootData:
+    groups: List[Group]
+    trash: List[dict] = field(default_factory=list)
+
+@dataclass
 class FunnyAnswer:
     text: str
     author: str
@@ -183,6 +188,10 @@ class Question:
     # Nová pole
     correct_answer: str = ""
     funny_answers: List[FunnyAnswer] = field(default_factory=list)
+    image_path: str = ""  # cesta k obrázku (volitelné)
+    image_width_cm: float = 0.0  # cílová šířka vloženého obrázku v DOCX (cm), 0 = default
+    image_height_cm: float = 0.0  # cílová výška vloženého obrázku v DOCX (cm), 0 = default/auto
+    image_keep_aspect: bool = True  # pokud True, UI udržuje poměr stran (šířka/výška) při editaci rozměrů
 
     @staticmethod
     def new_default(q_type: str = "classic") -> "Question":
@@ -518,15 +527,339 @@ class DnDTree(QTreeWidget):
 
     def dropEvent(self, event) -> None:
         ids_before = self.owner._selected_question_ids()
+    
+        # Pokud uživatel pustí drag mimo položky (na prázdnou plochu / mimo seznam),
+        # upozorníme, že tím položku "vyhodí" ze seznamu. Po potvrzení ji opravdu smažeme.
+        try:
+            pos = event.position().toPoint()  # Qt6
+        except Exception:
+            pos = event.pos()  # fallback
+    
+        target = self.itemAt(pos)
+        if target is None and self.dropIndicatorPosition() == QAbstractItemView.OnViewport:
+            mb = QMessageBox(self)
+            mb.setIcon(QMessageBox.Warning)
+            mb.setWindowTitle("Pozor")
+            mb.setText("Přesouváš položku mimo seznam.")
+            mb.setInformativeText("Tím se položka odstraní ze seznamu. Chceš pokračovat?")
+    
+            mb.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            mb.setDefaultButton(QMessageBox.No)
+    
+            # Tlačítka česky
+            yes_btn = mb.button(QMessageBox.Yes)
+            no_btn = mb.button(QMessageBox.No)
+            if yes_btn is not None:
+                yes_btn.setText("Ano")
+            if no_btn is not None:
+                no_btn.setText("Ne")
+    
+            res = mb.exec()
+            if res != QMessageBox.Yes:
+                event.ignore()
+                self.owner.statusBar().showMessage("Přesun zrušen.", 3000)
+                return
+    
+            # Uživatel potvrdil -> vybrané položky opravdu smažeme ze stromu (včetně skupin).
+            selected = list(self.selectedItems())
+            selected_set = set(selected)
+    
+            def has_selected_ancestor(it) -> bool:
+                p = it.parent()
+                while p is not None:
+                    if p in selected_set:
+                        return True
+                    p = p.parent()
+                return False
+    
+            def depth(it) -> int:
+                d = 0
+                p = it.parent()
+                while p is not None:
+                    d += 1
+                    p = p.parent()
+                return d
+    
+            # Neodstraňovat položky, které už budou odstraněny s rodičem
+            selected = [it for it in selected if not has_selected_ancestor(it)]
+            # Odstraňovat od nejhlubších (bezpečnější)
+            selected.sort(key=depth, reverse=True)
+    
+            # ZMĚNA: místo ručního odmazání ze stromu + _sync_model_from_tree uložíme do koše a smažeme z modelu
+            self.owner._trash_delete_tree_items(selected)
+            self.owner._reselect_questions(ids_before)
+            return
+    
+        # Necháme QTreeWidget provést interní DnD
         super().dropEvent(event)
+    
+        def kind_of(it) -> str:
+            meta = it.data(0, Qt.UserRole) or {}
+            if isinstance(meta, dict):
+                return meta.get("kind") or ""
+            return ""
+    
+        def iter_all_items():
+            stack = []
+            for ti in range(self.topLevelItemCount()):
+                stack.append(self.topLevelItem(ti))
+            while stack:
+                it = stack.pop()
+                yield it
+                for ci in range(it.childCount() - 1, -1, -1):
+                    stack.append(it.child(ci))
+    
+        def top_level_group_of(it):
+            cur = it
+            while cur is not None:
+                if kind_of(cur) == "group" and cur.parent() is None:
+                    return cur
+                cur = cur.parent()
+            return None
+    
+        def nearest_group_for_top_level_index(idx: int):
+            # najdi nejbližší skupinu nad idx, jinak pod idx
+            for j in range(idx - 1, -1, -1):
+                it = self.topLevelItem(j)
+                if it is not None and kind_of(it) == "group":
+                    return it, j
+            for j in range(idx + 1, self.topLevelItemCount()):
+                it = self.topLevelItem(j)
+                if it is not None and kind_of(it) == "group":
+                    return it, j
+            return None, -1
+    
+        changed = True
+        while changed:
+            changed = False
+    
+            # 1) NIC nesmí být dítě "question" (cokoliv puštěné na otázku).
+            #    Nové chování:
+            #    - subgroup puštěná na otázku => vnořit do nadřazené podskupiny (tj. podskupiny, která obsahuje cílovou otázku)
+            #    - question puštěná na otázku => zůstane sourozencem (pod cílovou otázkou) ve stejné podskupině
+            for it in iter_all_items():
+                if kind_of(it) != "question":
+                    continue
+                if it.childCount() <= 0:
+                    continue
+    
+                moved = it.takeChild(0)
+                if moved is None:
+                    continue
+    
+                ck = kind_of(moved)
+                q_parent = it.parent()  # typicky subgroup
+    
+                if ck == "question":
+                    if q_parent is not None:
+                        insert_at = q_parent.indexOfChild(it) + 1
+                        q_parent.insertChild(insert_at, moved)
+                    else:
+                        self.insertTopLevelItem(self.topLevelItemCount(), moved)
+    
+                elif ck == "subgroup":
+                    # PODSKUPINA NA OTÁZKU => vnořit do nadřazené podskupiny (q_parent)
+                    if q_parent is not None:
+                        q_parent.insertChild(q_parent.childCount(), moved)
+                    else:
+                        # fallback (nemáme nadřazenou podskupinu) - dáme na top-level
+                        self.insertTopLevelItem(self.topLevelItemCount(), moved)
+    
+                elif ck == "group":
+                    # skupina musí být top-level
+                    tg = top_level_group_of(it)
+                    insert_at = self.indexOfTopLevelItem(tg) + 1 if tg is not None else self.topLevelItemCount()
+                    self.insertTopLevelItem(insert_at, moved)
+    
+                else:
+                    if q_parent is not None:
+                        insert_at = q_parent.indexOfChild(it) + 1
+                        q_parent.insertChild(insert_at, moved)
+                    else:
+                        self.insertTopLevelItem(self.topLevelItemCount(), moved)
+    
+                changed = True
+                break
+    
+            if changed:
+                continue
+    
+            # 2) Top-level podskupina -> přesun do nejbližší skupiny (aby nemizela)
+            for ti in range(self.topLevelItemCount()):
+                top = self.topLevelItem(ti)
+                if top is None:
+                    continue
+                if kind_of(top) != "subgroup":
+                    continue
+    
+                grp, grp_idx = nearest_group_for_top_level_index(ti)
+                if grp is None:
+                    continue
+    
+                moved = self.takeTopLevelItem(ti)
+                if moved is None:
+                    continue
+    
+                if grp_idx >= 0 and ti == grp_idx + 1:
+                    grp.insertChild(0, moved)
+                else:
+                    grp.insertChild(grp.childCount(), moved)
+    
+                changed = True
+                break
+    
+            if changed:
+                continue
+    
+            # 3) Skupina nesmí být nikdy vnořená (group musí být top-level)
+            for it in iter_all_items():
+                if kind_of(it) != "group":
+                    continue
+                if it.parent() is None:
+                    continue
+    
+                parent = it.parent()
+                idx = parent.indexOfChild(it)
+                if idx < 0:
+                    continue
+                moved = parent.takeChild(idx)
+                if moved is None:
+                    continue
+    
+                self.insertTopLevelItem(self.topLevelItemCount(), moved)
+                changed = True
+                break
+    
         self.owner._sync_model_from_tree()
         self.owner._refresh_tree()
         self.owner._reselect_questions(ids_before)
         self.owner.save_data()
         self.owner.statusBar().showMessage("Přesun dokončen (uloženo).", 3000)
 
+class BonusQuestionSelectorDialog(QDialog):
+    """Dialog se stromem a checkboxy pro výběr konkrétních bonusových otázek."""
 
-# ---------------------- Dialog pro výběr cíle ----------------------
+    def __init__(self, owner: "MainWindow", selected_ids: set) -> None:
+        super().__init__(owner)
+        self.setWindowTitle("Vyberte bonusové otázky")
+        self.resize(700, 800)
+        self.owner = owner
+        self.selected_ids = selected_ids.copy()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(QLabel("Zaškrtněte konkrétní bonusové otázky, které se mají použít v exportu.\n(Pokud nevyberete nic, použijí se náhodné bonusové otázky ze všech dostupných)"))
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Název zdroje / Otázka"])
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tree.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.tree)
+
+        self.lbl_total = QLabel(f"Celkem vybráno otázek: {len(self.selected_ids)}")
+        self.lbl_total.setStyleSheet("font-weight: bold; color: #ffea00; font-size: 14px; margin-top: 5px;")
+        layout.addWidget(self.lbl_total)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+
+        self.icon_group = owner._generate_icon("S", QColor("#ff5252"), "rect")
+        self.icon_sub = owner._generate_icon("P", QColor("#ff8a80"), "rect")
+        self.icon_bonus = owner._generate_icon("B", QColor("#ffea00"), "star")
+
+        self._is_populating = True
+        self._populate_tree()
+        self._is_populating = False
+        self._recalculate_total()
+
+    def _populate_tree(self):
+        for g in self.owner.root.groups:
+            bonus_questions_in_group = self._collect_bonus_questions(g)
+            if not bonus_questions_in_group:
+                continue
+
+            g_item = QTreeWidgetItem([g.name])
+            g_item.setFlags(g_item.flags() | Qt.ItemIsUserCheckable)
+            g_item.setFlags(g_item.flags() & ~Qt.ItemIsAutoTristate)
+            g_item.setCheckState(0, Qt.Unchecked)
+            g_item.setIcon(0, self.icon_group)
+            f = g_item.font(0); f.setBold(True); g_item.setFont(0, f)
+            self.tree.addTopLevelItem(g_item)
+
+            self._add_subgroups_recursive(g_item, g.subgroups)
+            g_item.setExpanded(True)
+
+    def _add_subgroups_recursive(self, parent_item, subgroups):
+        for sg in subgroups:
+            bonus_questions_in_subgroup = self._collect_bonus_questions(sg)
+            if not bonus_questions_in_subgroup:
+                continue
+
+            sg_item = QTreeWidgetItem([sg.name])
+            sg_item.setFlags(sg_item.flags() | Qt.ItemIsUserCheckable)
+            sg_item.setFlags(sg_item.flags() & ~Qt.ItemIsAutoTristate)
+            sg_item.setCheckState(0, Qt.Unchecked)
+            sg_item.setIcon(0, self.icon_sub)
+            parent_item.addChild(sg_item)
+
+            for q in bonus_questions_in_subgroup:
+                q_item = QTreeWidgetItem([q.title or "Bonusová otázka"])
+                q_item.setFlags(q_item.flags() | Qt.ItemIsUserCheckable)
+                q_item.setData(0, Qt.UserRole, {"id": q.id, "type": "question"})
+                q_item.setIcon(0, self.icon_bonus)
+                
+                check_state = Qt.Checked if q.id in self.selected_ids else Qt.Unchecked
+                q_item.setCheckState(0, check_state)
+                sg_item.addChild(q_item)
+
+            if sg.subgroups:
+                self._add_subgroups_recursive(sg_item, sg.subgroups)
+
+            sg_item.setExpanded(True)
+
+    def _collect_bonus_questions(self, node) -> list:
+        questions = []
+        if hasattr(node, "questions"):
+            questions.extend([q for q in node.questions if q.type == "bonus"])
+        if hasattr(node, "subgroups"):
+            for sub in node.subgroups:
+                questions.extend(self._collect_bonus_questions(sub))
+        return questions
+
+    def _on_item_changed(self, item, column):
+        if self._is_populating: return
+        state = item.checkState(0)
+        self._is_populating = True
+        if not item.data(0, Qt.UserRole): 
+            self._set_check_state_recursive(item, state)
+        self._is_populating = False
+        self._recalculate_total()
+
+    def _set_check_state_recursive(self, item, state):
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child.setCheckState(0, state)
+            self._set_check_state_recursive(child, state)
+
+    def _recalculate_total(self):
+        count = len(self.get_selected_ids())
+        self.lbl_total.setText(f"Celkem vybráno otázek: {count}")
+
+    def get_selected_ids(self) -> set:
+        selected = set()
+        it = QTreeWidgetItemIterator(self.tree)
+        while it.value():
+            item = it.value()
+            if item.checkState(0) == Qt.Checked:
+                data = item.data(0, Qt.UserRole)
+                if data and data.get("type") == "question":
+                    selected.add(data["id"])
+            it += 1
+        return selected
+
+
 # ---------------------- Dialog pro výběr cíle ----------------------
 class MoveTargetDialog(QDialog):
     """Dialog pro výběr cílové skupiny/podskupiny pomocí stromu."""
@@ -877,18 +1210,18 @@ class ExportWizard(QWizard):
         self.template_path: Optional[Path] = None
         self.output_path: Optional[Path] = None
         self.output_changed_manually = False
-        
         self.placeholders_q = []
         self.placeholders_b = []
         self.selection_map = {}
         self.cached_hash = ""
-        
         self.has_datum_cas = False
         self.has_pozn = False
         self.has_min_max = False
         
         # NOVÉ: Ukládáme seznam vybraných zdrojů pro Multi Export [{'id':..., 'type':...}]
-        self.multi_selected_sources = [] 
+        self.multi_selected_sources = []
+        # NOVÉ: Ukládáme seznam ID vybraných bonusových otázek
+        self.multi_selected_bonus_ids = set()
 
         # Načtení uložených cest
         self.settings_file = self.owner.project_root / "data" / "export_settings.json"
@@ -898,15 +1231,13 @@ class ExportWizard(QWizard):
         default_templates_dir = self.owner.project_root / "data" / "Šablony"
         default_output_dir = self.owner.project_root / "data" / "Vygenerované testy"
         default_print_dir = self.owner.project_root / "data" / "Tisk"
-        
         default_templates_dir.mkdir(parents=True, exist_ok=True)
         default_output_dir.mkdir(parents=True, exist_ok=True)
         default_print_dir.mkdir(parents=True, exist_ok=True)
-        
         self.templates_dir = Path(self.stored_settings.get("templates_dir", default_templates_dir))
         self.output_dir = Path(self.stored_settings.get("output_dir", default_output_dir))
         self.print_dir = Path(self.stored_settings.get("print_dir", default_print_dir))
-        
+
         last_template = self.stored_settings.get("last_template")
         if last_template and Path(last_template).exists():
             self.default_template = Path(last_template)
@@ -917,17 +1248,16 @@ class ExportWizard(QWizard):
         self.page1 = QWizardPage()
         self.page2 = QWizardPage()
         self.page3 = QWizardPage()
-        
         self._build_page1_content()
         self._build_page2_content()
         self._build_page3_content()
-        
+
         self.setPage(self.ID_PAGE1, self.page1)
         self.setPage(self.ID_PAGE2, self.page2)
         self.setPage(self.ID_PAGE3, self.page3)
-        
+
         self.setStartId(self.ID_PAGE1)
-        
+
         if self.default_template.exists():
             self.le_template.setText(str(self.default_template))
             self.template_path = self.default_template
@@ -935,7 +1265,7 @@ class ExportWizard(QWizard):
         else:
             self.le_template.setText(str(self.default_template))
             self._update_path_indicators()
-            
+
         self._update_default_output()
         self._update_path_indicators()
 
@@ -1089,88 +1419,78 @@ class ExportWizard(QWizard):
         self.mode_box = QGroupBox("Režim exportu")
         self.mode_box.setStyleSheet("""
             QGroupBox { font-weight: bold; margin-top: 10px; }
-            QRadioButton {
-                font-size: 14px; 
-                padding: 5px; 
-                border-radius: 4px;
-            }
+            QRadioButton { font-size: 14px; padding: 5px; border-radius: 4px; }
             QRadioButton::indicator { width: 16px; height: 16px; }
             QRadioButton:checked { color: #61dafb; font-weight: bold; background-color: #3a3a3c; }
             QRadioButton:hover { background-color: #2d2d30; }
         """)
         l_mode = QHBoxLayout(self.mode_box)
-        
         self.rb_mode_single = QRadioButton("Jednotlivý export (Standardní)")
         self.rb_mode_single.setToolTip("Vytvoří jeden soubor s ručně vybranými otázkami.")
         self.rb_mode_single.setChecked(True)
-        
         self.rb_mode_multi = QRadioButton("Hromadný export (Generátor variant)")
         self.rb_mode_multi.setToolTip("Vytvoří více kopií testu. Otázky 1-10 budou vybrány náhodně pro každou kopii.")
-        
         self.mode_group = QButtonGroup(self)
         self.mode_group.addButton(self.rb_mode_single, 0)
         self.mode_group.addButton(self.rb_mode_multi, 1)
         self.mode_group.buttonToggled.connect(self._on_mode_toggled)
-        
         l_mode.addWidget(self.rb_mode_single)
         l_mode.addWidget(self.rb_mode_multi)
         l_mode.addStretch()
         main_layout.addWidget(self.mode_box)
 
-        # 3. Nastavení pro hromadný export (Skryté by default)
+        # 3. Nastavení pro hromadný export
         self.widget_multi_options = QWidget()
         self.widget_multi_options.setVisible(False)
         self.widget_multi_options.setStyleSheet("background-color: #2d2d30; border-radius: 4px; padding: 10px; border: 1px solid #444;")
-        l_multi = QHBoxLayout(self.widget_multi_options)
+        l_multi = QGridLayout(self.widget_multi_options)
         l_multi.setContentsMargins(5, 5, 5, 5)
         
-        l_multi.addWidget(QLabel("Počet kopií:"))
+        l_multi.addWidget(QLabel("Počet kopií:"), 0, 0)
         self.spin_multi_count = QSpinBox()
         self.spin_multi_count.setRange(2, 50)
         self.spin_multi_count.setValue(2)
         self.spin_multi_count.setStyleSheet("padding: 4px;")
-        l_multi.addWidget(self.spin_multi_count)
+        l_multi.addWidget(self.spin_multi_count, 0, 1)
         
-        l_multi.addWidget(QLabel("Zdroje otázek (pro |Otázka|1-10):"))
-        
-        # VÝRAZNĚJŠÍ TLAČÍTKO
+        l_multi.addWidget(QLabel("Zdroje otázek (pro |Otázka|1-10):"), 1, 0)
         self.btn_select_sources = QPushButton("Vybrat zdroje...")
         self.btn_select_sources.setCursor(Qt.PointingHandCursor)
         self.btn_select_sources.setStyleSheet("""
-            QPushButton {
-                background-color: #0d47a1; 
-                color: white; 
-                border: none; 
-                padding: 6px 12px; 
-                border-radius: 4px;
-                font-weight: bold;
-            }
+            QPushButton { background-color: #0d47a1; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }
             QPushButton:hover { background-color: #1565c0; }
             QPushButton:pressed { background-color: #0d47a1; }
         """)
         self.btn_select_sources.clicked.connect(self._on_select_sources_clicked)
-        
         self.lbl_selected_sources = QLabel("Nevybráno (použijí se všechny otázky)")
         self.lbl_selected_sources.setStyleSheet("color: #aaa; font-style: italic; margin-left: 8px;")
         self.lbl_selected_sources.setWordWrap(True)
+        src_container = QWidget(); src_layout = QHBoxLayout(src_container); src_layout.setContentsMargins(0,0,0,0)
+        src_layout.addWidget(self.btn_select_sources); src_layout.addWidget(self.lbl_selected_sources, 1)
+        l_multi.addWidget(src_container, 1, 1)
         
-        src_container = QWidget()
-        src_layout = QHBoxLayout(src_container)
-        src_layout.setContentsMargins(0, 0, 0, 0)
-        src_layout.addWidget(self.btn_select_sources)
-        src_layout.addWidget(self.lbl_selected_sources, 1)
-        
-        l_multi.addWidget(src_container, 1)
-        
+        l_multi.addWidget(QLabel("Bonusové otázky (pro |Bonus|...):"), 2, 0)
+        self.btn_select_bonus = QPushButton("Vybrat bonusové...")
+        self.btn_select_bonus.setCursor(Qt.PointingHandCursor)
+        self.btn_select_bonus.setStyleSheet("""
+            QPushButton { background-color: #b08d00; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }
+            QPushButton:hover { background-color: #c9a300; }
+            QPushButton:pressed { background-color: #b08d00; }
+        """)
+        self.btn_select_bonus.clicked.connect(self._on_select_bonus_clicked)
+        self.lbl_selected_bonus = QLabel("Nevybráno (použijí se náhodné)")
+        self.lbl_selected_bonus.setStyleSheet("color: #aaa; font-style: italic; margin-left: 8px;")
+        self.lbl_selected_bonus.setWordWrap(True)
+        bonus_container = QWidget(); bonus_layout = QHBoxLayout(bonus_container); bonus_layout.setContentsMargins(0,0,0,0)
+        bonus_layout.addWidget(self.btn_select_bonus); bonus_layout.addWidget(self.lbl_selected_bonus, 1)
+        l_multi.addWidget(bonus_container, 2, 1)
         main_layout.addWidget(self.widget_multi_options)
 
         # 4. Hlavní obsah (Dva sloupce: Strom | Sloty)
         columns_layout = QHBoxLayout()
-        
         self.widget_left_panel = QWidget()
         left_layout = QVBoxLayout(self.widget_left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        
+        left_layout.setContentsMargins(0,0,0,0)
         left_layout.addWidget(QLabel("<b>Dostupné otázky:</b>"))
         self.tree_source = QTreeWidget()
         self.tree_source.setHeaderLabels(["Struktura otázek"])
@@ -1179,51 +1499,47 @@ class ExportWizard(QWizard):
         self.tree_source.customContextMenuRequested.connect(self._on_tree_source_context_menu)
         if hasattr(self, "_on_tree_selection"):
             self.tree_source.itemSelectionChanged.connect(self._on_tree_selection)
-        
         left_layout.addWidget(self.tree_source)
         
         self.btn_assign_multi = QPushButton(">> Přiřadit vybrané na volné pozice >>")
         self.btn_assign_multi.setToolTip("Doplní vybrané otázky zleva na první volná místa v šabloně vpravo.")
         self.btn_assign_multi.clicked.connect(self._assign_selected_multi)
         left_layout.addWidget(self.btn_assign_multi)
-        
         columns_layout.addWidget(self.widget_left_panel, 4)
         
-        # Pravý panel: Sloty
+        # Pravý panel - ZDE JE OPRAVA (QScrollArea + layout_slots)
         right_layout = QVBoxLayout()
         right_header = QHBoxLayout()
         right_header.addWidget(QLabel("<b>Sloty v šabloně:</b>"))
         right_header.addStretch()
-        
         self.btn_clear_all = QPushButton("Vyprázdnit vše")
-        self.btn_clear_all.setToolTip("Zruší přiřazení všech otázek.")
         self.btn_clear_all.clicked.connect(self._clear_all_assignments)
         right_header.addWidget(self.btn_clear_all)
-        
         right_layout.addLayout(right_header)
-
+        
         self.scroll_slots = QScrollArea()
         self.scroll_slots.setWidgetResizable(True)
         self.widget_slots = QWidget()
+        # Tady definujeme self.layout_slots, který vaše _init_page2 potřebuje
         self.layout_slots = QVBoxLayout(self.widget_slots)
         self.layout_slots.setSpacing(6)
         self.layout_slots.addStretch()
         self.scroll_slots.setWidget(self.widget_slots)
+        
         right_layout.addWidget(self.scroll_slots)
         columns_layout.addLayout(right_layout, 6)
         main_layout.addLayout(columns_layout, 3)
 
-        # 5. Náhled
-        preview_box = QGroupBox("Náhled vybrané otázky")
-        preview_layout = QVBoxLayout(preview_box)
+        # 5. Náhled (self.preview_box)
+        self.preview_box = QGroupBox("Náhled vybrané otázky")
+        preview_layout = QVBoxLayout(self.preview_box)
         preview_layout.setContentsMargins(5,5,5,5)
         self.text_preview_q = QTextEdit()
         self.text_preview_q.setReadOnly(True)
         self.text_preview_q.setMaximumHeight(120)
         self.text_preview_q.setStyleSheet("QTextEdit { background-color: #2e2e2e; color: #ffffff; font-size: 14px; border: 1px solid #555; padding: 5px; }")
         preview_layout.addWidget(self.text_preview_q)
-        main_layout.addWidget(preview_box, 1)
-
+        main_layout.addWidget(self.preview_box, 1)
 
     def _on_select_sources_clicked(self):
         # Zjistíme počet potřebných otázek ze šablony
@@ -1265,69 +1581,98 @@ class ExportWizard(QWizard):
                 self.lbl_selected_sources.setText(text)
                 self.lbl_selected_sources.setStyleSheet(style)
 
+    def _on_select_bonus_clicked(self):
+        dlg = BonusQuestionSelectorDialog(self.owner, self.multi_selected_bonus_ids)
+        if dlg.exec() == QDialog.Accepted:
+            self.multi_selected_bonus_ids = dlg.get_selected_ids()
+            count = len(self.multi_selected_bonus_ids)
+            if count > 0:
+                self.lbl_selected_bonus.setText(f"Vybráno konkrétních: {count}")
+                self.lbl_selected_bonus.setStyleSheet("color: #ffea00; font-weight: bold;")
+            else:
+                self.lbl_selected_bonus.setText("Nevybráno (použijí se náhodné)")
+                self.lbl_selected_bonus.setStyleSheet("color: #aaa; font-style: italic;")
+
     def _on_mode_toggled(self, btn, checked):
-        """Reaguje na změnu režimu exportu (Single vs Multi)."""
-        if not checked: return
+        if not checked: 
+            return
         
         is_multi = (self.mode_group.checkedId() == 1)
         
-        # 1. Zobrazit/skrýt panel s možnostmi pro Multi
+        # 1. Viditelnost nastavení pro multi
         self.widget_multi_options.setVisible(is_multi)
         
-        # 2. Zobrazit/skrýt levý panel s otázkami (strom) - v Multi režimu ho nepotřebujeme
+        # 2. SKRYTÍ LEVÉHO PANELU (Dostupné otázky) v Multi režimu
+        #    (V Single režimu je vidět, v Multi ne)
         self.widget_left_panel.setVisible(not is_multi)
         
-        # 3. NOVÉ: Skrýt tlačítko "Vyprázdnit vše" v Multi režimu
-        self.btn_clear_all.setVisible(not is_multi)
+        # 3. Skrytí náhledu v multi režimu
+        if hasattr(self, "preview_box"):
+            self.preview_box.setVisible(not is_multi)
+            if is_multi:
+                 self.text_preview_q.clear()
         
-        # 4. Aktualizovat vizuál slotů (tlačítka "Vybrat..." vs "Náhodně")
+        # 4. Zablokování tlačítek (pro jistotu, i když jsou skrytá)
+        self.btn_assign_multi.setEnabled(not is_multi)
+        self.btn_clear_all.setEnabled(not is_multi)
+        
+        # 5. Překreslení slotů (aktivní/neaktivní)
         self._update_slots_visuals(is_multi)
 
 
     def _update_slots_visuals(self, is_multi: bool):
-        """Aktualizuje vzhled slotů podle režimu."""
-        # Projdeme všechny widgety ve slot layoutu
+        """Projteruje všechny sloty v layoutu a nastaví stav tlačítek podle režimu."""
+        # Procházíme widgety v layoutu (pozor na stretch a labely)
         for i in range(self.layout_slots.count()):
             item = self.layout_slots.itemAt(i)
             w = item.widget()
             if not w: continue
             
+            # Hledáme naše řádky (mají property 'placeholder')
             ph = w.property("placeholder")
-            if not ph: continue # Není to slot (např. nadpis)
+            if not ph: continue
             
-            # Získáme reference na tlačítka uvnitř slotu
-            row_layout = w.layout()
-            if not row_layout or row_layout.count() < 3: continue
+            is_bonus_slot = w.property("is_bonus") # Získali jsme při vytváření
             
-            btn_assign = row_layout.itemAt(1).widget()
-            btn_clear = row_layout.itemAt(2).widget()
+            # Získáme tlačítka z layoutu řádku
+            # Layout je: 0:Label, 1:BtnAssign, 2:BtnClear
+            layout = w.layout()
+            if not layout or layout.count() < 3: continue
             
-            # Logika pro MULTI: Zamknout VŠECHNY klasické otázky (OtázkaX)
-            # Pokud je placeholder v seznamu klasických otázek
-            if is_multi and ph in self.placeholders_q:
-                btn_assign.setText("🎲 NÁHODNĚ Z VARIANT")
-                btn_assign.setStyleSheet("color: #ffcc00; font-weight: bold; border: 1px dashed #ffcc00;")
+            btn_assign = layout.itemAt(1).widget()
+            btn_clear = layout.itemAt(2).widget()
+            
+            if is_multi:
+                # REŽIM MULTI: Tlačítka neaktivní, text indikuje automatiku
                 btn_assign.setEnabled(False)
                 btn_clear.setEnabled(False)
-            else:
-                # Obnovíme standardní stav (nebo pro Bonusy v multi režimu - ty zůstávají manuální/prázdné?)
-                # Požadavek byl jen na "počet otázek", předpokládám že Bonusy se negenerují náhodně (nebo ano?)
-                # Zadání: "počet klasických otázek se i pro tento režim bude odvíjet od šablony"
-                # Takže jen self.placeholders_q
+                btn_clear.setVisible(False) # Skryjeme křížek, nedává smysl
                 
+                if is_bonus_slot:
+                    btn_assign.setText("[Náhodný výběr BONUS]")
+                    # Bonusové tlačítko 'disabled' styl
+                    btn_assign.setStyleSheet("color: #888; background-color: #333; border: 1px solid #444;")
+                else:
+                    btn_assign.setText("[Náhodný výběr z VARIANT]")
+                    btn_assign.setStyleSheet("color: #888; background-color: #333; border: 1px solid #444;")
+            
+            else:
+                # REŽIM SINGLE: Tlačítka aktivní, text podle výběru
                 btn_assign.setEnabled(True)
                 btn_clear.setEnabled(True)
-                btn_assign.setStyleSheet("")
+                btn_clear.setVisible(True)
+                btn_assign.setStyleSheet("") # Reset stylu
                 
+                # Obnovíme text podle aktuální selection_map
                 qid = self.selection_map.get(ph)
                 if qid:
                     q = self.owner._find_question_by_id(qid)
                     if q:
-                        btn_assign.setText(q.title)
+                         btn_assign.setText(q.title)
                     else:
-                        btn_assign.setText("???")
+                         btn_assign.setText("??? (Nenalezeno)")
                 else:
-                    btn_assign.setText("Vybrat...")
+                    btn_assign.setText("--- Volné ---")
 
     def _clear_all_assignments(self) -> None:
         """Vymaže všechna přiřazení otázek ve slotech."""
@@ -1602,7 +1947,7 @@ class ExportWizard(QWizard):
             if not self.placeholders_q and not self.placeholders_b:
                 self._scan_placeholders()
 
-            # 1. Clear Tree (Combo už nemáme)
+            # 1. Clear Tree
             self.tree_source.blockSignals(True)
             self.tree_source.clear()
             
@@ -1615,20 +1960,20 @@ class ExportWizard(QWizard):
             # Barvy a ikony
             color_group = QBrush(QColor("#ff5252"))
             color_subgroup = QBrush(QColor("#ff8a80"))
-            color_classic = QBrush(QColor("#42a5f5"))
-            color_bonus = QBrush(QColor("#ffea00"))
             
+            # Helper pro generování ikon (musí být dostupný self.owner._generate_icon)
             def generate_colored_icon(text, color, shape="rect"):
                  return self.owner._generate_icon(text, color, shape)
 
             icon_group = generate_colored_icon("S", QColor("#ff5252"), "rect")
             icon_sub = generate_colored_icon("P", QColor("#ff8a80"), "rect")
-            icon_classic = generate_colored_icon("Q", QColor("#42a5f5"), "circle")
-            icon_bonus = generate_colored_icon("B", QColor("#ffea00"), "star")
             
-            # 4. Populate Tree (Pouze strom)
+            # 4. Populate Tree (Seřazeno abecedně)
             def add_subgroup_recursive(parent_item, subgroup_list, parent_gid):
-                for sg in subgroup_list:
+                # SEŘAZENÍ PODSKUPIN
+                sorted_subs = sorted(subgroup_list, key=lambda s: s.name.lower())
+                
+                for sg in sorted_subs:
                     # Tree Item
                     sg_item = QTreeWidgetItem([sg.name])
                     sg_item.setIcon(0, icon_sub)
@@ -1641,7 +1986,10 @@ class ExportWizard(QWizard):
                     })
                     parent_item.addChild(sg_item)
                     
-                    for q in sg.questions:
+                    # SEŘAZENÍ OTÁZEK
+                    sorted_qs = sorted(sg.questions, key=lambda q: (q.title or "").lower())
+                    
+                    for q in sorted_qs:
                         label_type = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
                         is_bonus = (label_type == "BONUS")
                         info = f"({q.points} b)" if not is_bonus else f"(Bonus: {q.bonus_correct})"
@@ -1654,19 +2002,19 @@ class ExportWizard(QWizard):
                             "parent_subgroup_id": sg.id
                         })
                         
-                        if is_bonus:
-                            q_item.setIcon(0, icon_bonus)
-                            q_item.setForeground(0, color_bonus)
-                            fb = q_item.font(0); fb.setBold(True); q_item.setFont(0, fb)
-                        else:
-                            q_item.setIcon(0, icon_classic)
-                            q_item.setForeground(0, color_classic)
+                        # Vizualizace (Ikona + Obrázek)
+                        has_img = bool(getattr(q, "image_path", "") and os.path.exists(q.image_path))
+                        # Voláme metodu ownera pro vizuál
+                        self.owner._apply_question_item_visuals(q_item, q.type, has_image=has_img)
+                        
                         sg_item.addChild(q_item)
                     
                     if sg.subgroups:
                         add_subgroup_recursive(sg_item, sg.subgroups, parent_gid)
 
-            groups = self.owner.root.groups
+            # SEŘAZENÍ HLAVNÍCH SKUPIN
+            groups = sorted(self.owner.root.groups, key=lambda g: g.name.lower())
+            
             for g in groups:
                 g_item = QTreeWidgetItem([g.name])
                 g_item.setIcon(0, icon_group)
@@ -1682,7 +2030,7 @@ class ExportWizard(QWizard):
             self.tree_source.expandAll()
             self.tree_source.blockSignals(False)
 
-            # 5. Create Slots (IDENTICKÉ)
+            # 5. Create Slots
             def create_slot_row(ph, is_bonus):
                 row_w = QWidget()
                 row_l = QHBoxLayout(row_w)
@@ -1693,6 +2041,7 @@ class ExportWizard(QWizard):
                 else: lbl_name.setStyleSheet("color: #42a5f5;")
                 
                 btn_assign = QPushButton("Vybrat...")
+                # Načteme existující přiřazení (pro Single mode)
                 qid = self.selection_map.get(ph)
                 if qid:
                     q = self.owner._find_question_by_id(qid)
@@ -1705,11 +2054,21 @@ class ExportWizard(QWizard):
                     btn_assign.setText("--- Volné ---")
                     
                 btn_assign.clicked.connect(lambda checked, p=ph: self._on_slot_assign_clicked(p))
+                
                 btn_clear = QPushButton("X")
                 btn_clear.setFixedWidth(30)
                 btn_clear.clicked.connect(lambda checked, p=ph: self._on_slot_clear_clicked(p))
-                row_l.addWidget(lbl_name); row_l.addWidget(btn_assign, 1); row_l.addWidget(btn_clear)
+                
+                # Uložíme do layoutu
+                row_l.addWidget(lbl_name)       # index 0
+                row_l.addWidget(btn_assign, 1)  # index 1 (stretch)
+                row_l.addWidget(btn_clear)      # index 2
+                
                 row_w.setProperty("placeholder", ph)
+                # Uložíme si informaci, zda je to bonusový slot (pro update_visuals)
+                row_w.setProperty("is_bonus", is_bonus)
+                
+                # Vložíme před stretch
                 self.layout_slots.insertWidget(self.layout_slots.count()-1, row_w)
 
             if self.placeholders_q:
@@ -1725,36 +2084,30 @@ class ExportWizard(QWizard):
                 for ph in self.placeholders_b: create_slot_row(ph, True)
             
             is_multi = (self.mode_group.checkedId() == 1)
+            
+            # Zavoláme metodu pro aktualizaci stavu tlačítek podle režimu
             self._update_slots_visuals(is_multi)
+            
+            # Pokud existuje metoda pro refresh stromu (v minulé verzi možná byla), zavoláme ji
             if hasattr(self, "_refresh_tree_visuals"): self._refresh_tree_visuals()
-            # Aktualizace info o výběru zdrojů (pokud se změnil počet placeholderů)
+            
+            # Update labelů pro vybrané zdroje
             if self.multi_selected_sources:
-                needed = len(self.placeholders_q)
-                # Musíme znovu spočítat total z vybraných ID (nemáme dialog instanci)
-                # Helper pro spočítání totalu z self.multi_selected_sources (které má 'count' ale pozor na duplicity/hierarchii)
-                # Protože 'multi_selected_sources' je jen seznam položek z dialogu (které jsou checked),
-                # a my jsme v dialogu zajistili, že checked rodič má 'count' všeho pod sebou.
-                # Pro rychlý odhad stačí sečíst 'count' u položek, které nemají rodiče v tomtéž seznamu?
-                # Nebo prostě vezmeme uložený stav textu? Ne, text se resetuje.
-                
-                # Jednodušší: Zavoláme "refresh" logiku, která sečte unikátní otázky
-                # Ale nemáme tu instanci dialogu.
-                # Zkusíme to odhadnout z uloženého 'count' v selected_items.
-                # V 'get_selected_items' z dialogu jsme vraceli checked items.
-                # Dialog logika '_count_checked_item' sčítala checked rodiče a ignorovala děti.
-                # My ale v 'multi_selected_sources' máme VŠECHNY checked (i děti, protože checkstate se propagoval).
-                
-                # ŘEŠENÍ: Pro správný součet tady v _init_page2 bychom potřebovali logiku z dialogu.
-                # Pro teď jen resetujeme label na neutrální nebo "Vybráno X zdrojů", aby to nemátlo.
-                
                 count_src = len(self.multi_selected_sources)
-                self.lbl_selected_sources.setText(f"Vybráno {count_src} zdrojů (klikněte pro kontrolu počtu)")
+                self.lbl_selected_sources.setText(f"Vybráno {count_src} zdrojů.")
                 self.lbl_selected_sources.setStyleSheet("color: #42a5f5; margin-left: 5px;")
-                    
+            
+            # Update labelů pro bonusové zdroje (pokud jsou vybrány)
+            if self.multi_selected_bonus_ids:
+                count_bonus = len(self.multi_selected_bonus_ids)
+                self.lbl_selected_bonus.setText(f"Vybráno konrétních: {count_bonus}")
+                self.lbl_selected_bonus.setStyleSheet("color: #ffea00; margin-left: 5px;")
+
         except Exception as e:
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Chyba", f"Chyba při inicializaci stránky 2:\n{e}")
+
 
     def _on_slot_assign_clicked(self, ph: str) -> None:
         # Jednoduchý výběr: Otevře dialog se seznamem dostupných otázek
@@ -2371,30 +2724,41 @@ class ExportWizard(QWizard):
         menu.exec(self.tree_source.viewport().mapToGlobal(position))
 
     def _assign_from_context(self, slot_name, qid):
+        # 1. Uložit přiřazení
         self.selection_map[slot_name] = qid
         
-        # Refresh slot UI
+        # 2. Aktualizovat UI Slotu (pravý panel)
+        found_widget = False
         for i in range(self.layout_slots.count()):
             w = self.layout_slots.itemAt(i).widget()
             if w and isinstance(w, QWidget):
                 children = w.findChildren(QLabel)
                 if children and children[0].text() == f"{slot_name}:":
-                    # Found slot widget
+                    # Našli jsme správný slot widget
+                    
+                    # Index 1 = Tlačítko s názvem (prostřední)
                     lbl_val = w.layout().itemAt(1).widget()
-                    btn_clr = w.layout().itemAt(3).widget()
+                    # Index 2 = Tlačítko Clear (napravo) - OPRAVENO z 3 na 2
+                    btn_clr = w.layout().itemAt(2).widget()
+                    
                     q = self.owner._find_question_by_id(qid)
-                    lbl_val.setText(q.title)
-                    lbl_val.setStyleSheet("color: white; font-weight: bold;")
-                    btn_clr.setEnabled(True)
+                    if q:
+                        lbl_val.setText(q.title)
+                        # Nastavíme styl tlačítka ve slotu (aby bylo vidět, že je plné)
+                        lbl_val.setStyleSheet("color: white; font-weight: bold;") 
+                        btn_clr.setEnabled(True)
+                        btn_clr.setVisible(True)
+                    found_widget = True
                     break
         
-        # Hide tree item
-        it = QTreeWidgetItemIterator(self.tree_source)
-        while it.value():
-            if it.value().data(0, Qt.UserRole) == qid:
-                it.value().setHidden(True)
-                break
-            it += 1
+        # 3. Aktualizovat vizuál stromu pomocí existující metody
+        # (Tato metoda projde strom a obarví vše, co je v selection_map)
+        if hasattr(self, "_refresh_tree_visuals"):
+            self._refresh_tree_visuals()
+        else:
+            # Fallback, pokud metoda neexistuje (pro jistotu, ale měla by tam být)
+            print("Warning: _refresh_tree_visuals method not found in ExportWizard.")
+            # Zde případně fallback na ruční obarvení, pokud by metoda chyběla
 
     def _init_page3(self):
         try:
@@ -2467,33 +2831,56 @@ class ExportWizard(QWizard):
             html += f"<h3 style='background-color: {sec_b_bg}; padding: 5px; border-left: 4px solid #ffcc00;'>2. Bonusové otázky</h3>"
             html += f"<table width='100%' border='0' cellspacing='0' cellpadding='5' style='color: {text_color};'>"
             for ph in self.placeholders_b:
-                qid = self.selection_map.get(ph)
-                if qid:
-                    q = self.owner._find_question_by_id(qid)
-                    if q:
-                        total_bonus_points += float(q.bonus_correct)
-                        min_loss += float(q.bonus_wrong)
-                        title_clean = re.sub(r'<[^>]+>', '', q.title)
-                        html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right' style='color:#81c784;'>+{q.bonus_correct} / <span style='color:#e57373;'>{q.bonus_wrong}</span></td></tr>"
+                if is_multi:
+                     html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td colspan='2' style='color:#ffcc00;'>[Náhodný výběr BONUS pro každou verzi]</td></tr>"
                 else:
-                    html += f"<tr><td width='100' style='color:#ff5555;'>{ph}:</td><td colspan='2' style='color:#ff5555;'>--- NEVYPLNĚNO ---</td></tr>"
+                    qid = self.selection_map.get(ph)
+                    if qid:
+                        q = self.owner._find_question_by_id(qid)
+                        if q:
+                            total_bonus_points += float(q.bonus_correct)
+                            min_loss += float(q.bonus_wrong)
+                            title_clean = re.sub(r'<[^>]+>', '', q.title)
+                            html += f"<tr><td width='100' style='color:#888;'>{ph}:</td><td><b>{title_clean}</b></td><td align='right' style='color:#81c784;'>+{q.bonus_correct} / <span style='color:#e57373;'>{q.bonus_wrong}</span></td></tr>"
+                    else:
+                        html += f"<tr><td width='100' style='color:#ff5555;'>{ph}:</td><td colspan='2' style='color:#ff5555;'>--- NEVYPLNĚNO ---</td></tr>"
             html += "</table>"
 
-            # Výpočet MaxBody
-            max_body_val = 10.0 + total_bonus_points
-
-            # Klasifikace
+            # 3. Klasifikace - LOGIKA PRO ZOBRAZENÍ
             html += f"<h3 style='background-color: {sec_s_bg}; padding: 5px; border-left: 4px solid #66bb6a;'>3. Klasifikace</h3>"
+            
+            if is_multi:
+                # REŽIM MULTI: Zobrazíme upozornění a obecnou tabulku
+                html += """
+                <p style='color: #ffcc00; font-weight: bold; border: 1px solid #ffcc00; padding: 5px;'>
+                ⚠ UPOZORNĚNÍ: V hromadném exportu jsou bonusové otázky voleny náhodně.<br>
+                Hodnoty Max. bodů a Min. bodů (a tím i intervaly známek) se budou lišit pro každou variantu.<br>
+                Tabulka níže je pouze orientační pro základ (10 bodů).</p>
+                """
+                max_txt = "10 + (bonus)"
+                min_txt = "(variabilní)"
+                val_A_top = "Max"
+                val_F_bot = "Min"
+                # Pro tabulku použijeme base 10, aby se vygenerovala čísla, ale horní mez označíme textem
+                max_body_val = 10.0 
+            else:
+                # REŽIM SINGLE: Standardní výpočet
+                max_body_val = 10.0 + total_bonus_points
+                max_txt = f"{max_body_val:.2f} (10 + {total_bonus_points:.2f})"
+                min_txt = f"{min_loss:.2f}"
+                val_A_top = f"{max_body_val:.2f}"
+                val_F_bot = f"{min_loss:.2f}"
+
             html += f"""
-            <p><b>Max. bodů:</b> {max_body_val:.2f} (10 + {total_bonus_points:.2f}) &nbsp;&nbsp;|&nbsp;&nbsp; <b>Min. bodů (penalizace):</b> {min_loss:.2f}</p>
+            <p><b>Max. bodů:</b> {max_txt} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Min. bodů (penalizace):</b> {min_txt}</p>
             <table width='60%' border='1' cellspacing='0' cellpadding='5' style='border-collapse: collapse; border: 1px solid {border_color}; color: {text_color};'>
                 <tr style='background-color: #333;'><th>Známka</th><th>Interval</th></tr>
-                <tr><td align='center' style='color:#81c784'><b>A</b></td><td>&lt; 9.2 ; <b>{max_body_val:.2f}</b> &gt;</td></tr>
+                <tr><td align='center' style='color:#81c784'><b>A</b></td><td>&lt; 9.2 ; <b>{val_A_top}</b> &gt;</td></tr>
                 <tr><td align='center' style='color:#a5d6a7'><b>B</b></td><td>&lt; 8.4 ; 9.2 )</td></tr>
                 <tr><td align='center' style='color:#c8e6c9'><b>C</b></td><td>&lt; 7.6 ; 8.4 )</td></tr>
                 <tr><td align='center' style='color:#fff59d'><b>D</b></td><td>&lt; 6.8 ; 7.6 )</td></tr>
                 <tr><td align='center' style='color:#ffcc80'><b>E</b></td><td>&lt; 6.0 ; 6.8 )</td></tr>
-                <tr><td align='center' style='color:#ef5350'><b>F</b></td><td>&lt; <b>{min_loss:.2f}</b> ; 6.0 )</td></tr>
+                <tr><td align='center' style='color:#ef5350'><b>F</b></td><td>&lt; <b>{val_F_bot}</b> ; 6.0 )</td></tr>
             </table>
             """
             html += "</body></html>"
@@ -2504,6 +2891,7 @@ class ExportWizard(QWizard):
             import traceback
             traceback.print_exc()
             self.preview_edit.setText(f"Chyba při generování náhledu: {e}")
+
 
     def _round_dt_to_10m(self, dt: QDateTime) -> QDateTime:
         m = dt.time().minute()
@@ -2563,8 +2951,11 @@ class ExportWizard(QWizard):
         
         # --- PŘÍPRAVA POOLU OTÁZEK ---
         question_pool = []
+        # --- NOVÉ: Pool pro bonusové otázky ---
+        question_pool_bonus = []
+        
         if is_multi:
-            def collect_questions(group_id, is_subgroup):
+            def collect_questions(group_id, is_subgroup, target_type="classic"):
                 qs = []
                 nodes_to_visit = list(self.owner.root.groups)
                 target_node = None
@@ -2580,7 +2971,7 @@ class ExportWizard(QWizard):
                     def extract_q(node):
                         valid_qs = []
                         if hasattr(node, "questions"):
-                            valid_qs.extend([q.id for q in node.questions if q.type == "classic"])
+                            valid_qs.extend([q.id for q in node.questions if q.type == target_type])
                         if hasattr(node, "subgroups") and node.subgroups:
                             for sub in node.subgroups:
                                 valid_qs.extend(extract_q(sub))
@@ -2588,7 +2979,7 @@ class ExportWizard(QWizard):
                     qs = extract_q(target_node)
                 return qs
 
-            # Zdroje
+            # 1. Zdroje pro KLASICKÉ otázky
             sources_to_process = self.multi_selected_sources
             if not sources_to_process:
                 sources_to_process = [{"id": g.id, "type": "group"} for g in self.owner.root.groups]
@@ -2597,10 +2988,22 @@ class ExportWizard(QWizard):
                 sid = source["id"]
                 stype = source["type"]
                 is_sub = (stype == "subgroup")
-                pool_ids = collect_questions(sid, is_sub)
+                pool_ids = collect_questions(sid, is_sub, "classic")
                 question_pool.extend(pool_ids)
             
             question_pool = list(set(question_pool))
+            
+            # 2. Zdroje pro BONUSOVÉ otázky
+            # Pokud uživatel vybral konkrétní, použijeme ty. Jinak sebereme VŠECHNY dostupné bonusy.
+            if self.multi_selected_bonus_ids:
+                question_pool_bonus = list(self.multi_selected_bonus_ids)
+            else:
+                # Pokud není vybráno, vezmeme bonusy ze všech skupin
+                all_groups = [{"id": g.id, "type": "group"} for g in self.owner.root.groups]
+                for g_src in all_groups:
+                    b_ids = collect_questions(g_src["id"], False, "bonus")
+                    question_pool_bonus.extend(b_ids)
+                question_pool_bonus = list(set(question_pool_bonus))
 
         base_output_path = self.output_path
         success_count = 0
@@ -2632,6 +3035,8 @@ class ExportWizard(QWizard):
                     import random
                     # Pro multi režim ignorujeme ruční výběr
                     current_selection = {} 
+                    
+                    # A. Klasické otázky
                     targets = self.placeholders_q
                     needed = len(targets)
                     
@@ -2643,6 +3048,22 @@ class ExportWizard(QWizard):
                         if len(question_pool) > 0:
                             for ph in targets:
                                 current_selection[ph] = random.choice(question_pool)
+                    
+                    # B. Bonusové otázky
+                    targets_b = self.placeholders_b
+                    needed_b = len(targets_b)
+                    
+                    if len(question_pool_bonus) >= needed_b:
+                        picked_b = random.sample(question_pool_bonus, needed_b)
+                        for idx, ph in enumerate(targets_b):
+                            current_selection[ph] = picked_b[idx]
+                    else:
+                        if len(question_pool_bonus) > 0:
+                             for idx, ph in enumerate(targets_b):
+                                 # Pokud nemáme dost unikátních, musíme opakovat, nebo vzít co je
+                                 # Zde fallback: pokud dojdou, bereme random s opakováním
+                                 current_selection[ph] = random.choice(question_pool_bonus)
+
                 
                 repl_plain: Dict[str, str] = {}
                 
@@ -2689,9 +3110,6 @@ class ExportWizard(QWizard):
                         min_loss += float(q.bonus_wrong)
                 
                 # Base points - zde fixně 10, nebo spočítat z klasických
-                # Pro jednoduchost bereme 10 jako základ, pokud to tak máte v šabloně
-                # Nebo spočítat: len(placeholders_q)
-                # Zde použijeme logiku z předchozí verze (10.0)
                 max_body = 10.0 + total_bonus
                 
                 repl_plain["MaxBody"] = f"{max_body:.2f}"
@@ -2699,11 +3117,16 @@ class ExportWizard(QWizard):
                 repl_plain["MinBody"] = f"{min_loss:.2f}"
                 repl_plain["MINBODY"] = f"{min_loss:.2f}"
 
-                rich_map: Dict[str, str] = {}
+                # --- ÚPRAVA: Podpora obrázků (tuple) ---
+                rich_map: Dict[str, object] = {}
                 for ph, qid in current_selection.items():
                     q = self.owner._find_question_by_id(qid)
                     if q:
-                        rich_map[ph] = q.text_html
+                        img_path = getattr(q, "image_path", None)
+                        rich_map[ph] = (q.text_html, img_path, float(getattr(q, "image_width_cm", 0.0) or 0.0), float(getattr(q, "image_height_cm", 0.0) or 0.0))
+                    else:
+                        rich_map[ph] = ("", None)
+                # ----------------------------------------
 
                 if is_multi:
                     p = Path(base_output_path)
@@ -2971,95 +3394,469 @@ class MainWindow(QMainWindow):
 
     def __init__(self, data_path: Optional[Path] = None) -> None:
         super().__init__()
+        # ZMĚNA: Titulek s verzí
         self.setWindowTitle(APP_NAME)
-        self.resize(1800, 900)
-
+        self.resize(1800, 1600)
+    
         self.project_root = Path.cwd()
         default_data_dir = self.project_root / "data"
         default_data_dir.mkdir(parents=True, exist_ok=True)
         self.data_path = data_path or (default_data_dir / "questions.json")
-
+    
+        self.images_dir = default_data_dir / "obrázky"
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+    
         # Aplikace ikona (pokud existuje)
         icon_file = self.project_root / "icon" / "icon.png"
         if icon_file.exists():
             app_icon = QIcon(str(icon_file))
             self.setWindowIcon(app_icon)
             QApplication.instance().setWindowIcon(app_icon)
-
+    
         self.root: RootData = RootData(groups=[])
+    
+        # NOVÉ: aby koš fungoval i když RootData nemá trash jako pole (minimal-change)
+        if not hasattr(self.root, "trash") or not isinstance(getattr(self.root, "trash", None), list):
+            self.root.trash = []
+    
         self._current_question_id: Optional[str] = None
         self._current_node_kind: Optional[str] = None
-
+    
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.setInterval(1200)
         self._autosave_timer.timeout.connect(self._autosave_current_question)
-
+    
         self._build_ui()
         self._connect_signals()
         
-
         self.load_data()
+    
+        # NOVÉ: po load znovu zajistit koš (kdyby JSON byl starší bez trash)
+        if not hasattr(self.root, "trash") or not isinstance(getattr(self.root, "trash", None), list):
+            self.root.trash = []
+    
         self._refresh_tree()
         self._refresh_funny_answers_tab()
-
+    
+        # NOVÉ: refresh koše po načtení
+        self._refresh_trash_table()
+    
         # ZMĚNA: Strom 60%, Editor 40% (cca 840px : 560px)
-        # Nyní, když je self.splitter správně nastaven v _build_ui, můžeme přímo nastavit velikosti.
         self.splitter.setSizes([940, 860])
+
+    def _init_trash_tab(self) -> None:
+        self.tab_trash = QWidget()
+        trash_layout = QVBoxLayout(self.tab_trash)
+        trash_layout.setContentsMargins(4, 4, 4, 4)
+        trash_layout.setSpacing(6)
+    
+        self.table_trash = QTableWidget(0, 5)
+        self.table_trash.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_trash.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table_trash.setSortingEnabled(True)
+        self.table_trash.verticalHeader().setVisible(False)
+        self.table_trash.setShowGrid(False)
+        self.table_trash.setAlternatingRowColors(True)
+    
+        self.table_trash.setStyleSheet("""
+            QTableWidget {
+                background-color: #121212;
+                color: #e0e0e0;
+                gridline-color: #333333;
+                border: 1px solid #333;
+                font-family: 'Consolas', 'Monospace', 'Courier New';
+                selection-background-color: #c62828;
+                selection-color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #1e1e1e;
+                color: #9e9e9e;
+                padding: 4px;
+                border: 1px solid #333;
+                font-weight: bold;
+            }
+        """)
+    
+        self.table_trash.setHorizontalHeaderLabels([
+            "NÁZEV OTÁZKY",
+            "TYP",
+            "SMAZÁNO",
+            "PŮVODNÍ SKUPINA",
+            "PŮVODNÍ CESTA (PODSKUPINY)",
+        ])
+        header = self.table_trash.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+    
+        trash_layout.addWidget(self.table_trash, 1)
+    
+        self.trash_detail = QTextEdit()
+        self.trash_detail.setReadOnly(True)
+        self.trash_detail.setPlaceholderText("Vyber otázku v koši pro zobrazení detailu…")
+        self.trash_detail.setFixedHeight(220)
+        trash_layout.addWidget(self.trash_detail)
+    
+        btns = QHBoxLayout()
+        self.btn_trash_restore = QPushButton("Obnovit")
+        self.btn_trash_delete = QPushButton("Trvale smazat")
+        self.btn_trash_empty = QPushButton("Vysypat koš")
+    
+        self.btn_trash_delete.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 4px 8px;")
+        self.btn_trash_empty.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 4px 8px;")
+    
+        btns.addWidget(self.btn_trash_restore)
+        btns.addWidget(self.btn_trash_delete)
+        btns.addStretch()
+        btns.addWidget(self.btn_trash_empty)
+        trash_layout.addLayout(btns)
+    
+        self.left_tabs.addTab(self.tab_trash, "Koš")
+    
+        self.btn_trash_restore.setEnabled(False)
+        self.btn_trash_delete.setEnabled(False)
+        self.btn_trash_empty.setEnabled(False)
+        
+    def showEvent(self, event: QShowEvent) -> None:
+        """Po prvním zobrazení obnoví stav rozbalení stromu (asynchronně po vykreslení)."""
+        super().showEvent(event)
+        QTimer.singleShot(0, self._restore_tree_expansion_state_on_show)
+    
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Před zavřením uloží stav rozbalení stromu (per projekt)."""
+        try:
+            self._save_tree_expansion_state_on_close()
+        except Exception:
+            pass
+        super().closeEvent(event)
+        
+    from PySide6.QtCore import QSettings, QTimer
+    from PySide6.QtGui import QShowEvent, QCloseEvent
+    import hashlib, json
+    
+    def _settings_key_for_tree_state(self) -> str:
+        """
+        Unikátní klíč pro QSettings odvozený od cesty projektu (per projekt).
+        """
+        try:
+            root_str = str(self.project_root.resolve()) if self.project_root else ""
+        except Exception:
+            root_str = str(self.project_root) if hasattr(self, "project_root") else ""
+        digest = hashlib.sha1(root_str.encode("utf-8", "ignore")).hexdigest()
+        return f"tree_state/{digest}"
+    
+    def _save_tree_expansion_state_on_close(self) -> None:
+        """
+        Uloží *viditelně rozbalené* uzly stromu otázek (group/subgroup) do QSettings.
+        Využívá existující _capture_tree_expansion_state().
+        """
+        try:
+            expanded = self._capture_tree_expansion_state()  # set[(kind,id)]
+            payload = [{"kind": k, "id": i} for (k, i) in sorted(expanded)]
+            settings = QSettings()
+            settings.beginGroup(self._settings_key_for_tree_state())
+            settings.setValue("questions_expanded", json.dumps(payload, ensure_ascii=False))
+            settings.endGroup()
+        except Exception:
+            pass  # nechceme blokovat zavření
+    
+    def _restore_tree_expansion_state_on_show(self) -> None:
+        """
+        Jednorázová obnova rozbalení po startu. Nepřestavuje strom, jen aplikuje
+        rozbalení na již existující položky přes _apply_tree_expansion_state(...).
+        """
+        if getattr(self, "_expansion_restored_once", False):
+            return
+        self._expansion_restored_once = True
+    
+        try:
+            settings = QSettings()
+            settings.beginGroup(self._settings_key_for_tree_state())
+            raw = settings.value("questions_expanded", "")
+            settings.endGroup()
+            if not raw:
+                return
+    
+            try:
+                data = json.loads(raw)
+            except Exception:
+                return
+    
+            expanded: set[tuple[str, str]] = set()
+            for rec in data or []:
+                k = (rec.get("kind"), rec.get("id"))
+                if k[0] in ("group", "subgroup") and k[1]:
+                    expanded.add(k)
+    
+            # Potlačíme autoexpand jen během aplikace rozbalení
+            self._suppress_auto_expand = True
+            try:
+                self._apply_tree_expansion_state(expanded)
+            finally:
+                self._suppress_auto_expand = False
+        except Exception:
+            pass
+
+    def _capture_tree_expansion_state(self) -> set[tuple[str, str]]:
+        """
+        Vrátí množinu klíčů ('group'|'subgroup', id) pro položky, které jsou
+        *viditelně* rozbalené – tj. uzel je isExpanded() a zároveň jsou rozbalení
+        i všichni jeho předci. Otázky (kind=='question') ignorujeme.
+        """
+        expanded: set[tuple[str, str]] = set()
+    
+        def rec(item: QTreeWidgetItem, ancestors_expanded: bool) -> None:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind") or meta.get("type")
+            _id = meta.get("id")
+    
+            # uzel sám je rozbalený?
+            this_expanded = bool(item.isExpanded())
+    
+            # do množiny zapíšeme jen uzly, které jsou skutečně "viditelně" rozbalené
+            if ancestors_expanded and this_expanded and kind in ("group", "subgroup") and _id:
+                expanded.add((kind, _id))
+    
+            # do dětí předáváme informaci, zda jsou *všichni předci* vč. aktuálního rozbalení
+            next_anc = ancestors_expanded and this_expanded
+            for i in range(item.childCount()):
+                rec(item.child(i), next_anc)
+    
+        for i in range(self.tree.topLevelItemCount()):
+            rec(self.tree.topLevelItem(i), True)
+    
+        return expanded
+    
+    def _apply_tree_expansion_state(self, expanded: set[tuple[str, str]]) -> None:
+        """
+        Obnoví stav rozbalení:
+        1) nejprve vše (group/subgroup) sbalí,
+        2) poté podle 'expanded' opět rozbalí.
+        """
+        def collapse_all(item: QTreeWidgetItem) -> None:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind") or meta.get("type")
+            if kind in ("group", "subgroup"):
+                item.setExpanded(False)
+            for i in range(item.childCount()):
+                collapse_all(item.child(i))
+    
+        def expand_marked(item: QTreeWidgetItem) -> None:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind") or meta.get("type")
+            _id = meta.get("id")
+            if kind in ("group", "subgroup") and _id and (kind, _id) in expanded:
+                # zajistit rozbalené rodiče
+                parent = item.parent()
+                while parent:
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+                item.setExpanded(True)
+            for i in range(item.childCount()):
+                expand_marked(item.child(i))
+    
+        for i in range(self.tree.topLevelItemCount()):
+            collapse_all(self.tree.topLevelItem(i))
+        for i in range(self.tree.topLevelItemCount()):
+            expand_marked(self.tree.topLevelItem(i))
+            
+    def _is_subgroup_expanded(self, subgroup_id: str) -> bool:
+        """Vrátí True, pokud je podskupina s daným ID právě rozbalená ve stromu."""
+        if not subgroup_id:
+            return False
+        def rec(item: QTreeWidgetItem) -> bool:
+            data = item.data(0, Qt.UserRole) or {}
+            if data.get("kind") == "subgroup" and data.get("id") == subgroup_id:
+                return item.isExpanded()
+            for i in range(item.childCount()):
+                if rec(item.child(i)):
+                    return True
+            return False
+        for i in range(self.tree.topLevelItemCount()):
+            if rec(self.tree.topLevelItem(i)):
+                return True
+        return False
+    
+    def _expand_subgroup_by_id(self, subgroup_id: str) -> None:
+        """Rozbalí podskupinu (a její rodiče), pokud existuje ve stromu."""
+        if not subgroup_id:
+            return
+        def rec(item: QTreeWidgetItem) -> bool:
+            data = item.data(0, Qt.UserRole) or {}
+            if data.get("kind") == "subgroup" and data.get("id") == subgroup_id:
+                parent = item.parent()
+                while parent:
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+                item.setExpanded(True)
+                return True
+            for i in range(item.childCount()):
+                if rec(item.child(i)):
+                    return True
+            return False
+        for i in range(self.tree.topLevelItemCount()):
+            if rec(self.tree.topLevelItem(i)):
+                break
 
     def _duplicate_question(self) -> None:
         kind, meta = self._selected_node()
         if kind != "question":
             return
-
+    
         gid = meta.get("parent_group_id")
         sgid = meta.get("parent_subgroup_id")
         qid = meta.get("id")
-
+    
         q_orig = self._find_question(gid, sgid, qid)
         if not q_orig:
             return
-
-        # Vytvoření kopie
+    
+        # 1) uložit stav rozbalení + zda byla cílová podskupina rozbalená
+        expanded_before = self._capture_tree_expansion_state()
+        was_expanded = ("subgroup", sgid) in expanded_before
+    
+        # 2) vytvořit kopii (bez funny_answers)
         data = asdict(q_orig)
         data["id"] = str(_uuid.uuid4())
         data["title"] = (q_orig.title or "Otázka") + " (kopie)"
-        
+        # --- NOVĚ: nepřenášet vtipné odpovědi ---
+        if "funny_answers" in data:
+            data["funny_answers"] = []
         new_q = Question(**data)
-
-        # Vložení do správné podskupiny
+        # pojistka i na instanci:
+        try:
+            new_q.funny_answers = []
+        except Exception:
+            pass
+    
+        # 3) vložit do cílové podskupiny
         target_sg = self._find_subgroup(gid, sgid)
-        if target_sg:
-            target_sg.questions.append(new_q)
+        if not target_sg:
+            return
+        target_sg.questions.append(new_q)
+    
+        # 4) potlačit auto-expand během refresh
+        self._suppress_auto_expand = True
+        try:
             self._refresh_tree()
-            self._select_question(new_q.id)
-            self.save_data()
-            self.statusBar().showMessage("Otázka byla duplikována.", 3000)
+        finally:
+            self._suppress_auto_expand = False
+    
+        # 5) obnovit původní rozbalení
+        self._apply_tree_expansion_state(expanded_before)
+    
+        # 6) pokud byla cílová podskupina původně sbalená, rozbal jen ji
+        if not was_expanded:
+            self._expand_subgroup_by_id(sgid)
+    
+        # 7) vybrat novou otázku, uložit
+        self._select_question(new_q.id)
+        self.save_data()
+        self.statusBar().showMessage("Otázka byla duplikována.", 3000)
+            
+    def _duplicate_question_to_subgroup(self) -> None:
+        """Duplikuje aktuálně vybranou otázku do uživatelem zvolené podskupiny."""
+        kind, meta = self._selected_node()
+        if kind != "question":
+            return
+    
+        gid_src = meta.get("parent_group_id")
+        sgid_src = meta.get("parent_subgroup_id")
+        qid = meta.get("id")
+    
+        q_orig = self._find_question(gid_src, sgid_src, qid)
+        if not q_orig:
+            return
+    
+        dlg = MoveTargetDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+    
+        gid_tgt, sgid_tgt = dlg.selected_target()
+        if not gid_tgt:
+            return
+    
+        # najít / vytvořit cílovou podskupinu
+        target_sg = self._find_subgroup(gid_tgt, sgid_tgt)
+        if not target_sg:
+            g = self._find_group(gid_tgt)
+            if not g:
+                return
+            if g.subgroups:
+                target_sg = g.subgroups[0]
+                sgid_tgt = target_sg.id
+            else:
+                new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
+                g.subgroups.append(new_sg)
+                target_sg = new_sg
+                sgid_tgt = new_sg.id
+    
+        # 1) uložit stav rozbalení + zda byla cílová podskupina rozbalená
+        expanded_before = self._capture_tree_expansion_state()
+        was_expanded = ("subgroup", sgid_tgt) in expanded_before
+    
+        # 2) vytvořit kopii (bez funny_answers)
+        data = asdict(q_orig)
+        data["id"] = str(_uuid.uuid4())
+        data["title"] = (q_orig.title or "Otázka") + " (kopie)"
+        # --- NOVĚ: nepřenášet vtipné odpovědi ---
+        if "funny_answers" in data:
+            data["funny_answers"] = []
+        new_q = Question(**data)
+        # pojistka i na instanci:
+        try:
+            new_q.funny_answers = []
+        except Exception:
+            pass
+    
+        # 3) vložit do cílové podskupiny
+        target_sg.questions.append(new_q)
+    
+        # 4) potlačit auto-expand během refresh
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+    
+        # 5) obnovit původní rozbalení
+        self._apply_tree_expansion_state(expanded_before)
+    
+        # 6) pokud byla cílová podskupina původně sbalená, rozbal jen ji
+        if not was_expanded:
+            self._expand_subgroup_by_id(sgid_tgt)
+    
+        # 7) vybrat novou otázku, uložit
+        self._select_question(new_q.id)
+        self.save_data()
+        self.statusBar().showMessage("Otázka byla duplikována do zvolené podskupiny.", 3000)
 
     def _build_ui(self) -> None:
-        # ... (All previous code identical until the toolbar part) ...
         # Hlavní container
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        
+    
         self.splitter = QSplitter()
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(8)
-
+    
         # LEVÝ PANEL
         left_panel_container = QWidget()
         left_container_layout = QVBoxLayout(left_panel_container)
         left_container_layout.setContentsMargins(0, 0, 0, 0)
         self.left_tabs = QTabWidget()
-        
+    
         # ZÁLOŽKA 1: OTÁZKY
         self.tab_questions = QWidget()
         questions_layout = QVBoxLayout(self.tab_questions)
         questions_layout.setContentsMargins(4, 4, 4, 4)
         questions_layout.setSpacing(6)
-        
+    
         filter_bar = QWidget()
         filter_layout = QHBoxLayout(filter_bar)
         filter_layout.setContentsMargins(0, 0, 0, 0)
@@ -3072,40 +3869,40 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.btn_move_selected)
         filter_layout.addWidget(self.btn_delete_selected)
         questions_layout.addWidget(filter_bar)
-        
+    
         self.tree = DnDTree(self)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         questions_layout.addWidget(self.tree, 1)
-        
+    
         # Legenda
         legend_box = QFrame()
         legend_box.setStyleSheet("background-color: #2d2d2d; border-radius: 4px;")
         legend_layout = QHBoxLayout(legend_box)
         legend_layout.setContentsMargins(8, 4, 8, 4)
         legend_layout.setSpacing(15)
-        
+    
         def add_legend_item(text, color_hex):
             lbl = QLabel(f"<span style='color:{color_hex}; font-size:14px;'>■</span> <span style='color:#cccccc;'>{text}</span>")
             lbl.setTextFormat(Qt.RichText)
             lbl.setStyleSheet("border: none; background: transparent;")
             legend_layout.addWidget(lbl)
-            
+    
         add_legend_item("Skupina", "#ff5252")
         add_legend_item("Podskupina", "#ff8a80")
         add_legend_item("Klasická", "#42a5f5")
         add_legend_item("BONUS", "#ffea00")
         legend_layout.addStretch()
-        
+    
         questions_layout.addWidget(legend_box)
-        
+    
         self.left_tabs.addTab(self.tab_questions, "Otázky")
-
+    
         # ZÁLOŽKA 2: HISTORIE
         self.tab_history = QWidget()
         history_layout = QVBoxLayout(self.tab_history)
         history_layout.setContentsMargins(4, 4, 4, 4)
-        
+    
         self.table_history = QTableWidget(0, 2)
         self.table_history.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_history.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -3113,50 +3910,53 @@ class MainWindow(QMainWindow):
         self.table_history.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_history.customContextMenuRequested.connect(self._on_history_context_menu)
         history_layout.addWidget(self.table_history)
-        
+    
         h_btns = QHBoxLayout()
         btn_refresh_hist = QPushButton("Obnovit historii")
         btn_refresh_hist.clicked.connect(self._refresh_history_table)
-        
+    
         btn_clear_hist = QPushButton("Vymazat celou historii")
         btn_clear_hist.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 4px 8px;")
         btn_clear_hist.clicked.connect(self._clear_all_history)
-        
+    
         h_btns.addWidget(btn_refresh_hist)
         h_btns.addStretch()
         h_btns.addWidget(btn_clear_hist)
         history_layout.addLayout(h_btns)
-        
+    
         self.left_tabs.addTab(self.tab_history, "Historie")
-        
+    
+        # NOVÉ: ZÁLOŽKA 3: KOŠ
+        self._init_trash_tab()
+    
         self._init_funny_answers_tab()
         left_container_layout.addWidget(self.left_tabs)
-
+    
         # PRAVÝ PANEL
         self.detail_stack = QWidget()
         self.detail_layout = QVBoxLayout(self.detail_stack)
         self.detail_layout.setContentsMargins(6, 6, 6, 6)
         self.detail_layout.setSpacing(8)
-
+    
         self.editor_toolbar = QToolBar("Formát")
         self.editor_toolbar.setIconSize(QSize(18, 18))
-        
-        # --- PŘIDAT TENTO BLOK PRO LEPŠÍ VZHLED ---
+    
+        # --- STYLING EDITOR TOOLBARU ---
         self.editor_toolbar.setStyleSheet("""
             QToolBar {
                 border-bottom: 1px solid #3e3e3e;
                 background-color: #2d2d2d;
-                spacing: 4px; /* Mezera mezi tlačítky */
+                spacing: 4px;
             }
             QToolButton {
-                background-color: #383838; /* Jemné šedé pozadí */
-                border: 1px solid #505050; /* Viditelný okraj */
+                background-color: #383838;
+                border: 1px solid #505050;
                 border-radius: 3px;
                 padding: 2px 4px;
                 color: #e0e0e0;
             }
             QToolButton:checked {
-                background-color: #4a90e2; /* Výrazná barva pro aktivní stav (B/I/U) */
+                background-color: #4a90e2;
                 border-color: #4a90e2;
                 color: white;
             }
@@ -3167,15 +3967,13 @@ class MainWindow(QMainWindow):
             QToolButton:pressed {
                 background-color: #252525;
             }
-            /* Separátor */
             QToolBar::separator {
                 background: #555;
                 width: 1px;
                 margin: 4px 4px;
             }
         """)
-        # ------------------------------------------
-
+    
         self.action_bold = QAction("Tučné", self); self.action_bold.setCheckable(True); self.action_bold.setShortcut(QKeySequence.Bold)
         self.action_italic = QAction("Kurzíva", self); self.action_italic.setCheckable(True); self.action_italic.setShortcut(QKeySequence.Italic)
         self.action_underline = QAction("Podtržení", self); self.action_underline.setCheckable(True); self.action_underline.setShortcut(QKeySequence.Underline)
@@ -3205,7 +4003,7 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.addAction(self.action_align_center)
         self.editor_toolbar.addAction(self.action_align_right)
         self.editor_toolbar.addAction(self.action_align_justify)
-
+    
         self.form_layout = QFormLayout()
         self.form_layout.setLabelAlignment(Qt.AlignLeft)
         self.title_edit = QLineEdit()
@@ -3214,17 +4012,88 @@ class MainWindow(QMainWindow):
         self.spin_points = QSpinBox(); self.spin_points.setRange(-999, 999); self.spin_points.setValue(1)
         self.spin_bonus_correct = QDoubleSpinBox(); self.spin_bonus_correct.setDecimals(2); self.spin_bonus_correct.setSingleStep(0.01); self.spin_bonus_correct.setRange(-999.99, 999.99); self.spin_bonus_correct.setValue(1.00)
         self.spin_bonus_wrong = QDoubleSpinBox(); self.spin_bonus_wrong.setDecimals(2); self.spin_bonus_wrong.setSingleStep(0.01); self.spin_bonus_wrong.setRange(-999.99, 999.99); self.spin_bonus_wrong.setValue(0.00)
-        
+    
+        self.image_path_edit = QLineEdit()
+        self.image_path_edit.setPlaceholderText("Cesta k obrázku (volitelné)…")
+        self.btn_choose_image = QPushButton("Vybrat…")
+        self.btn_clear_image = QPushButton("Smazat")
+        img_row = QWidget()
+        img_row_l = QHBoxLayout(img_row)
+        img_row_l.setContentsMargins(0, 0, 0, 0)
+        img_row_l.setSpacing(6)
+        img_row_l.addWidget(self.image_path_edit, 1)
+        img_row_l.addWidget(self.btn_choose_image)
+        img_row_l.addWidget(self.btn_clear_image)
+    
         self.form_layout.addRow("Název otázky:", self.title_edit)
         self.form_layout.addRow("Typ otázky:", self.combo_type)
+        self.form_layout.addRow("Obrázek:", img_row)
+    
+        # Aktuální velikost obrázku (cm) – pouze informativní (dle DPI v souboru / fallback)
+        self.lbl_img_actual_size_label = QLabel("Aktuální velikost (cm):")
+        self.lbl_img_actual_size = QLabel("")
+        self.lbl_img_actual_size.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_img_actual_size.setStyleSheet("color: #cfcfcf;")
+        self.form_layout.addRow(self.lbl_img_actual_size_label, self.lbl_img_actual_size)
+    
+        # Rozměry obrázku v DOCX (cm) – použije se při exportu
+        self.spin_img_w_cm = QDoubleSpinBox()
+        self.spin_img_w_cm.setRange(0.0, 200.0)
+        self.spin_img_w_cm.setDecimals(2)
+        self.spin_img_w_cm.setSingleStep(0.10)
+        self.spin_img_w_cm.setSuffix(" cm")
+        self.spin_img_w_cm.setValue(14.00)
+    
+        self.spin_img_h_cm = QDoubleSpinBox()
+        self.spin_img_h_cm.setRange(0.0, 200.0)
+        self.spin_img_h_cm.setDecimals(2)
+        self.spin_img_h_cm.setSingleStep(0.10)
+        self.spin_img_h_cm.setSuffix(" cm")
+        self.spin_img_h_cm.setValue(0.00)
+    
+        img_size_row = QWidget()
+        img_size_l = QHBoxLayout(img_size_row)
+        img_size_l.setContentsMargins(0, 0, 0, 0)
+        img_size_l.setSpacing(6)
+        img_size_l.addWidget(QLabel("Šířka:"), 0)
+        img_size_l.addWidget(self.spin_img_w_cm, 0)
+        img_size_l.addSpacing(12)
+        img_size_l.addWidget(QLabel("Výška:"), 0)
+        img_size_l.addWidget(self.spin_img_h_cm, 0)
+        img_size_l.addStretch(1)
+    
+        # defaultně deaktivované – aktivuje se jen když otázka má obrázek
+        self.spin_img_w_cm.setEnabled(False)
+        self.spin_img_h_cm.setEnabled(False)
+    
+        self.lbl_img_export_size = QLabel("Velikost pro export (cm):")
+        self.img_size_row = img_size_row
+        self.form_layout.addRow(self.lbl_img_export_size, self.img_size_row)
+    
+        self.chk_img_keep_aspect = QCheckBox("Zachovat poměr stran")
+        self.chk_img_keep_aspect.setChecked(True)
+        self.chk_img_keep_aspect.setEnabled(False)
+        self.chk_img_keep_aspect.setVisible(False)
+        self.form_layout.addRow(self.chk_img_keep_aspect)
+    
+        # Interní pomocné flagy pro synchronizaci rozměrů obrázku (aby nevznikaly smyčky signálů)
+        self._img_size_sync_block = False
+        self._img_ratio_hw = None  # height/width poměr z pixelů aktuálního obrázku
+    
+        # defaultně skryté – zobrazí se jen když otázka má obrázek
+        self.lbl_img_actual_size_label.setVisible(False)
+        self.lbl_img_actual_size.setVisible(False)
+        self.lbl_img_export_size.setVisible(False)
+        self.img_size_row.setVisible(False)
+    
         self.form_layout.addRow("Body (klasická):", self.spin_points)
         self.form_layout.addRow("Body za správně (BONUS):", self.spin_bonus_correct)
         self.form_layout.addRow("Body za špatně (BONUS):", self.spin_bonus_wrong)
-
+    
         self.edit_correct_answer = QTextEdit()
         self.edit_correct_answer.setPlaceholderText("Volitelný text správné odpovědi...")
         self.edit_correct_answer.setFixedHeight(60)
-        
+    
         self.funny_container = QWidget()
         fc_layout = QVBoxLayout(self.funny_container)
         fc_layout.setContentsMargins(0,0,0,0)
@@ -3244,68 +4113,68 @@ class MainWindow(QMainWindow):
         btns_layout.addStretch()
         fc_layout.addLayout(btns_layout)
         fc_layout.addWidget(self.table_funny)
-
+    
         self.text_edit = QTextEdit()
         self.text_edit.setAcceptRichText(True)
         self.text_edit.setPlaceholderText("Sem napište znění otázky…\nPodporováno: tučné, kurzíva, podtržení, barva, odrážky, zarovnání.")
         self.text_edit.setMinimumHeight(200)
-
+    
         self.btn_save_question = QPushButton("Uložit změny otázky"); self.btn_save_question.setDefault(True)
-        
+    
         self.rename_panel = QWidget()
         rename_layout = QFormLayout(self.rename_panel)
         self.rename_line = QLineEdit()
         self.btn_rename = QPushButton("Uložit název")
         rename_layout.addRow("Název:", self.rename_line)
         rename_layout.addRow(self.btn_rename)
-
+    
         self.lbl_content = QLabel("<b>Obsah otázky:</b>")
         self.lbl_correct = QLabel("<b>Správná odpověď:</b>")
         self.lbl_funny = QLabel("<b>Vtipné odpovědi:</b>")
-        
+    
         self.detail_layout.addWidget(self.editor_toolbar)
         self.detail_layout.addLayout(self.form_layout)
         self.detail_layout.addWidget(self.lbl_content)
-        self.detail_layout.addWidget(self.text_edit, 1) 
+        self.detail_layout.addWidget(self.text_edit, 1)
         self.detail_layout.addWidget(self.lbl_correct)
         self.detail_layout.addWidget(self.edit_correct_answer)
         self.detail_layout.addWidget(self.lbl_funny)
         self.detail_layout.addWidget(self.funny_container)
         self.detail_layout.addWidget(self.btn_save_question)
         self.detail_layout.addWidget(self.rename_panel)
-
+    
         self._set_editor_enabled(False)
         self.splitter.addWidget(left_panel_container)
         self.splitter.addWidget(self.detail_stack)
         self.splitter.setStretchFactor(1, 1)
         self.setCentralWidget(self.splitter)
-
+    
         # -- TOOLBAR STYLING & MERGE --
-        
-        # 1. Odstranit starý toolbar "Import/Export" (pokud existuje z _build_menus)
+    
+        # 1. Odstranit starý toolbar "Import/Export"
         for child in self.children():
             if isinstance(child, QToolBar) and child.windowTitle() == "Import/Export":
                 self.removeToolBar(child)
                 child.deleteLater()
                 break
-        
+    
         # 2. Najít nebo vytvořit "Hlavní" toolbar
         tb = None
         for child in self.children():
             if isinstance(child, QToolBar) and child.windowTitle() == "Hlavní":
                 tb = child
                 break
-        
+    
         if not tb:
             tb = self.addToolBar("Hlavní")
-        
-        tb.clear() # Vyčistit
-        
-        # Stylizace
+    
+        tb.clear()  # Vyčistit
+    
+        # Stylizace Hlavního toolbaru
         tb.setIconSize(QSize(20, 20))
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        
+    
         tb.setStyleSheet("""
             QToolBar {
                 background-color: #2d2d2d;
@@ -3330,61 +4199,71 @@ class MainWindow(QMainWindow):
                 background-color: #252525;
             }
         """)
-
+    
         def get_gen_icon(char, color):
             return self._generate_icon(char, color, "rect")
-
+    
         # --- ACTIONS ---
-        
+    
         # 1. Skupina
         if not hasattr(self, "act_add_group"):
             self.act_add_group = QAction("Skupina", self)
             self.act_add_group.setShortcut("Ctrl+G")
         self.act_add_group.setText("Skupina")
         self.act_add_group.setIcon(get_gen_icon("S", QColor("#ff5252")))
-        
+    
         # 2. Podskupina
         if not hasattr(self, "act_add_subgroup"):
             self.act_add_subgroup = QAction("Podskupina", self)
             self.act_add_subgroup.setShortcut("Ctrl+Shift+G")
         self.act_add_subgroup.setText("Podskupina")
         self.act_add_subgroup.setIcon(get_gen_icon("P", QColor("#ff8a80")))
-
+    
         # 3. Otázka
         if not hasattr(self, "act_add_question"):
             self.act_add_question = QAction("Otázka", self)
             self.act_add_question.setShortcut(QKeySequence.New)
         self.act_add_question.setText("Otázka")
         self.act_add_question.setIcon(get_gen_icon("O", QColor("#42a5f5")))
-
+    
         # 4. Smazat
         if not hasattr(self, "act_delete"):
             self.act_delete = QAction("Smazat", self)
             self.act_delete.setShortcut(QKeySequence.Delete)
         self.act_delete.setText("Smazat")
         self.act_delete.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
-
-        # 5. Import (Recycle existing from _build_menus)
+    
+        # 5. Import
         if not hasattr(self, "act_import_docx"):
-            # Pokud by náhodou neexistovala (např. _build_menus neproběhlo), vytvoříme
             self.act_import_docx = QAction("Import", self)
             if hasattr(self, "_import_from_docx"):
                 self.act_import_docx.triggered.connect(self._import_from_docx)
-        
-        # Update text/icon for toolbar (Compact look)
         self.act_import_docx.setText("Import")
         self.act_import_docx.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
-        
-        # 6. Export (Recycle)
+    
+        # 6. Export
         if not hasattr(self, "act_export_docx"):
             self.act_export_docx = QAction("Export", self)
-            if hasattr(self, "_export_docx_wizard"): # Name from user snippet!
+            if hasattr(self, "_export_docx_wizard"):
                 self.act_export_docx.triggered.connect(self._export_docx_wizard)
-        
         self.act_export_docx.setText("Export")
         self.act_export_docx.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
-
-        # Add to Main Toolbar
+    
+        # --- ZMĚNA: NOVÉ JSON AKCE ---
+        if not hasattr(self, "act_load_json"):
+            self.act_load_json = QAction("Nahrát DB", self)
+            self.act_load_json.triggered.connect(self._action_load_questions_json)
+        self.act_load_json.setText("Nahrát DB")
+        self.act_load_json.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+    
+        if not hasattr(self, "act_save_json"):
+            self.act_save_json = QAction("Uložit DB", self)
+            self.act_save_json.triggered.connect(self._action_export_questions_json)
+        self.act_save_json.setText("Uložit DB")
+        self.act_save_json.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        # -----------------------------
+    
+        # Přidání do Hlavního Toolbaru
         tb.addAction(self.act_add_group)
         tb.addAction(self.act_add_subgroup)
         tb.addAction(self.act_add_question)
@@ -3392,13 +4271,136 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_import_docx)
         tb.addAction(self.act_export_docx)
         tb.addSeparator()
+    
+        # ZMĚNA: Přidání JSON tlačítek do layoutu toolbaru
+        tb.addAction(self.act_load_json)
+        tb.addAction(self.act_save_json)
+    
+        tb.addSeparator()
         tb.addAction(self.act_delete)
-        
-        # ... (Rest of the method) ...
+    
         self.statusBar().showMessage(f"Datový soubor: {self.data_path}")
         self._refresh_history_table()
-        
+    
         self.left_tabs.currentChanged.connect(self._on_left_tab_changed)
+
+    def _action_load_questions_json(self) -> None:
+        """Načte kompletní strukturu otázek z vybraného JSON souboru."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Načíst databázi otázek", 
+            str(self.project_root), 
+            "JSON soubory (*.json)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            if "groups" not in data:
+                raise ValueError("JSON neobsahuje klíč 'groups'.")
+
+            # --- Pomocné funkce pro rekurzivní převod ---
+
+            def dict_to_funny_answers(raw_list: list) -> list:
+                """Převede seznam slovníků (nebo stringů) na objekty FunnyAnswer."""
+                res = []
+                for item in raw_list:
+                    if isinstance(item, dict):
+                        res.append(FunnyAnswer(**item))
+                    else:
+                        # Fallback pro staré verze (pokud to byl jen string)
+                        res.append(FunnyAnswer(text=str(item), date="", author="", source_doc=""))
+                return res
+
+            def dict_to_question(d: dict) -> Question:
+                """Převede slovník na objekt Question."""
+                # Zpracujeme funny answers zvlášť
+                f_answers = dict_to_funny_answers(d.get("funny_answers", []))
+                
+                # Vytvoříme kopii dictu a aktualizujeme funny_answers
+                q_args = d.copy()
+                q_args["funny_answers"] = f_answers
+                
+                # Bezpečné vytvoření (ignoruje extra klíče, pokud by vadily, 
+                # ale dataclass **kwargs by to měl zvládnout, pokud sedí pole.
+                # Pro jistotu explicitní mapping u klíčových polí, pokud by JSON obsahoval balast)
+                return Question(
+                    id=q_args.get("id", str(_uuid.uuid4())),
+                    type=q_args.get("type", "classic"),
+                    text_html=q_args.get("text_html", ""),
+                    title=q_args.get("title", ""),
+                    points=int(q_args.get("points", 1)),
+                    bonus_correct=float(q_args.get("bonus_correct", 0.0)),
+                    bonus_wrong=float(q_args.get("bonus_wrong", 0.0)),
+                    created_at=q_args.get("created_at", ""),
+                    correct_answer=q_args.get("correct_answer", ""),
+                    funny_answers=f_answers,
+                    image_path=q_args.get("image_path", ""),
+                    image_width_cm=float(q_args.get("image_width_cm", 0.0) or 0.0),
+                    image_height_cm=float(q_args.get("image_height_cm", 0.0) or 0.0),
+                    image_keep_aspect=bool(q_args.get("image_keep_aspect", True)),
+                )
+
+            def dict_to_subgroup(d: dict) -> Subgroup:
+                """Rekurzivně převede slovník na objekt Subgroup."""
+                # 1. Převedeme otázky
+                qs = [dict_to_question(q) for q in d.get("questions", [])]
+                
+                # 2. Převedeme vnořené podskupiny (rekurze)
+                subs = [dict_to_subgroup(s) for s in d.get("subgroups", [])]
+                
+                return Subgroup(
+                    id=d.get("id", str(_uuid.uuid4())),
+                    name=d.get("name", "Bez názvu"),
+                    subgroups=subs,
+                    questions=qs
+                )
+
+            # --- Hlavní smyčka převodu ---
+            new_groups = []
+            for g_data in data["groups"]:
+                # Převedeme podskupiny v této skupině
+                converted_subgroups = [dict_to_subgroup(sg) for sg in g_data.get("subgroups", [])]
+                
+                new_group = Group(
+                    id=g_data.get("id", str(_uuid.uuid4())),
+                    name=g_data.get("name", "Bez názvu"),
+                    subgroups=converted_subgroups
+                )
+                new_groups.append(new_group)
+
+            # Nahrazení dat v aplikaci
+            self.root.groups = new_groups
+            
+            # Refresh UI
+            self._refresh_tree()
+            self.save_data() # Uložíme hned do pracovního souboru
+            self.statusBar().showMessage(f"Databáze úspěšně načtena: {os.path.basename(path)}", 5000)
+
+        except Exception as e:
+            # Výpis chyby do konzole pro lepší debug
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Chyba načítání JSON", f"Nepodařilo se načíst soubor.\n\nDetail: {str(e)}")
+
+
+    def _action_export_questions_json(self) -> None:
+        default_name = f"questions_export_{QDateTime.currentDateTime().toString('yyyyMMdd_HHmm')}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportovat databázi", str(self.project_root / default_name), "JSON soubory (*.json)"
+        )
+        if not path: return
+        try:
+            data_out = {"groups": [self._serialize_group(g) for g in self.root.groups]}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data_out, f, indent=2, ensure_ascii=False)
+            self.statusBar().showMessage(f"Exportováno: {os.path.basename(path)}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Chyba", f"Nepodařilo se exportovat:\n{e}")
+
 
     def _on_left_tab_changed(self, index: int) -> None:
         """Skrývá/zobrazuje pravý panel podle aktivní záložky."""
@@ -3450,6 +4452,11 @@ class MainWindow(QMainWindow):
         if kind == "question":
             act = menu.addAction("Duplikovat otázku")
             act.triggered.connect(self._duplicate_question)
+            has_action = True
+
+            # NOVÉ: Duplikovat do podskupiny
+            act_dup_to = menu.addAction("Duplikovat do podskupiny")
+            act_dup_to.triggered.connect(self._duplicate_question_to_subgroup)
             has_action = True
 
         if has_action:
@@ -3569,7 +4576,7 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table_history.setColumnWidth(2, 220)
-
+    
         self.table_history.setRowCount(0)
         self.table_history.setSortingEnabled(False)
         
@@ -3595,7 +4602,7 @@ class MainWindow(QMainWindow):
             p.drawRect(8, 8, 14, 16)
             p.end()
             return QIcon(pix)
-
+    
         for entry in history:
             row = self.table_history.rowCount()
             self.table_history.insertRow(row)
@@ -3620,7 +4627,7 @@ class MainWindow(QMainWindow):
                     dt = datetime.fromisoformat(raw_date)
                     date_str = dt.strftime("%Y-%m-%d %H:%M")
             except: pass
-
+    
             # 1. TYP (Ikona + Počet)
             if is_multi:
                 icon = get_stack_icon(QColor("#ff9800")) # Oranžový balík
@@ -3630,7 +4637,7 @@ class MainWindow(QMainWindow):
                 icon = self.style().standardIcon(QStyle.SP_FileIcon)
                 text_type = "01x"
                 color_type = QColor("#9e9e9e")
-
+    
             item_type = QTableWidgetItem(text_type)
             item_type.setIcon(icon)
             item_type.setForeground(QBrush(color_type))
@@ -3638,7 +4645,7 @@ class MainWindow(QMainWindow):
             item_type.setTextAlignment(Qt.AlignCenter)
             item_type.setFlags(item_type.flags() ^ Qt.ItemIsEditable)
             self.table_history.setItem(row, 0, item_type)
-
+    
             # 2. SOUBOR
             item_fn = QTableWidgetItem(clean_fn)
             item_fn.setForeground(QBrush(QColor("#80d8ff")))
@@ -3658,7 +4665,7 @@ class MainWindow(QMainWindow):
             item_hash.setToolTip(h)
             item_hash.setFlags(item_hash.flags() ^ Qt.ItemIsEditable)
             self.table_history.setItem(row, 2, item_hash)
-
+    
             # 4. DATUM
             item_date = QTableWidgetItem(f"{date_str}")
             item_date.setForeground(QBrush(QColor("#757575")))
@@ -3668,7 +4675,7 @@ class MainWindow(QMainWindow):
             self.table_history.setItem(row, 3, item_date)
             
         self.table_history.setSortingEnabled(True)
-        self.table_history.sortItems(1, Qt.AscendingOrder)
+        self.table_history.sortItems(3, Qt.DescendingOrder)  # ← třídění podle „ČASOVÁ STOPA“ (nejnovější první)
 
     def _on_history_context_menu(self, pos) -> None:
         """Zobrazí kontextové menu pro tabulku historie."""
@@ -3993,6 +5000,18 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.setEnabled(enabled)
         self.title_edit.setEnabled(enabled)
         self.combo_type.setEnabled(enabled)
+        self.image_path_edit.setEnabled(enabled)
+        self.btn_choose_image.setEnabled(enabled)
+        self.btn_clear_image.setEnabled(enabled)
+        # Rozměry obrázku povolíme jen pokud je nastaven a existuje
+        full_img = getattr(self, "_current_image_full_path", "") or ""
+        has_img = bool(full_img and os.path.exists(full_img))
+        if hasattr(self, "spin_img_w_cm"):
+            self.spin_img_w_cm.setEnabled(enabled and has_img)
+        if hasattr(self, "spin_img_h_cm"):
+            self.spin_img_h_cm.setEnabled(enabled and has_img)
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.setEnabled(enabled and has_img)
         self.spin_points.setEnabled(enabled)
         self.spin_bonus_correct.setEnabled(enabled and self.combo_type.currentIndex() == 1)
         self.spin_bonus_wrong.setEnabled(enabled and self.combo_type.currentIndex() == 1)
@@ -4002,59 +5021,80 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
         # self.tree.itemChanged.connect(self._on_tree_item_changed) # REMOVED previously
-        
+    
         self.btn_save_question.clicked.connect(self._on_save_question_clicked)
         self.btn_rename.clicked.connect(self._on_rename_clicked)
-        
+        self.btn_choose_image.clicked.connect(self._choose_question_image)
+        self.btn_clear_image.clicked.connect(self._clear_question_image)
+    
         # Tree actions context menu
         self.act_add_group.triggered.connect(self._add_group)
         self.act_add_subgroup.triggered.connect(self._add_subgroup)
         self.act_add_question.triggered.connect(self._add_question)
-        
+    
         # Delete shortcut
-        self.act_delete.triggered.connect(self._bulk_delete_selected) 
+        self.act_delete.triggered.connect(self._bulk_delete_selected)
         self.btn_delete_selected.clicked.connect(self._bulk_delete_selected)
-        
+    
         # Autosave triggers
         self.title_edit.textChanged.connect(self._autosave_schedule)
+        self.image_path_edit.textChanged.connect(self._autosave_schedule)
+        self.spin_img_w_cm.valueChanged.connect(self._autosave_schedule)
+        self.spin_img_h_cm.valueChanged.connect(self._autosave_schedule)
+        # Synchronizace rozměrů obrázku (poměr stran)
+        self.spin_img_w_cm.valueChanged.connect(self._on_export_img_w_changed)
+        self.spin_img_h_cm.valueChanged.connect(self._on_export_img_h_changed)
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.stateChanged.connect(self._on_keep_aspect_changed)
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.stateChanged.connect(self._autosave_schedule)
         self.combo_type.currentIndexChanged.connect(self._on_type_changed_ui)
         self.spin_points.valueChanged.connect(self._autosave_schedule)
         self.spin_bonus_correct.valueChanged.connect(self._autosave_schedule)
         self.spin_bonus_wrong.valueChanged.connect(self._autosave_schedule)
         self.text_edit.textChanged.connect(self._autosave_schedule)
-        
+    
         # Autosave triggers (New fields)
         self.edit_correct_answer.textChanged.connect(self._autosave_schedule)
         self.table_funny.itemChanged.connect(self._autosave_schedule)
-        
+    
         # NOVÉ: Kontextové menu pro vtipné odpovědi (Editace)
         self.table_funny.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_funny.customContextMenuRequested.connect(self._on_funny_context_menu)
-
+    
         # Formátování
         self.action_bold.triggered.connect(lambda: self._toggle_format("bold"))
         self.action_italic.triggered.connect(lambda: self._toggle_format("italic"))
         self.action_underline.triggered.connect(lambda: self._toggle_format("underline"))
         self.action_color.triggered.connect(self._choose_color)
         self.action_bullets.triggered.connect(self._toggle_bullets)
-        
-        
+    
         self.action_align_left.triggered.connect(lambda: self._apply_alignment(Qt.AlignLeft))
         self.action_align_center.triggered.connect(lambda: self._apply_alignment(Qt.AlignHCenter))
         self.action_align_right.triggered.connect(lambda: self._apply_alignment(Qt.AlignRight))
         self.action_align_justify.triggered.connect(lambda: self._apply_alignment(Qt.AlignJustify))
-        
+    
         self.text_edit.cursorPositionChanged.connect(self._sync_toolbar_to_cursor)
-        
+    
         # Filter
         self.filter_edit.textChanged.connect(self._apply_filter)
-        
+    
         # Drag Drop Move (btn)
         self.btn_move_selected.clicked.connect(self._move_selected_dialog)
-
+    
         # Tlačítka pro vtipné odpovědi
         self.btn_add_funny.clicked.connect(self._add_funny_row)
         self.btn_rem_funny.clicked.connect(self._remove_funny_row)
+    
+        # NOVÉ: Koš
+        if hasattr(self, "table_trash"):
+            self.table_trash.itemSelectionChanged.connect(self._on_trash_selection_changed)
+        if hasattr(self, "btn_trash_restore"):
+            self.btn_trash_restore.clicked.connect(self._trash_restore_selected)
+        if hasattr(self, "btn_trash_delete"):
+            self.btn_trash_delete.clicked.connect(self._trash_delete_selected)
+        if hasattr(self, "btn_trash_empty"):
+            self.btn_trash_empty.clicked.connect(self._trash_empty)
 
     def _add_funny_row(self) -> None:
         # Předáváme self.project_root pro vyhledání souborů
@@ -4220,19 +5260,39 @@ class MainWindow(QMainWindow):
     # -------------------- Práce s daty (JSON) --------------------
 
     def default_root_obj(self) -> RootData:
-        return RootData(groups=[])
+        root = RootData(groups=[])
+        if not hasattr(root, "trash") or not isinstance(getattr(root, "trash", None), list):
+            root.trash = []
+        return root
 
     def load_data(self) -> None:
         if self.data_path.exists():
             try:
                 with self.data_path.open("r", encoding="utf-8") as f:
                     raw = json.load(f)
+    
                 groups: List[Group] = []
                 for g in raw.get("groups", []):
                     groups.append(self._parse_group(g))
-                self.root = RootData(groups=groups)
+    
+                trash_raw = raw.get("trash", [])
+                if not isinstance(trash_raw, list):
+                    trash_raw = []
+    
+                self.root = RootData(groups=[])
+                self.root.groups = groups
+    
+                # KOŠ: nastavíme až po vytvoření RootData (ne přes constructor)
+                if not hasattr(self.root, "trash") or not isinstance(getattr(self.root, "trash", None), list):
+                    self.root.trash = []
+                self.root.trash = trash_raw
+    
             except Exception as e:
-                QMessageBox.warning(self, "Načtení selhalo", f"Soubor {self.data_path} nelze načíst: {e}\nVytvořen prázdný projekt.")
+                QMessageBox.warning(
+                    self,
+                    "Načtení selhalo",
+                    f"Soubor {self.data_path} nelze načíst: {e}\nVytvořen prázdný projekt."
+                )
                 self.root = self.default_root_obj()
         else:
             self.root = self.default_root_obj()
@@ -4240,7 +5300,7 @@ class MainWindow(QMainWindow):
     def save_data(self) -> None:
         self._apply_editor_to_current_question(silent=True)
         self.data_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"groups": [self._serialize_group(g) for g in self.root.groups]}
+        data = {"groups": [self._serialize_group(g) for g in self.root.groups], "trash": getattr(self.root, "trash", [])}
         try:
             sf = QSaveFile(str(self.data_path))
             sf.open(QSaveFile.WriteOnly)
@@ -4302,6 +5362,10 @@ class MainWindow(QMainWindow):
             created_at=q.get("created_at", ""),
             correct_answer=q.get("correct_answer", ""),
             funny_answers=f_answers,
+            image_path=q.get("image_path", ""),
+            image_width_cm=float(q.get("image_width_cm", 0.0) or 0.0),
+            image_height_cm=float(q.get("image_height_cm", 0.0) or 0.0),
+            image_keep_aspect=bool(q.get("image_keep_aspect", True)),
         )
 
     def _serialize_group(self, g: Group) -> dict:
@@ -4348,56 +5412,260 @@ class MainWindow(QMainWindow):
         painter.end()
         return QIcon(pix)
 
-    def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str) -> None:
+
+    def _get_image_px_size(self, path: str) -> Optional[tuple[int, int]]:
+        """Vrátí (šířka_px, výška_px) obrázku, nebo None."""
+        try:
+            reader = QImageReader(path)
+            size = reader.size()
+            if size.isValid():
+                return (int(size.width()), int(size.height()))
+        except Exception:
+            pass
+        try:
+            img = QImage(path)
+            if not img.isNull():
+                return (int(img.width()), int(img.height()))
+        except Exception:
+            pass
+        return None
+
+
+    def _get_image_actual_size_cm(self, path: str) -> Optional[tuple[float, float, int, int, bool, float, float]]:
+        """
+        Vrátí (w_cm, h_cm, w_px, h_px, has_dpi, dpi_x, dpi_y) pro informativní zobrazení.
+        Pokud obrázek neobsahuje DPI, použije se fallback 96 DPI.
+        """
+        try:
+            img = QImage(path)
+            if img.isNull():
+                return None
+            w_px = int(img.width())
+            h_px = int(img.height())
+            dpmx = int(img.dotsPerMeterX())
+            dpmy = int(img.dotsPerMeterY())
+            if dpmx > 0 and dpmy > 0:
+                # cm = px * 100 / dots_per_meter
+                w_cm = (w_px * 100.0) / float(dpmx)
+                h_cm = (h_px * 100.0) / float(dpmy)
+                dpi_x = float(dpmx) * 0.0254
+                dpi_y = float(dpmy) * 0.0254
+                return (float(w_cm), float(h_cm), w_px, h_px, True, float(dpi_x), float(dpi_y))
+            # fallback
+            dpi_x = 96.0
+            dpi_y = 96.0
+            w_cm = (w_px / dpi_x) * 2.54
+            h_cm = (h_px / dpi_y) * 2.54
+            return (float(w_cm), float(h_cm), w_px, h_px, False, float(dpi_x), float(dpi_y))
+        except Exception:
+            return None
+
+    def _set_image_size_rows_visible(self, has_img: bool) -> None:
+        """Zobrazí/skryje informativní a exportní rozměry obrázku v editoru."""
+        if hasattr(self, "lbl_img_actual_size_label"):
+            self.lbl_img_actual_size_label.setVisible(bool(has_img))
+        if hasattr(self, "lbl_img_actual_size"):
+            self.lbl_img_actual_size.setVisible(bool(has_img))
+        if hasattr(self, "lbl_img_export_size"):
+            self.lbl_img_export_size.setVisible(bool(has_img))
+        if hasattr(self, "img_size_row"):
+            self.img_size_row.setVisible(bool(has_img))
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.setVisible(bool(has_img))
+
+
+    def _update_current_image_ratio_cache(self, path: str) -> None:
+        """Aktualizuje cache poměru stran (height/width) pro aktuální obrázek."""
+        self._img_ratio_hw = None
+        try:
+            px = self._get_image_px_size(path) if path else None
+            if px and px[0] > 0 and px[1] > 0:
+                self._img_ratio_hw = float(px[1]) / float(px[0])
+        except Exception:
+            self._img_ratio_hw = None
+
+    def _on_keep_aspect_changed(self, _state: int) -> None:
+        """Po zapnutí 'Zachovat poměr stran' dopočítá druhý rozměr podle obrázku."""
+        if getattr(self, "_img_size_sync_block", False):
+            return
+        if not hasattr(self, "chk_img_keep_aspect") or not self.chk_img_keep_aspect.isChecked():
+            return
+        full_img = getattr(self, "_current_image_full_path", "") or ""
+        if not (full_img and os.path.exists(full_img)):
+            return
+
+        self._update_current_image_ratio_cache(full_img)
+        if not self._img_ratio_hw or self._img_ratio_hw <= 0:
+            return
+
+        w = float(self.spin_img_w_cm.value())
+        h = float(self.spin_img_h_cm.value())
+
+        # pokud nejsou rozměry nastavené, nastavíme rozumný default
+        if w <= 0.0 and h <= 0.0:
+            w = 14.0
+            h = w * self._img_ratio_hw
+
+        # preferujeme šířku jako řídící
+        if w > 0.0:
+            self._img_size_sync_block = True
+            try:
+                self.spin_img_h_cm.blockSignals(True)
+                self.spin_img_h_cm.setValue(round(float(w * self._img_ratio_hw), 2))
+                self.spin_img_h_cm.blockSignals(False)
+            finally:
+                self._img_size_sync_block = False
+        elif h > 0.0:
+            self._img_size_sync_block = True
+            try:
+                self.spin_img_w_cm.blockSignals(True)
+                self.spin_img_w_cm.setValue(round(float(h / self._img_ratio_hw), 2))
+                self.spin_img_w_cm.blockSignals(False)
+            finally:
+                self._img_size_sync_block = False
+
+    def _on_export_img_w_changed(self, value: float) -> None:
+        """Když uživatel změní šířku, a je zapnutý poměr stran, dopočítá výšku."""
+        if getattr(self, "_img_size_sync_block", False):
+            return
+        if not hasattr(self, "chk_img_keep_aspect") or not self.chk_img_keep_aspect.isChecked():
+            return
+
+        full_img = getattr(self, "_current_image_full_path", "") or ""
+        if not (full_img and os.path.exists(full_img)):
+            return
+
+        self._update_current_image_ratio_cache(full_img)
+        if not self._img_ratio_hw or self._img_ratio_hw <= 0:
+            return
+
+        w = float(value)
+        h = 0.0 if w <= 0.0 else (w * self._img_ratio_hw)
+
+        self._img_size_sync_block = True
+        try:
+            self.spin_img_h_cm.blockSignals(True)
+            self.spin_img_h_cm.setValue(round(float(h), 2))
+            self.spin_img_h_cm.blockSignals(False)
+        finally:
+            self._img_size_sync_block = False
+
+    def _on_export_img_h_changed(self, value: float) -> None:
+        """Když uživatel změní výšku, a je zapnutý poměr stran, dopočítá šířku."""
+        if getattr(self, "_img_size_sync_block", False):
+            return
+        if not hasattr(self, "chk_img_keep_aspect") or not self.chk_img_keep_aspect.isChecked():
+            return
+
+        full_img = getattr(self, "_current_image_full_path", "") or ""
+        if not (full_img and os.path.exists(full_img)):
+            return
+
+        self._update_current_image_ratio_cache(full_img)
+        if not self._img_ratio_hw or self._img_ratio_hw <= 0:
+            return
+
+        h = float(value)
+        w = 0.0 if h <= 0.0 else (h / self._img_ratio_hw)
+
+        self._img_size_sync_block = True
+        try:
+            self.spin_img_w_cm.blockSignals(True)
+            self.spin_img_w_cm.setValue(round(float(w), 2))
+            self.spin_img_w_cm.blockSignals(False)
+        finally:
+            self._img_size_sync_block = False
+
+
+
+    def _apply_question_item_visuals(self, item: QTreeWidgetItem, q_type: str, has_image: bool = False) -> None:
         """Aplikuje vizuální styl na položku otázky (ikona, barva, font)."""
-        
-        color_classic_bg = QColor("#42a5f5") # Modrá
-        color_bonus_bg = QColor("#ffea00")   # Žlutá
+        color_classic_bg = QColor("#42a5f5")  # Modrá
+        color_bonus_bg = QColor("#ffea00")    # Žlutá
         
         is_bonus = str(q_type).lower() == "bonus" or q_type == 1
-        
+
         if is_bonus:
-            # BONUS: Ikona hvězdy/diamantu s "B"
-            icon = self._generate_icon("B", color_bonus_bg, "star")
-            item.setIcon(0, icon)
-            
+            base_icon_char = "B"
+            base_color = color_bonus_bg
+            shape = "star"
             item.setForeground(0, QBrush(color_bonus_bg))
             item.setForeground(1, QBrush(color_bonus_bg))
             f = item.font(0); f.setBold(True); item.setFont(0, f)
         else:
-            # KLASICKÁ: Ikona kruhu s "Q" (nebo standard)
-            # Pro odlišení použijeme generovanou ikonu "Q" nebo "?" nebo prostě "1" (jako body?)
-            # Zvolím "Q" pro Question
-            icon = self._generate_icon("Q", color_classic_bg, "circle")
-            item.setIcon(0, icon)
-            
+            base_icon_char = "Q"
+            base_color = color_classic_bg
+            shape = "circle"
             item.setForeground(0, QBrush(color_classic_bg))
             item.setForeground(1, QBrush(color_classic_bg))
             f = item.font(0); f.setBold(False); item.setFont(0, f)
+
+        # Generování ikony (případně kompozitní s indikátorem obrázku)
+        if has_image:
+            # Vytvoříme širší pixmapu pro dvě ikony vedle sebe [IMG][Q]
+            pix = QPixmap(34, 16)
+            pix.fill(Qt.transparent)
+            painter = QPainter(pix)
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # 1. Ikona obrázku (vlevo)
+            # Malý obdélník s naznačením "obrázku"
+            painter.setBrush(QColor("#ab47bc")) # Fialová pro odlišení
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(0, 2, 14, 12, 2, 2)
+            # Symbol (kolečko uvnitř jako čočka)
+            painter.setBrush(QColor("white"))
+            painter.drawEllipse(4, 5, 6, 6)
+
+            # 2. Standardní ikona (vpravo, posunutá o 18px)
+            painter.setBrush(base_color)
+            painter.translate(18, 0)
+            
+            if shape == "circle":
+                painter.drawEllipse(1, 1, 14, 14)
+            elif shape == "star":
+                path = QPainterPath()
+                path.moveTo(8, 0); path.lineTo(16, 8); path.lineTo(8, 16); path.lineTo(0, 8); path.closeSubpath()
+                painter.drawPath(path)
+            
+            painter.setPen(QColor("black"))
+            font = painter.font()
+            font.setBold(True)
+            font.setPointSize(9)
+            painter.setFont(font)
+            painter.drawText(QRect(0, 0, 16, 16), Qt.AlignCenter, base_icon_char)
+            
+            painter.end()
+            item.setIcon(0, QIcon(pix))
+        else:
+            # Standardní ikona bez obrázku
+            icon = self._generate_icon(base_icon_char, base_color, shape)
+            item.setIcon(0, icon)
 
     def _refresh_tree(self) -> None:
         """Obnoví strom otázek podle self.root."""
         self.tree.clear()
         if not self.root:
             return
-
+    
         sorted_groups = sorted(self.root.groups, key=lambda g: g.name.lower())
-        
-        color_group = QBrush(QColor("#ff5252")) 
+        color_group = QBrush(QColor("#ff5252"))
         icon_group = self._generate_icon("S", QColor("#ff5252"), "rect")
-
+    
         for g in sorted_groups:
             g_item = QTreeWidgetItem([g.name, ""])
             g_item.setData(0, Qt.UserRole, {"kind": "group", "id": g.id})
             g_item.setIcon(0, icon_group)
-            
             g_item.setForeground(0, color_group)
             g_item.setForeground(1, color_group)
             f = g_item.font(0); f.setBold(True); f.setPointSize(13); g_item.setFont(0, f)
-            
+    
             self.tree.addTopLevelItem(g_item)
-            g_item.setExpanded(True)
-
+    
+            # <<< ZMĚNA: nerozbalovat při potlačení auto-expandu >>>
+            if not getattr(self, "_suppress_auto_expand", False):
+                g_item.setExpanded(True)
+    
             if g.subgroups:
                 sorted_subgroups = sorted(g.subgroups, key=lambda s: s.name.lower())
                 self._add_subgroups_to_item(g_item, g.id, sorted_subgroups)
@@ -4406,60 +5674,52 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_refresh_funny_answers_tab"):
             self._refresh_funny_answers_tab()
 
-
     def _add_subgroups_to_item(self, parent_item: QTreeWidgetItem, group_id: str, subgroups: List[Subgroup]) -> None:
         color_subgroup = QBrush(QColor("#ff8a80"))
         # Ikona Podskupiny: Světle červený kruh/čtverec s "P"
         icon_subgroup = self._generate_icon("P", QColor("#ff8a80"), "rect")
-
+    
         for sg in subgroups:
             parent_meta = parent_item.data(0, Qt.UserRole) or {}
             parent_sub_id = parent_meta.get("id") if parent_meta.get("kind") == "subgroup" else None
-            
+    
             sg_item = QTreeWidgetItem([sg.name, ""])
             sg_item.setData(0, Qt.UserRole, {
-                "kind": "subgroup", 
-                "id": sg.id, 
-                "parent_group_id": group_id, 
+                "kind": "subgroup",
+                "id": sg.id,
+                "parent_group_id": group_id,
                 "parent_subgroup_id": parent_sub_id
             })
             sg_item.setIcon(0, icon_subgroup)
-            
             sg_item.setForeground(0, color_subgroup)
             sg_item.setForeground(1, color_subgroup)
             f = sg_item.font(0); f.setBold(True); sg_item.setFont(0, f)
-
+    
             parent_item.addChild(sg_item)
-            
-            # 1. Otázky
-            sorted_questions = sorted(sg.questions, key=lambda q: (q.title or "").lower())
-            
-            for q in sorted_questions:
-                label = "Klasická" if str(q.type).lower() != "bonus" else "BONUS"
-                is_bonus = (label == "BONUS")
-                
-                if is_bonus:
-                    pts = f"+{q.bonus_correct}/{q.bonus_wrong} b."
-                else:
-                    pts = f"{q.points} b."
-                
-                q_item = QTreeWidgetItem([q.title or "Otázka", f"{label} | {pts}"])
+    
+            # Otázky v podskupině (původní logika zachována)
+            sorted_q = sorted(sg.questions, key=lambda q: (q.type or "", (q.title or "").lower()))
+            for q in sorted_q:
+                q_item = QTreeWidgetItem([q.title or "Otázka", q.type or ""])
                 q_item.setData(0, Qt.UserRole, {
-                    "kind": "question", 
-                    "id": q.id, 
-                    "parent_group_id": group_id, 
+                    "kind": "question",
+                    "id": q.id,
+                    "parent_group_id": group_id,
                     "parent_subgroup_id": sg.id
                 })
-                
-                self._apply_question_item_visuals(q_item, q.type)
+                # Vizuál otázky
+                has_img = bool(getattr(q, "image_path", "") and os.path.exists(q.image_path))
+                self._apply_question_item_visuals(q_item, q.type, has_image=has_img)
                 sg_item.addChild(q_item)
-            
-            # 2. Rekurze
+    
+            # Rekurze na vnořené podskupiny
             if sg.subgroups:
-                sorted_nested_subgroups = sorted(sg.subgroups, key=lambda s: s.name.lower())
-                self._add_subgroups_to_item(sg_item, group_id, sorted_nested_subgroups)
-            
-            sg_item.setExpanded(True)
+                sorted_nested = sorted(sg.subgroups, key=lambda s: s.name.lower())
+                self._add_subgroups_to_item(sg_item, group_id, sorted_nested)
+    
+            # <<< ZMĚNA: nerozbalovat při potlačení auto-expandu >>>
+            if not getattr(self, "_suppress_auto_expand", False):
+                sg_item.setExpanded(True)
 
     def _selected_node(self):
         """Vrátí (kind, meta) pro vybranou položku ve stromu."""
@@ -4575,7 +5835,7 @@ class MainWindow(QMainWindow):
         if kind not in ("group", "subgroup"):
             QMessageBox.information(self, "Výběr", "Vyberte skupinu nebo podskupinu, do které chcete přidat otázku.")
             return
-
+    
         target_sg: Optional[Subgroup] = None
         if kind == "group":
             g = self._find_group(meta["id"])
@@ -4589,12 +5849,31 @@ class MainWindow(QMainWindow):
                 target_sg = g.subgroups[0]
         else:
             target_sg = self._find_subgroup(meta["parent_group_id"], meta["id"])
+    
         if not target_sg:
             return
-
+    
+        # Uložit stav rozbalení a zjistit, zda byla cílová podskupina rozbalená
+        expanded_before = self._capture_tree_expansion_state()
+        was_expanded = ("subgroup", target_sg.id) in expanded_before
+    
+        # Vytvořit a vložit novou otázku
         q = Question.new_default("classic")
         target_sg.questions.append(q)
-        self._refresh_tree()
+    
+        # Potlačit auto-expand během refresh a poté obnovit původní stav
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+    
+        self._apply_tree_expansion_state(expanded_before)
+    
+        # Pokud byla cílová podskupina původně sbalená, rozbal ji, aby nová otázka byla vidět
+        if not was_expanded:
+            self._expand_subgroup_by_id(target_sg.id)
+    
         self._select_question(q.id)
         self.save_data()
 
@@ -4608,40 +5887,128 @@ class MainWindow(QMainWindow):
         if not items:
             QMessageBox.information(self, "Smazat", "Vyberte položky ke smazání.")
             return
-
+    
         count = len(items)
         msg = f"Opravdu smazat {count} vybraných položek?\n(Včetně obsahu skupin/podskupin)"
         if QMessageBox.question(self, "Smazat vybrané", msg) != QMessageBox.Yes:
             return
-
+    
+        # <<< NOVÉ: uložit stav rozbalení před změnou >>>
+        expanded_before = self._capture_tree_expansion_state()
+    
+        # --- KOŠ: Nejdřív si uložíme všechny otázky, které se budou mazat ---
+        if not hasattr(self.root, "trash") or not isinstance(getattr(self.root, "trash", None), list):
+            self.root.trash = []
+    
+        from datetime import datetime as _dt
+        now_iso = _dt.now().isoformat(timespec="seconds")
+        trash_records: List[dict] = []
+        seen_qids: set = set()
+    
+        selected_question_metas: List[dict] = []
+        selected_subgroup_metas: List[dict] = []
+        selected_group_ids: List[str] = []
+    
         # Sběr IDček k smazání
         to_delete_q_ids = set()      # otázky
         to_delete_sg_ids = set()     # podskupiny
         to_delete_g_ids = set()      # skupiny
-
+    
         for it in items:
             meta = it.data(0, Qt.UserRole) or {}
             kind = meta.get("kind")
             if kind == "question":
                 to_delete_q_ids.add(meta.get("id"))
+                selected_question_metas.append(meta)
             elif kind == "subgroup":
                 to_delete_sg_ids.add(meta.get("id"))
+                selected_subgroup_metas.append(meta)
             elif kind == "group":
                 to_delete_g_ids.add(meta.get("id"))
-
-        # 1. Filtrace skupin (nejvyšší úroveň)
-        # Pokud mažeme skupinu, zmizí vše pod ní, takže nemusíme řešit její podskupiny/otázky
+                selected_group_ids.append(meta.get("id"))
+    
+        def add_question_to_trash(q: Question, gid: str, sgid: str, gname: str, sgname: str, sg_path: str) -> None:
+            if not q or not q.id:
+                return
+            if q.id in seen_qids:
+                return
+            seen_qids.add(q.id)
+            trash_records.append({
+                "question": asdict(q),
+                "deleted_at": now_iso,
+                "source_group_id": gid or "",
+                "source_group_name": gname or "",
+                "source_subgroup_id": sgid or "",
+                "source_subgroup_name": sgname or "",
+                "source_path": sg_path or ""
+            })
+    
+        # 1) Nejprve přidej do koše všechny dotčené otázky (skupiny/podskupiny rekurzivně)
+        def collect_questions_under_subgroups(subgroups: List[Subgroup], gid: str, gname: str, parent_names: List[str]) -> None:
+            for sg in subgroups:
+                sg_path = " / ".join(parent_names + [sg.name or ""])
+                # Všechny otázky v této podskupině
+                for q in sg.questions or []:
+                    add_question_to_trash(q, gid, sg.id, gname, sg.name, sg_path)
+                # Rekurze do vnořených
+                if sg.subgroups:
+                    collect_questions_under_subgroups(sg.subgroups, gid, gname, parent_names + [sg.name or ""])
+    
+        # 2) Přidání všech otázek z vybraných podskupin a skupin
+        for gid in selected_group_ids:
+            g = self._find_group(gid)
+            if not g:
+                continue
+            gname = g.name or ""
+            collect_questions_under_subgroups(g.subgroups or [], gid, gname, [])
+    
+        for meta in selected_subgroup_metas:
+            gid = meta.get("parent_group_id") or ""
+            sgid = meta.get("id") or ""
+            g = self._find_group(gid)
+            gname = g.name if g else ""
+            sg = self._find_subgroup(gid, sgid)
+            if not sg:
+                continue
+            collect_questions_under_subgroups([sg], gid, gname, [])
+    
+        # 3) Konkrétně vybrané otázky
+        for meta in selected_question_metas:
+            gid = meta.get("parent_group_id") or ""
+            sgid = meta.get("parent_subgroup_id") or ""
+            qid = meta.get("id") or ""
+            if not qid:
+                continue
+            q = self._find_question(gid, sgid, qid)
+            if not q:
+                continue
+            g = self._find_group(gid)
+            gname = g.name if g else ""
+            sg = self._find_subgroup(gid, sgid)
+            sgname = sg.name if sg else ""
+            add_question_to_trash(q, gid, sgid, gname, sgname, sgname)
+    
+        if trash_records:
+            self.root.trash.extend(trash_records)
+    
+        # 4) Fyzické odstranění z modelu
+        # 4.1) Skupiny (nejvyšší úroveň)
         self.root.groups = [g for g in self.root.groups if g.id not in to_delete_g_ids]
-
-        # 2. Procházení zbytku a mazání podskupin a otázek
+    
+        # 4.2) Podskupiny + otázky (rekurzivně)
         for g in self.root.groups:
-            # Filtrace podskupin v této skupině
             g.subgroups = [sg for sg in g.subgroups if sg.id not in to_delete_sg_ids]
-            
-            # Rekurzivní čištění uvnitř podskupin (pro otázky a vnořené podskupiny)
             self._clean_subgroups_recursive(g.subgroups, to_delete_sg_ids, to_delete_q_ids)
-
-        self._refresh_tree()
+    
+        # <<< NOVĚ: potlačit autoexpand → refresh → obnovit stav >>>
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+        self._apply_tree_expansion_state(expanded_before)
+    
+        self._refresh_trash_table()
         self._clear_editor()
         self.save_data()
         self.statusBar().showMessage(f"Smazáno {count} položek.", 4000)
@@ -4726,6 +6093,7 @@ class MainWindow(QMainWindow):
             self.spin_bonus_wrong,
             self.combo_type,
             self.title_edit,
+            self.image_path_edit,
             self.edit_correct_answer,
             self.table_funny
         ]
@@ -4740,6 +6108,20 @@ class MainWindow(QMainWindow):
             self.spin_bonus_wrong.setValue(0.00)
             self.combo_type.setCurrentIndex(0)
             self.title_edit.clear()
+            self.image_path_edit.clear()
+            self.image_path_edit.setToolTip("")
+            if hasattr(self, "spin_img_w_cm"):
+                self.spin_img_w_cm.setValue(0.0)
+                self.spin_img_h_cm.setValue(0.0)
+                self.spin_img_w_cm.setEnabled(False)
+                self.spin_img_h_cm.setEnabled(False)
+                if hasattr(self, "chk_img_keep_aspect"):
+                    self.chk_img_keep_aspect.setChecked(True)
+                    self.chk_img_keep_aspect.setEnabled(False)
+            if hasattr(self, "lbl_img_actual_size"):
+                self.lbl_img_actual_size.setText("")
+            if hasattr(self, "_set_image_size_rows_visible"):
+                self._set_image_size_rows_visible(False)
             self.edit_correct_answer.clear() 
             self.table_funny.setRowCount(0) 
         finally:
@@ -4753,27 +6135,36 @@ class MainWindow(QMainWindow):
         self.editor_toolbar.setVisible(visible)
         self.text_edit.setVisible(visible)
         self.btn_save_question.setVisible(visible)
-        
+
         # Skrytí/Zobrazení prvků formuláře
         widgets = [
-            self.title_edit, 
-            self.combo_type, 
-            self.spin_points, 
-            self.spin_bonus_correct, 
+            self.title_edit,
+            self.image_path_edit,
+            self.btn_choose_image,
+            self.btn_clear_image,
+            self.combo_type,
+            self.spin_points,
+            self.spin_bonus_correct,
             self.spin_bonus_wrong,
-            # NOVÉ: Widgety a jejich labely
             self.edit_correct_answer,
             self.funny_container,
-            # NOVÉ: Samostatné labely sekcí
             self.lbl_content,
             self.lbl_correct,
             self.lbl_funny
         ]
         
+        # Přidáme i label náhledu, pokud existuje
+        if hasattr(self, "lbl_image_preview"):
+            # Zobrazíme jen pokud je 'visible' True A máme co zobrazit (kontroluje se v load_question)
+            # Ale pro jistotu: pokud visible=False, skryjeme určitě.
+            if not visible:
+                self.lbl_image_preview.setVisible(False)
+            # Pokud visible=True, stav labelu řídí _load_question_to_editor, takže neměníme.
+
         for w in widgets:
-            if hasattr(self, w.objectName()) or w in widgets: # Check existence
+            if hasattr(self, w.objectName()) or w in widgets:
                 w.setVisible(visible)
-            
+
         # Skrytí labelů ve form layoutu
         for i in range(self.form_layout.rowCount()):
             item = self.form_layout.itemAt(i, QFormLayout.LabelRole)
@@ -4781,14 +6172,25 @@ class MainWindow(QMainWindow):
                 item.widget().setVisible(visible)
             item = self.form_layout.itemAt(i, QFormLayout.FieldRole)
             if item and item.widget():
+                # Specifická výjimka pro náhled - ten si řídí viditelnost sám podle obsahu
+                if hasattr(self, "lbl_image_preview") and item.widget() == self.lbl_image_preview:
+                    if not visible:
+                        item.widget().setVisible(False)
+                    continue
                 item.widget().setVisible(visible)
-        
+
         if visible:
             self._on_type_changed_ui()
+            # Zajistit, že informace/rozměry obrázku se zobrazí jen pokud otázka skutečně má obrázek
+            full_img = getattr(self, "_current_image_full_path", "") or ""
+            self._set_image_size_rows_visible(bool(full_img and os.path.exists(full_img)))
 
     def _load_question_to_editor(self, q: Question) -> None:
         # ID nulujeme i zde pro jistotu
         self._current_question_id = None
+        
+        # Uložení plné cesty k obrázku bokem (protože v GUI ukazujeme jen název)
+        self._current_image_full_path = getattr(q, "image_path", "") or ""
 
         widgets = [
             self.combo_type,
@@ -4797,10 +6199,14 @@ class MainWindow(QMainWindow):
             self.spin_bonus_wrong,
             self.text_edit,
             self.title_edit,
+            self.image_path_edit,
+            self.spin_img_w_cm,
+            self.spin_img_h_cm,
+            self.chk_img_keep_aspect,
             self.edit_correct_answer,
             self.table_funny
         ]
-        
+
         for w in widgets:
             w.blockSignals(True)
 
@@ -4809,14 +6215,64 @@ class MainWindow(QMainWindow):
             self.spin_points.setValue(int(q.points))
             self.spin_bonus_correct.setValue(float(q.bonus_correct))
             self.spin_bonus_wrong.setValue(float(q.bonus_wrong))
-            
             self.text_edit.setHtml(q.text_html or "")
             self.title_edit.setText(q.title or self._derive_title_from_html(q.text_html))
+            
+            # NOVÉ: Zobrazit jen název souboru
+            full_path = getattr(q, "image_path", "") or ""
+            if full_path:
+                self.image_path_edit.setText(os.path.basename(full_path))
+                self.image_path_edit.setToolTip(full_path) # Full path v tooltipu
+            else:
+                self.image_path_edit.clear()
+                self.image_path_edit.setToolTip("")
+
+            # Rozměry obrázku (cm) – pokud nejsou uložené, nastavíme defaultně 14 cm na šířku a dopočítáme výšku dle poměru
+            w_cm = float(getattr(q, "image_width_cm", 0.0) or 0.0)
+            h_cm = float(getattr(q, "image_height_cm", 0.0) or 0.0)
+            if full_path and os.path.exists(full_path):
+                if hasattr(self, "_update_current_image_ratio_cache"):
+                    self._update_current_image_ratio_cache(full_path)
+                px = self._get_image_px_size(full_path)
+                if w_cm <= 0.0:
+                    w_cm = 14.0
+                if h_cm <= 0.0 and px and px[0] > 0:
+                    h_cm = round(w_cm * (px[1] / px[0]), 2)
+
+                self.spin_img_w_cm.setValue(w_cm)
+                self.spin_img_h_cm.setValue(h_cm)
+                self.spin_img_w_cm.setEnabled(True)
+                self.spin_img_h_cm.setEnabled(True)
+                if hasattr(self, "chk_img_keep_aspect"):
+                    self.chk_img_keep_aspect.setEnabled(True)
+                    self.chk_img_keep_aspect.setChecked(bool(getattr(q, "image_keep_aspect", True)))
+
+                # Informativní: aktuální (fyzická) velikost dle DPI v souboru (nebo fallback)
+                if hasattr(self, "lbl_img_actual_size"):
+                    info = self._get_image_actual_size_cm(full_path)
+                    if info:
+                        w_act, h_act, w_px, h_px, has_dpi, dpi_x, dpi_y = info
+                        src = f"DPI {dpi_x:.0f}×{dpi_y:.0f}" if has_dpi else "DPI default 96"
+                        self.lbl_img_actual_size.setText(f"{w_act:.2f} × {h_act:.2f} cm ({w_px}×{h_px} px, {src})")
+                    else:
+                        self.lbl_img_actual_size.setText("")
+
+                self._set_image_size_rows_visible(True)
+            else:
+                self.spin_img_w_cm.setValue(0.0)
+                self.spin_img_h_cm.setValue(0.0)
+                self.spin_img_w_cm.setEnabled(False)
+                self.spin_img_h_cm.setEnabled(False)
+
+                if hasattr(self, "lbl_img_actual_size"):
+                    self.lbl_img_actual_size.setText("")
+
+                self._set_image_size_rows_visible(False)
+
             self.edit_correct_answer.setPlainText(q.correct_answer or "")
 
             self.table_funny.setRowCount(0)
             f_answers = getattr(q, "funny_answers", []) or []
-
             for fa in f_answers:
                 if isinstance(fa, FunnyAnswer):
                     text = fa.text; date = fa.date; author = fa.author; source_doc = fa.source_doc
@@ -4828,16 +6284,42 @@ class MainWindow(QMainWindow):
                 self.table_funny.setItem(row, 0, QTableWidgetItem(text))
                 self.table_funny.setItem(row, 1, QTableWidgetItem(date))
                 self.table_funny.setItem(row, 2, QTableWidgetItem(author))
-                
                 display_source = os.path.basename(source_doc) if source_doc else ""
                 source_item = QTableWidgetItem(display_source)
                 source_item.setData(Qt.UserRole, source_doc)
                 self.table_funny.setItem(row, 3, source_item)
 
+            # NOVÉ: Náhled obrázku
+            # Lazy init labelu pro náhled, pokud neexistuje
+            if not hasattr(self, "lbl_image_preview"):
+                self.lbl_image_preview = QLabel()
+                self.lbl_image_preview.setAlignment(Qt.AlignCenter)
+                self.lbl_image_preview.setStyleSheet("border: 1px solid #444; background: #222; border-radius: 4px; margin-top: 5px;")
+                self.lbl_image_preview.setMinimumHeight(150)
+                # Přidáme do form layoutu (nakonec)
+                self.form_layout.addRow("Náhled:", self.lbl_image_preview)
+
+            if full_path and os.path.exists(full_path):
+                pix = QPixmap(full_path)
+                if not pix.isNull():
+                    # Škálování s poměrem stran
+                    scaled = pix.scaled(QSize(400, 200), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self.lbl_image_preview.setPixmap(scaled)
+                    self.lbl_image_preview.setVisible(True)
+                    # Zvětšíme okno, pokud je malé, aby se náhled vešel
+                    if self.height() < 850:
+                        self.resize(self.width(), 850)
+                else:
+                    self.lbl_image_preview.setText("Chyba načítání")
+                    self.lbl_image_preview.setVisible(True)
+            else:
+                self.lbl_image_preview.clear()
+                self.lbl_image_preview.hide()
+
             self._set_editor_enabled(True)
             # Toto volání aktualizuje UI, ale protože ID je None, neuloží se nic
             self._on_type_changed_ui()
-            
+
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -4848,6 +6330,7 @@ class MainWindow(QMainWindow):
 
         def apply_in(sgs: List[Subgroup]) -> bool:
             for sg in sgs:
+                # 1. Prohledání otázek v aktuální podskupině
                 for i, q in enumerate(sg.questions):
                     if q.id == self._current_question_id:
                         q.type = "classic" if self.combo_type.currentIndex() == 0 else "bonus"
@@ -4855,11 +6338,11 @@ class MainWindow(QMainWindow):
                         q.title = (
                             self.title_edit.text().strip()
                             or self._derive_title_from_html(
-                                q.text_html,
-                                prefix=("BONUS: " if q.type == "bonus" else ""),
+                                q.text_html, 
+                                prefix=("BONUS: " if q.type == "bonus" else "")
                             )
                         )
-
+                        
                         # Uložení bodů
                         if q.type == "classic":
                             q.points = int(self.spin_points.value())
@@ -4873,20 +6356,78 @@ class MainWindow(QMainWindow):
                         # Uložení správné odpovědi
                         q.correct_answer = self.edit_correct_answer.toPlainText()
 
-                        # Uložení vtipných odpovědí z tabulky (včetně zdrojového dokumentu)
+                        # Uložení cesty k obrázku (s kontrolou na basename)
+                        editor_txt = self.image_path_edit.text().strip()
+                        stored_full = getattr(self, "_current_image_full_path", "")
+                        
+                        final_path = ""
+                        # Pokud uživatel nezměnil text (je stále basename původní cesty), zachováme full path
+                        if stored_full and editor_txt == os.path.basename(stored_full):
+                            final_path = stored_full
+                        else:
+                            # Uživatel něco napsal/vybral -> použijeme to
+                            final_path = editor_txt
+                            # Aktualizujeme stored path pro příští uložení
+                            self._current_image_full_path = final_path
+                        
+                        q.image_path = final_path
+
+                        # Rozměry obrázku (cm) pro export do DOCX
+                        if hasattr(self, "chk_img_keep_aspect"):
+                            q.image_keep_aspect = bool(self.chk_img_keep_aspect.isChecked())
+                        else:
+                            q.image_keep_aspect = True
+                        if final_path and os.path.exists(final_path):
+                            q.image_width_cm = float(self.spin_img_w_cm.value())
+                            q.image_height_cm = float(self.spin_img_h_cm.value())
+                        else:
+                            q.image_width_cm = 0.0
+                            q.image_height_cm = 0.0
+
+                        # --- NOVÉ: OKAMŽITÁ AKTUALIZACE NÁHLEDU ---
+                        if hasattr(self, "lbl_image_preview"):
+                            if final_path and os.path.exists(final_path):
+                                pix = QPixmap(final_path)
+                                if not pix.isNull():
+                                    scaled = pix.scaled(QSize(400, 200), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                                    self.lbl_image_preview.setPixmap(scaled)
+                                    self.lbl_image_preview.setVisible(True)
+                                else:
+                                    self.lbl_image_preview.setText("Chyba načítání")
+                                    self.lbl_image_preview.setVisible(True)
+                            else:
+                                self.lbl_image_preview.clear()
+                                self.lbl_image_preview.hide()
+                        # ------------------------------------------
+
+                        # NOVÉ: Informativní rozměr + viditelnost řádků (při ruční editaci cesty)
+                        has_img = bool(final_path and os.path.exists(final_path))
+                        if hasattr(self, "lbl_img_actual_size"):
+                            if has_img:
+                                info = self._get_image_actual_size_cm(final_path)
+                                if info:
+                                    w_act, h_act, w_px, h_px, has_dpi, dpi_x, dpi_y = info
+                                    src = f"DPI {dpi_x:.0f}×{dpi_y:.0f}" if has_dpi else "DPI default 96"
+                                    self.lbl_img_actual_size.setText(f"{w_act:.2f} × {h_act:.2f} cm ({w_px}×{h_px} px, {src})")
+                                else:
+                                    self.lbl_img_actual_size.setText("")
+                            else:
+                                self.lbl_img_actual_size.setText("")
+                        self._set_image_size_rows_visible(has_img)
+
+                        # Uložení vtipných odpovědí z tabulky
                         new_funny: List[FunnyAnswer] = []
                         for r in range(self.table_funny.rowCount()):
                             t_item = self.table_funny.item(r, 0)
-                            if not t_item:
-                                continue
+                            if not t_item: continue
                             d_item = self.table_funny.item(r, 1)
                             a_item = self.table_funny.item(r, 2)
                             s_item = self.table_funny.item(r, 3) if self.table_funny.columnCount() > 3 else None
-
+                            
                             text = t_item.text()
                             date = d_item.text() if d_item else ""
                             author = a_item.text() if a_item else ""
-
+                            
                             if s_item is not None:
                                 data = s_item.data(Qt.UserRole)
                                 if isinstance(data, str) and data:
@@ -4895,42 +6436,98 @@ class MainWindow(QMainWindow):
                                     source_doc = s_item.text()
                             else:
                                 source_doc = ""
-
+                            
                             new_funny.append(
                                 FunnyAnswer(
                                     text=text,
                                     author=author,
                                     date=date,
-                                    source_doc=source_doc,
+                                    source_doc=source_doc
                                 )
                             )
-                        q.funny_answers = new_funny
 
+                        q.funny_answers = new_funny
                         sg.questions[i] = q
 
                         label = "Klasická" if q.type == "classic" else "BONUS"
                         pts = q.points if q.type == "classic" else self._bonus_points_label(q)
+                        
                         self._update_selected_question_item_title(q.title)
                         self._update_selected_question_item_subtitle(f"{label} | {pts}")
-
+                        
                         items = self.tree.selectedItems()
                         if items:
-                            self._apply_question_item_visuals(items[0], q.type)
+                            # Aktualizace vizuálu položky (ikona)
+                            has_img = bool(q.image_path and os.path.exists(q.image_path))
+                            self._apply_question_item_visuals(items[0], q.type, has_image=has_img)
 
                         if not silent:
                             self.statusBar().showMessage("Změny otázky uloženy (lokálně).", 1200)
-
-                        # 🔁 po každé změně otázky obnovíme přehled vtipných odpovědí
+                        
                         self._refresh_funny_answers_tab()
                         return True
-
+            
+                # 2. Rekurzivní hledání v podskupinách
                 if apply_in(sg.subgroups):
                     return True
+
             return False
 
         for g in self.root.groups:
             if apply_in(g.subgroups):
                 break
+
+    def _clear_editor(self) -> None:
+        self._current_question_id = None
+        self._current_image_full_path = ""  # Vyčistit cache cesty
+
+        widgets = [
+            self.text_edit,
+            self.spin_points,
+            self.spin_bonus_correct,
+            self.spin_bonus_wrong,
+            self.combo_type,
+            self.title_edit,
+            self.image_path_edit,
+            self.edit_correct_answer,
+            self.table_funny
+        ]
+
+        for w in widgets:
+            w.blockSignals(True)
+
+        try:
+            self.text_edit.clear()
+            self.spin_points.setValue(1)
+            self.spin_bonus_correct.setValue(1.00)
+            self.spin_bonus_wrong.setValue(0.00)
+            self.combo_type.setCurrentIndex(0)
+            self.title_edit.clear()
+            self.image_path_edit.clear()
+            self.edit_correct_answer.clear()
+            self.table_funny.setRowCount(0)
+            
+            # NOVÉ: Vyčistit náhled
+            if hasattr(self, "lbl_image_preview"):
+                self.lbl_image_preview.clear()
+                self.lbl_image_preview.hide()
+
+            # NOVÉ: Vyčistit rozměry obrázku (info + export)
+            self.image_path_edit.setToolTip("")
+            if hasattr(self, "spin_img_w_cm"):
+                self.spin_img_w_cm.setValue(0.0)
+                self.spin_img_h_cm.setValue(0.0)
+                self.spin_img_w_cm.setEnabled(False)
+                self.spin_img_h_cm.setEnabled(False)
+            if hasattr(self, "lbl_img_actual_size"):
+                self.lbl_img_actual_size.setText("")
+            self._set_image_size_rows_visible(False)
+
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+        
+        self._set_editor_enabled(False)
             
     def _autosave_schedule(self) -> None:
         if not self._current_question_id:
@@ -4950,7 +6547,16 @@ class MainWindow(QMainWindow):
 
     def _update_selected_question_item_title(self, text: str) -> None:
         items = self.tree.selectedItems()
-        if items: items[0].setText(0, text or "Otázka")
+        if not items:
+            return
+
+        item = items[0]
+        item.setText(0, text or "Otázka")
+
+        # Po změně názvu otázky znovu seřadíme otázky v rámci stejné podskupiny
+        parent = item.parent()
+        if parent is not None:
+            parent.sortChildren(0, Qt.AscendingOrder)
 
     def _update_selected_question_item_subtitle(self, text: str) -> None:
         items = self.tree.selectedItems()
@@ -5144,6 +6750,80 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Datový soubor změněn na: {self.data_path}", 4000)
             self.load_data(); self._refresh_tree()
 
+    def _choose_question_image(self) -> None:
+        """Vybere obrázek k aktuální otázce (uloží se pouze cesta)."""
+        if not getattr(self, "_current_question_id", None):
+            return
+        start_dir = str(getattr(self, "images_dir", self.project_root))
+        Path(start_dir).mkdir(parents=True, exist_ok=True)
+        fn, _ = QFileDialog.getOpenFileName(
+            self,
+            "Vybrat obrázek k otázce",
+            start_dir,
+            "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic);;All files (*)",
+        )
+        if fn:
+            # Uložíme full-path i bokem (v editoru se drží jen basename)
+            self._current_image_full_path = fn
+            if hasattr(self, "_update_current_image_ratio_cache"):
+                self._update_current_image_ratio_cache(fn)
+
+            # V editoru zobrazíme jen název souboru, plnou cestu necháme v tooltipu
+            self.image_path_edit.setText(os.path.basename(fn))
+            self.image_path_edit.setToolTip(fn)
+
+            # Informativní: aktuální velikost dle DPI v souboru (nebo fallback)
+            if hasattr(self, "lbl_img_actual_size"):
+                info = self._get_image_actual_size_cm(fn)
+                if info:
+                    w_act, h_act, w_px, h_px, has_dpi, dpi_x, dpi_y = info
+                    src = f"DPI {dpi_x:.0f}×{dpi_y:.0f}" if has_dpi else "DPI default 96"
+                    self.lbl_img_actual_size.setText(f"{w_act:.2f} × {h_act:.2f} cm ({w_px}×{h_px} px, {src})")
+                else:
+                    self.lbl_img_actual_size.setText("")
+
+            self._set_image_size_rows_visible(True)
+
+            # Default: 14 cm na šířku, výšku dopočítáme dle poměru stran (aby to hned dávalo smysl)
+            px = self._get_image_px_size(fn)
+            w_cm = 14.0
+            h_cm = 0.0
+            if px and px[0] > 0:
+                h_cm = round(w_cm * (px[1] / px[0]), 2)
+
+            if hasattr(self, "spin_img_w_cm"):
+                self.spin_img_w_cm.setEnabled(True)
+                self.spin_img_h_cm.setEnabled(True)
+                if hasattr(self, "chk_img_keep_aspect"):
+                    self.chk_img_keep_aspect.setEnabled(True)
+                self.spin_img_w_cm.setValue(w_cm)
+                self.spin_img_h_cm.setValue(h_cm)
+
+            self._autosave_schedule()
+
+    def _clear_question_image(self) -> None:
+        """Odebere obrázek z aktuální otázky."""
+        if not getattr(self, "_current_question_id", None):
+            return
+        self._current_image_full_path = ""
+        self.image_path_edit.clear()
+        self.image_path_edit.setToolTip("")
+
+        if hasattr(self, "spin_img_w_cm"):
+            self.spin_img_w_cm.setValue(0.0)
+            self.spin_img_h_cm.setValue(0.0)
+            self.spin_img_w_cm.setEnabled(False)
+            self.spin_img_h_cm.setEnabled(False)
+        if hasattr(self, "chk_img_keep_aspect"):
+            self.chk_img_keep_aspect.setChecked(True)
+            self.chk_img_keep_aspect.setEnabled(False)
+
+        if hasattr(self, "lbl_img_actual_size"):
+            self.lbl_img_actual_size.setText("")
+        self._set_image_size_rows_visible(False)
+
+        self._autosave_schedule()
+
     # -------------------- Filtr --------------------
 
     def _apply_filter(self, text: str) -> None:
@@ -5299,29 +6979,38 @@ class MainWindow(QMainWindow):
 
         # Regexy
         rx_bonus_start = re.compile(r'^\s*Otázka\s+\d+.*BONUS', re.IGNORECASE)
-        
-        # Přísnější definice otázky: Musí začínat velkým písmenem a končit ?, ., nebo :
-        # Přidal jsem i konce řádků, aby to chytlo i "Uveďte příkaz..." (což nemusí mít na konci nic, pokud je to nadpis)
-        # Ale pro jistotu budeme vyžadovat, aby to nevypadalo jako odrážka.
-        rx_looks_like_question_start = re.compile(r'^[A-ZŽŠČŘĎŤŇ]') 
-        
+
+        # Podpora "1. Text ..." / "1) Text ..." (ručně psané číslování v textu)
+        rx_plain_numbered_question = re.compile(r'^\s*\d{1,3}\s*[\.)]\s+\S')
+
+        # Přísnější definice otázky: Musí začínat velkým písmenem
+        rx_looks_like_question_start = re.compile(r'^[A-ZŽŠČŘĎŤŇ]')
+
         rx_visual_bullet = re.compile(r'^\s*[\-–—•]')
         rx_not_question = re.compile(r'^(Slovník|Tabulka|Obrázek|Příklad|Body|Poznámka)', re.IGNORECASE)
 
         def html_escape(s: str) -> str:
             return _html.escape(s or "")
 
+        def strip_manual_numbering(s: str) -> str:
+            # Odstraní pouze ručně napsané "1." / "1)" na začátku
+            return re.sub(r'^\s*\d{1,3}\s*[\.)]\s+', '', (s or ""))
+
         # --- JÁDRO LOGIKY ---
         def is_start_of_new_question(p: dict) -> bool:
             text = p["text"].strip()
-            if not text: return False
-            
+            if not text:
+                return False
+
+            # 0. Ručně psané číslování "1." / "1)" -> nová otázka
+            if rx_plain_numbered_question.match(text):
+                return True
+
             # 1. Vizuální odrážka (pomlčka atd.) -> NIKDY není nová otázka
             if rx_visual_bullet.match(text):
                 return False
 
-            # 2. Začíná malým písmenem -> NIKDY není nová otázka (je to asi odpověď/pokračování)
-            #    (S výjimkou, pokud by to bylo číslované "1. něco", ale to ošetříme níže)
+            # 2. Začíná malým písmenem -> NIKDY není nová otázka
             if text[0].islower():
                 return False
 
@@ -5331,10 +7020,9 @@ class MainWindow(QMainWindow):
 
             # 4. Word číslovaný seznam (level 0)
             if p["is_numbered"] and p["ilvl"] == 0 and p["num_fmt"] != "bullet":
-                # Pokud to vypadá jako otázka (Velké písmeno) a není to vyloučené slovo
                 if rx_looks_like_question_start.match(text) and not rx_not_question.match(text):
                     return True
-            
+
             return False
 
         while i < n:
@@ -5349,36 +7037,40 @@ class MainWindow(QMainWindow):
             # -- START OTÁZKY --
             is_bonus = bool(rx_bonus_start.search(txt))
             q_type = "bonus" if is_bonus else "classic"
-            
-            clean_title = re.sub(r'^\d+\.\s*', '', txt)
-            if len(clean_title) > 60: clean_title = clean_title[:57] + "..."
-            
-            html_parts = [f"<p>{html_escape(txt)}</p>"]
-            
+
+            # Pokud je číslování ručně psané ("1."/"1)"), odstraň ho z titulku i z první věty v HTML
+            first_line_txt = strip_manual_numbering(txt)
+
+            clean_title = first_line_txt
+            if len(clean_title) > 60:
+                clean_title = clean_title[:57] + "..."
+
+            html_parts = [f"<p>{html_escape(first_line_txt)}</p>"]
+
             # -- ČTENÍ OBSAHU (Hladový režim, ale s respektem k nové otázce) --
             j = i + 1
             while j < n:
                 next_p = paragraphs[j]
                 next_txt = next_p["text"].strip()
-                
+
                 # Pokud narazíme na něco, co splňuje definici NOVÉ otázky, končíme.
                 if is_start_of_new_question(next_p):
                     break
-                
+
                 # Jinak je to součást této otázky
                 if next_txt:
                     html_parts.append(f"<p>{html_escape(next_txt)}</p>")
-                
+
                 j += 1
 
             full_html = "".join(html_parts)
-            
+
             q = Question.new_default(q_type)
             q.title = ("BONUS: " + clean_title) if is_bonus else clean_title
             q.text_html = full_html
             q.points = (0 if is_bonus else 1)
             q.bonus_correct = (1.0 if is_bonus else 0.0)
-            
+
             out.append(q)
             i = j
 
@@ -5744,18 +7436,40 @@ class MainWindow(QMainWindow):
             return False
 
     def _generate_docx_from_template(self, template_path: Path, output_path: Path,
-                                     simple_repl: Dict[str, str], rich_repl_html: Dict[str, str]) -> None:
+                                     simple_repl: Dict[str, str], rich_repl_html: Dict[str, object]) -> None:
+        """
+        Generuje DOCX. rich_repl_html může být:
+         - Dict[str, str] -> {placeholder: html_content}
+         - Dict[str, tuple] -> {placeholder: (html_content, image_path[, image_width_cm, image_height_cm])}
+        """
+        import docx
+        from docx.shared import Pt, Cm, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml import OxmlElement
+        import os
         
+        for ph, val in rich_repl_html.items():
+            if isinstance(val, tuple):
+                html_part, img_path = val[0], val[1]
+                if img_path:
+                    img_check = Path(img_path).exists() if isinstance(img_path, str) else False
+
+        # Parsing HTML
+        def parse_html_to_paragraphs(html):
+            # Zde voláme vaši existující třídu HTMLToDocxParser
+            parser = HTMLToDocxParser() 
+            parser.feed(html)
+            return parser.paragraphs
+
         try:
             doc = docx.Document(template_path)
         except Exception as e:
             QMessageBox.critical(self, "Export chyba", f"Nelze otevřít šablonu pomocí python-docx:\n{e}")
+            print(f"[ERROR] Nelze otevřít DOCX: {e}")
             return
 
         # -- HELPER: Extrakce a obnova Page Breaks --
         def extract_page_breaks(paragraph):
-            """Extrahuje <w:br w:type="page"/> elementy z odstavce."""
-            from lxml import etree
             breaks = []
             p_elem = paragraph._p
             for run_elem in p_elem.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}r'):
@@ -5765,208 +7479,417 @@ class MainWindow(QMainWindow):
             return breaks
         
         def restore_page_breaks(paragraph, breaks):
-            """Vrací page breaky na konec odstavce (nebo na libovolné místo v XML)."""
             if not breaks:
                 return
             p_elem = paragraph._p
-            # Vytvoříme run a vložíme breaky
-            from docx.oxml import OxmlElement
             new_run = OxmlElement('w:r')
             for br in breaks:
-                # Klonujeme break element
                 br_copy = br.__copy__()
                 new_run.append(br_copy)
             p_elem.append(new_run)
 
-        def insert_rich_question_block(paragraph, html_content):
+        # -- Helper: Vložení Rich Text bloku + Obrázku --
+        def insert_rich_question_block(paragraph, html_content, image_path=None, image_w_cm: float = 0.0, image_h_cm: float = 0.0):
+            
+            # 1. Parse HTML
             paras_data = parse_html_to_paragraphs(html_content)
-            if not paras_data: 
-                # Zachovej page breaky i při čistění
+        
+            # --- ZACHYTIT STYL PLACEHOLDERU JEŠTĚ PŘED CLEAR() ---
+            from copy import deepcopy
+            from docx.shared import Pt
+            from docx.oxml.ns import qn
+        
+            template_rPr = None
+            base_font_size = None
+            try:
+                src_run = paragraph.runs[0] if paragraph.runs else None
+                if src_run is not None:
+                    # 1) pokus přes API
+                    base_font_size = src_run.font.size
+                    # 2) doplněk: čti w:sz (half-points) přímo z rPr
+                    rPr = getattr(src_run._element, "rPr", None) if getattr(src_run, "_element", None) is not None else None
+                    if rPr is not None:
+                        template_rPr = deepcopy(rPr)
+                        if base_font_size is None:
+                            sz = rPr.find(qn("w:sz"))
+                            if sz is not None and getattr(sz, "val", None):
+                                base_font_size = Pt(int(sz.val) / 2.0)
+                # 3) fallback: velikost ze stylu odstavce
+                if base_font_size is None and paragraph.style and getattr(paragraph.style.font, "size", None):
+                    base_font_size = paragraph.style.font.size
+            except Exception:
+                pass
+        
+            def _apply_placeholder_style(run) -> None:
+                """Nejprve klon rPr placeholderu (rodina + další), pak VŽDY nastav velikost písma."""
+                if template_rPr is not None:
+                    try:
+                        run._element.rPr = deepcopy(template_rPr)
+                    except Exception:
+                        pass
+                if base_font_size:
+                    run.font.size = base_font_size
+                # run.font.name NENASTAVUJEME – řídí se rPr/styl šablony
+        
+            # Pokud je obsah prázdný a není ani obrázek -> vyčistit a konec
+            if not paras_data and not image_path: 
                 breaks = extract_page_breaks(paragraph)
                 paragraph.clear()
                 restore_page_breaks(paragraph, breaks)
                 return
             
             p_insert = paragraph._p
-            
-            for i, p_data in enumerate(paras_data):
-                if i == 0:
-                    new_p = paragraph
-                    # Zachovej page breaky
-                    breaks = extract_page_breaks(new_p)
-                    new_p.clear()
+            first_p_used = False
+        
+            # --- VLOŽENÍ TEXTU ---
+            if paras_data:
+                for i, p_data in enumerate(paras_data):
+                    if i == 0:
+                        new_p = paragraph
+                        breaks = extract_page_breaks(new_p)
+                        new_p.clear()
+                        first_p_used = True
+                    else:
+                        new_p = doc.add_paragraph()
+                        # minimal-change: přenést styl odstavce (zabraňuje pádu na default 12 pt)
+                        try:
+                            new_p.style = paragraph.style
+                        except Exception:
+                            pass
+                        p_insert.addnext(new_p._p)
+                        p_insert = new_p._p
+        
+                    # Zarovnání
+                    align = p_data.get('align', 'left')
+                    if align == 'center': new_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    elif align == 'right': new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                    elif align == 'justify': new_p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                    else: new_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
                     
-                    # Vložíme obsah a pak breaky
-                    # (Obsah bude vložen v process_paragraph, zde jen čistíme)
-                    restore_page_breaks(new_p, breaks)
-                else:
-                    new_p = doc.add_paragraph()
-                    p_insert.addnext(new_p._p)
-                    p_insert = new_p._p
-
-                # -- ZAROVNÁNÍ --
-                align = p_data.get('align', 'left')
-                if align == 'center': new_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                elif align == 'right': new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                elif align == 'justify': new_p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                else: new_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                
-                # -- MEZEROVÁNÍ (Spacing) --
-                new_p.paragraph_format.space_before = Pt(0)
-                new_p.paragraph_format.space_after = Pt(0)
-
-                # Prefix
-                if p_data.get('prefix'):
-                    new_p.paragraph_format.left_indent = Pt(48)
-                    new_p.paragraph_format.first_line_indent = Pt(-24)
-                    new_p.add_run(p_data['prefix'])
-                
-                # Runs
-                for r_data in p_data['runs']:
-                    text_content = r_data['text']
-                    parts = text_content.split('\n')
-                    for idx, part in enumerate(parts):
-                        if part:
-                            run = new_p.add_run(part)
-                            if r_data.get('b'): run.bold = True
-                            if r_data.get('i'): run.italic = True
-                            if r_data.get('u'): run.underline = True
-                            if r_data.get('color'):
-                                try:
-                                    rgb = r_data['color']
-                                    run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
-                                except: pass
+                    # Mezerování
+                    new_p.paragraph_format.space_before = Pt(0)
+                    new_p.paragraph_format.space_after = Pt(0)
+        
+                    # Prefix (odrážky)
+                    if p_data.get('prefix'):
+                        new_p.paragraph_format.left_indent = Pt(48)
+                        new_p.paragraph_format.first_line_indent = Pt(-24)
+                        r_pref = new_p.add_run(p_data['prefix'])
+                        _apply_placeholder_style(r_pref)
+                    
+                    # Obsah (Runs)
+                    for r_data in p_data['runs']:
+                        text_content = r_data['text']
+                        parts = text_content.split('\n')
+                        for idx, part in enumerate(parts):
+                            if part:
+                                run = new_p.add_run(part)
+                                _apply_placeholder_style(run)  # <<< KLÍČOVÉ
+                                if r_data.get('b'): run.bold = True
+                                if r_data.get('i'): run.italic = True
+                                if r_data.get('u'): run.underline = True
+                                if r_data.get('color'):
+                                    try:
+                                        rgb = r_data['color']
+                                        run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
+                                    except: pass
                         
-                        if idx < len(parts) - 1:
-                            run = new_p.add_run()
-                            run.add_break()
-
+                            if idx < len(parts) - 1:
+                                br = new_p.add_run()
+                                _apply_placeholder_style(br)  # <<< KLÍČOVÉ pro run s breakem
+                                br.add_break()
+            
+            # --- VLOŽENÍ OBRÁZKU ---
+            if image_path:
+                import shutil
+                import subprocess
+                import tempfile
+                
+                img_path_obj = Path(image_path) if isinstance(image_path, str) else image_path
+                final_img_path = img_path_obj
+        
+                if not img_path_obj.exists():
+                    print(f"[ERROR]   Obrázek NEEXISTUJE! {img_path_obj}")
+                    return
+        
+                # --- KONVERZE HEIC -> JPG (pro macOS) ---
+                is_heic = img_path_obj.suffix.lower() in ('.heic', '.heif')
+                temp_jpg = None
+                
+                if is_heic:
+                    try:
+                        # Vytvoříme dočasný soubor
+                        fd, temp_jpg = tempfile.mkstemp(suffix=".jpg")
+                        os.close(fd)
+                        
+                        # Použijeme systémový nástroj sips (macOS) nebo ImageMagick
+                        # Zkusíme sips (je na každém macu)
+                        cmd = ["sips", "-s", "format", "jpeg", str(img_path_obj), "--out", temp_jpg]
+                        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        
+                        final_img_path = Path(temp_jpg)
+                    except Exception as e:
+                        print(f"[ERROR]   Chyba konverze HEIC: {e}")
+                        # Fallback - zkusíme vložit originál, i když to asi selže
+                        final_img_path = img_path_obj
+        
+                # Vytvoříme nový odstavec pro obrázek
+                img_p = doc.add_paragraph()
+                if not paras_data:
+                    paragraph.clear()
+                    img_p = paragraph
+                else:
+                    # minimal-change: zachovat styl odstavce
+                    try:
+                        img_p.style = paragraph.style
+                    except Exception:
+                        pass
+                    p_insert.addnext(img_p._p)
+                    p_insert = img_p._p
+        
+                img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                img_p.paragraph_format.space_before = Pt(6)
+                img_p.paragraph_format.space_after = Pt(6)
+                
+                try:
+                    run = img_p.add_run()
+                    _apply_placeholder_style(run)  # aby vložené popisky/mezery držely velikost
+                    # Pokud je 0, zachováme původní default (14 cm). Pokud je výška 0, necháme Word dopočítat poměr.
+                    w_use = float(image_w_cm or 0.0)
+                    h_use = float(image_h_cm or 0.0)
+                    if w_use <= 0.0 and h_use <= 0.0:
+                        w_use = 14.0
+        
+                    if w_use > 0.0 and h_use > 0.0:
+                        run.add_picture(str(final_img_path), width=Cm(w_use), height=Cm(h_use))
+                    elif w_use > 0.0:
+                        run.add_picture(str(final_img_path), width=Cm(w_use))
+                    else:
+                        run.add_picture(str(final_img_path), height=Cm(h_use)) 
+                except Exception as e:
+                    print(f"[ERROR] Chyba při vkládání obrázku: {e}")
+                finally:
+                    # Úklid dočasného souboru
+                    if temp_jpg and os.path.exists(temp_jpg):
+                        try:
+                            os.remove(temp_jpg)
+                        except: pass
+        
+            # --- OBNOVA PAGE BREAKS ---
+            if 'breaks' in locals() and breaks:
+                break_p = doc.add_paragraph()
+                # minimal-change: zachovat styl i na break odstavci
+                try:
+                    break_p.style = paragraph.style
+                except Exception:
+                    pass
+                p_insert.addnext(break_p._p)
+                restore_page_breaks(break_p, breaks)
 
         # -- Helper: Zpracování jednoho odstavce (Inline i Block) --
         def process_paragraph(p):
-            full_text = p.text
-            if not full_text.strip(): return
+            from copy import deepcopy
+            from docx.shared import Pt
+            from docx.oxml.ns import qn
 
-            # 1. BLOCK CHECK
-            txt_clean = full_text.strip()
-            matched_rich = None
-            for ph, html in rich_repl_html.items():
-                if txt_clean == f"<{ph}>" or txt_clean == f"{{{ph}}}":
-                    matched_rich = (ph, html)
-                    break
-            
-            if matched_rich:
-                insert_rich_question_block(p, matched_rich[1])
+            def _extract_size_from_rPr(source_run):
+                """Vrátí Pt velikost z rPr/sz (half-points) nebo None."""
+                try:
+                    rPr = getattr(source_run._element, "rPr", None)
+                    if rPr is None:
+                        return None
+                    sz = rPr.find(qn("w:sz"))
+                    if sz is not None and getattr(sz, "val", None):
+                        hp = int(sz.val)  # w:sz je v half-points
+                        return Pt(hp / 2.0)
+                except Exception:
+                    pass
+                return None
+
+            full_text = p.text
+            if not ("<" in full_text or "{" in full_text):
                 return
 
-            # 2. INLINE CHECK
-            keys_found = []
+            # 1) BLOCK CHECK
+            txt_clean = full_text.strip()
+            matched_rich = None
+            for ph, val in rich_repl_html.items():
+                if isinstance(val, tuple):
+                    html_content, img_path = val[0], val[1]
+                else:
+                    html_content, img_path = val, None
+                if txt_clean == f"<{ph}>" or txt_clean == f"{{{ph}}}":
+                    matched_rich = (
+                        html_content,
+                        img_path,
+                        float((val[2] if len(val) > 2 else 0.0) or 0.0),
+                        float((val[3] if len(val) > 3 else 0.0) or 0.0),
+                    )
+                    break
+
+            if matched_rich:
+                insert_rich_question_block(p, matched_rich[0], matched_rich[1], matched_rich[2], matched_rich[3])
+                return
+
+            # 2) INLINE CHECK (zkráceno, bez obrázků)
+            keys_found: list[str] = []
             for k in simple_repl.keys():
                 if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
                     keys_found.append(k)
             for k in rich_repl_html.keys():
                 if f"<{k}>" in full_text or f"{{{k}}}" in full_text:
                     keys_found.append(k)
-            
+
             if not keys_found:
                 return
 
-            segments = [full_text]
-            all_repl_data = {}
-            for k, v in simple_repl.items(): 
-                all_repl_data[k] = {'type': 'simple', 'val': v}
-            for k, html in rich_repl_html.items(): 
-                all_repl_data[k] = {'type': 'rich', 'val': html}
-            
+            # NOVĚ: rozlišíme, zda jde o placeholder Otazka\d+
+            is_question_placeholder = any(re.match(r"^Otazka\d+$", k) for k in keys_found)
+
+            # Segmentace
+            segments: list = [full_text]
+            all_repl_data: dict = {}
+            for k, v in simple_repl.items():
+                all_repl_data[k] = {"type": "simple", "val": v}
+            for k, val in rich_repl_html.items():
+                html = val[0] if isinstance(val, tuple) else val
+                all_repl_data[k] = {"type": "rich", "val": html}
+
             for k in keys_found:
                 info = all_repl_data[k]
                 tokens = [f"<{k}>", f"{{{k}}}"]
-                
                 for token in tokens:
                     new_segments = []
                     for seg in segments:
                         if isinstance(seg, str):
                             parts = seg.split(token)
                             for i, part in enumerate(parts):
-                                if part: new_segments.append(part)
+                                if part:
+                                    new_segments.append(part)
                                 if i < len(parts) - 1:
                                     new_segments.append(info)
                         else:
                             new_segments.append(seg)
                     segments = new_segments
 
-            # -- APLIKACE ZMĚN + ZACHOVÁNÍ PAGE BREAKS --
-            base_font_name = None
-            base_font_size = None
+            # --- ZACHYTIT STYL PLACEHOLDERU ---
             base_bold = None
-            
-            if p.runs:
-                r0 = p.runs[0]
-                base_font_name = r0.font.name
-                base_font_size = r0.font.size
-                base_bold = r0.bold
+            template_rPr = None
+            base_font_size = None
 
-            # Zachovej page breaky PŘED clear
+            # 2a) najdeme run, který skutečně obsahuje některý token
+            tokens_all = []
+            for k in keys_found:
+                tokens_all.extend((f"<{k}>", f"{{{k}}}"))
+
+            source_run = None
+            for run in p.runs:
+                t = run.text or ""
+                if any(tok in t for tok in tokens_all):
+                    source_run = run
+                    break
+            if source_run is None:
+                # fallback: první neprázdný run
+                for run in p.runs:
+                    if (run.text or "").strip():
+                        source_run = run
+                        break
+
+            if source_run is not None:
+                base_bold = source_run.bold
+                base_font_size = source_run.font.size
+                if base_font_size is None:
+                    xml_size = _extract_size_from_rPr(source_run)
+                    if xml_size is not None:
+                        base_font_size = xml_size
+                try:
+                    rPr = getattr(source_run._element, "rPr", None)
+                    if rPr is not None:
+                        template_rPr = deepcopy(rPr)
+                except Exception:
+                    template_rPr = None
+
+            # 2b) fallback: velikost ze stylu odstavce (typické pro bullets)
+            try:
+                if (base_font_size is None) and p.style and getattr(p.style.font, "size", None):
+                    base_font_size = p.style.font.size
+            except Exception:
+                pass
+
+            # 2c) NOVĚ: poslední fallback – jen pro Otazka\d+ defaultně 9 pt
+            if base_font_size is None and is_question_placeholder:
+                base_font_size = Pt(9)
+
+            # Vyčistit obsah, ale zachovat vlastnosti odstavce
             page_breaks = extract_page_breaks(p)
-            
             p.clear()
-            
-            # Vložíme segmenty
+
+            def _apply_placeholder_style(run):
+                """1) pokus o rPr z placeholderu, 2) VŽDY nastavit velikost, pokud ji známe."""
+                if template_rPr is not None:
+                    try:
+                        run._element.rPr = deepcopy(template_rPr)
+                    except Exception:
+                        pass
+                if base_font_size:
+                    run.font.size = base_font_size
+                # font-family úmyslně nenastavujeme – jde z rPr/stylu šablony
+
+            # Sestavení výsledku
             for seg in segments:
                 if isinstance(seg, str):
                     run = p.add_run(seg)
-                    if base_font_name: run.font.name = base_font_name
-                    if base_font_size: run.font.size = base_font_size
-                    
+                    _apply_placeholder_style(run)
                 elif isinstance(seg, dict):
-                    val = seg['val']
-                    if seg['type'] == 'simple':
-                        run = p.add_run(val)
-                        if base_font_name: run.font.name = base_font_name
-                        if base_font_size: run.font.size = base_font_size
-                        if base_bold is not None: run.bold = base_bold
-                        
-                    elif seg['type'] == 'rich':
+                    val = seg["val"]
+                    if seg["type"] == "simple":
+                        run = p.add_run(str(val))
+                        _apply_placeholder_style(run)
+                        if base_bold is not None:
+                            run.bold = base_bold
+                    elif seg["type"] == "rich":
                         paras = parse_html_to_paragraphs(val)
-                        
                         for p_idx, p_data in enumerate(paras):
                             if p_idx > 0:
-                                run_break = p.add_run()
-                                run_break.add_break()
-                            
-                            for r_data in p_data['runs']:
-                                text_content = r_data['text']
-                                parts = text_content.split('\n')
+                                p.add_run().add_break()
+                            for r_data in p_data["runs"]:
+                                text_content = r_data["text"]
+                                parts = text_content.split("\n")
                                 for idx_part, part in enumerate(parts):
                                     if part:
                                         run = p.add_run(part)
-                                        if r_data.get('b'): run.bold = True
-                                        if r_data.get('i'): run.italic = True
-                                        if r_data.get('u'): run.underline = True
-                                        if r_data.get('color'):
+                                        _apply_placeholder_style(run)  # nejprve velikost/styl
+                                        # pak jen b/i/u/color
+                                        if r_data.get("b"):
+                                            run.bold = True
+                                        if r_data.get("i"):
+                                            run.italic = True
+                                        if r_data.get("u"):
+                                            run.underline = True
+                                        if r_data.get("color"):
                                             try:
-                                                rgb = r_data['color']
-                                                run.font.color.rgb = RGBColor(int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16))
-                                            except: pass
-                                        
-                                        if base_font_name: run.font.name = base_font_name
-                                        if base_font_size: run.font.size = base_font_size
-                                    
+                                                rgb = r_data["color"]
+                                                run.font.color.rgb = RGBColor(
+                                                    int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16)
+                                                )
+                                            except Exception:
+                                                pass
                                     if idx_part < len(parts) - 1:
                                         p.add_run().add_break()
-            
-            # Obnovíme page breaky NA KONCI odstavce
+
             restore_page_breaks(p, page_breaks)
 
-
+        # --- HLAVNÍ SMYČKA ---
+        
         # 1. Body
-        for p in doc.paragraphs:
+        for i, p in enumerate(doc.paragraphs):
+            
             process_paragraph(p)
             
         # 2. Tables in Body
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
+        for table_idx, table in enumerate(doc.tables):
+            for row_idx, row in enumerate(table.rows):
+                for cell_idx, cell in enumerate(row.cells):
                     for p in cell.paragraphs:
                         process_paragraph(p)
         
@@ -5975,22 +7898,457 @@ class MainWindow(QMainWindow):
             for h in [section.header, section.first_page_header]:
                 if h:
                     for p in h.paragraphs: process_paragraph(p)
-                    for t in h.tables:
-                        for r in t.rows:
-                            for c in r.cells:
-                                for p in c.paragraphs: process_paragraph(p)
             for f in [section.footer, section.first_page_footer]:
                 if f:
                     for p in f.paragraphs: process_paragraph(p)
-                    for t in f.tables:
-                        for r in t.rows:
-                            for c in r.cells:
-                                for p in c.paragraphs: process_paragraph(p)
 
         try:
-            doc.save(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            doc.save(str(output_path))
         except Exception as e:
+            print(f"[ERROR] Chyba uložení: {e}")
+            import traceback
+            traceback.print_exc()
             QMessageBox.critical(self, "Chyba uložení", f"Nelze uložit DOCX:\n{e}")
+            
+    def default_root_obj(self) -> RootData:
+        return RootData(groups=[], trash=[])
+    
+    def _ensure_restored_subgroup(self) -> Subgroup:
+        """Zajistí existenci cíle pro obnovené otázky a vrátí tuto podskupinu."""
+        restored_group_name = "Obnovené ze smazaných"
+        restored_subgroup_name = "Obnovené otázky"
+    
+        g = None
+        for gg in self.root.groups:
+            if gg.name == restored_group_name:
+                g = gg
+                break
+        if g is None:
+            g = Group(id=str(_uuid.uuid4()), name=restored_group_name, subgroups=[])
+            self.root.groups.append(g)
+    
+        sg = None
+        for s in g.subgroups:
+            if s.name == restored_subgroup_name:
+                sg = s
+                break
+        if sg is None:
+            sg = Subgroup(id=str(_uuid.uuid4()), name=restored_subgroup_name, subgroups=[], questions=[])
+            g.subgroups.append(sg)
+    
+        return sg
+    
+    def _trash_delete_selected(self) -> None:
+        if not hasattr(self, "table_trash"):
+            return
+    
+        sel = self.table_trash.selectionModel().selectedRows() if self.table_trash.selectionModel() else []
+        if not sel:
+            QMessageBox.information(self, "Koš", "Vyberte otázky pro trvalé smazání.")
+            return
+    
+        if QMessageBox.question(self, "Koš", "Trvale smazat vybrané otázky z koše?") != QMessageBox.Yes:
+            return
+    
+        trash_list = getattr(self.root, "trash", [])
+        if not isinstance(trash_list, list):
+            return
+    
+        qids: set[str] = set()
+        for r in sel:
+            it = self.table_trash.item(r.row(), 0)
+            if not it:
+                continue
+            qid = it.data(Qt.UserRole)
+            if isinstance(qid, str) and qid:
+                qids.add(qid)
+    
+        if not qids:
+            return
+    
+        new_trash: List[dict] = []
+        for rec in trash_list:
+            if not isinstance(rec, dict):
+                continue
+            qd = rec.get("question", {})
+            if isinstance(qd, dict) and qd.get("id", "") in qids:
+                continue
+            new_trash.append(rec)
+    
+        self.root.trash = new_trash
+        self._refresh_trash_table()
+        self.save_data()
+        self.statusBar().showMessage("Vybrané položky byly trvale smazány z koše.", 3000)
+            
+    def _trash_empty(self) -> None:
+        trash_list = getattr(self.root, "trash", [])
+        if not isinstance(trash_list, list) or not trash_list:
+            return
+    
+        if QMessageBox.question(self, "Koš", "Vysypat koš? (Trvale smaže všechny otázky v koši)") != QMessageBox.Yes:
+            return
+    
+        self.root.trash = []
+        self._refresh_trash_table()
+        self.save_data()
+        self.statusBar().showMessage("Koš vysypán.", 2500)
+    
+    def _trash_restore_selected(self) -> None:
+        if not hasattr(self, "table_trash"):
+            return
+    
+        sel = self.table_trash.selectionModel().selectedRows() if self.table_trash.selectionModel() else []
+        if not sel:
+            QMessageBox.information(self, "Koš", "Vyberte otázky pro obnovení.")
+            return
+    
+        trash_list = getattr(self.root, "trash", [])
+        if not isinstance(trash_list, list):
+            QMessageBox.warning(self, "Koš", "Koš není dostupný v datech.")
+            return
+    
+        qids: List[str] = []
+        for r in sel:
+            it = self.table_trash.item(r.row(), 0)
+            if not it:
+                continue
+            qid = it.data(Qt.UserRole)
+            if isinstance(qid, str) and qid:
+                qids.append(qid)
+    
+        if not qids:
+            return
+    
+        remaining: List[dict] = []
+        restored_count = 0
+    
+        for rec in trash_list:
+            if not isinstance(rec, dict):
+                continue
+            qd = rec.get("question", {})
+            if not isinstance(qd, dict):
+                remaining.append(rec)
+                continue
+    
+            qid = qd.get("id", "")
+            if qid not in qids:
+                remaining.append(rec)
+                continue
+    
+            gid = rec.get("source_group_id", "") or ""
+            sgid = rec.get("source_subgroup_id", "") or ""
+    
+            target_sg = None
+    
+            # obnovit do původního místa pokud existuje (spolehne se na tvé existující _find_group/_find_subgroup)
+            if gid and sgid and hasattr(self, "_find_group") and hasattr(self, "_find_subgroup"):
+                try:
+                    g = self._find_group(gid)
+                    sg = self._find_subgroup(gid, sgid)
+                    if g is not None and sg is not None:
+                        target_sg = sg
+                except Exception:
+                    target_sg = None
+    
+            if target_sg is None:
+                _, target_sg = self._ensure_restored_targets()
+    
+            if not hasattr(self, "_parse_question"):
+                QMessageBox.warning(self, "Koš", "Chybí _parse_question – nelze obnovit.")
+                remaining.append(rec)
+                continue
+    
+            q_obj = self._parse_question(qd)
+            target_sg.questions.append(q_obj)
+            restored_count += 1
+    
+        self.root.trash = remaining
+        self._refresh_tree()
+        self._refresh_trash_table()
+        self.save_data()
+        self.statusBar().showMessage(f"Obnoveno {restored_count} otázek.", 3000)
+    
+    def _on_trash_selection_changed(self) -> None:
+        if not hasattr(self, "table_trash"):
+            return
+    
+        sel = self.table_trash.selectionModel().selectedRows() if self.table_trash.selectionModel() else []
+        has_sel = bool(sel)
+    
+        trash_list = getattr(self.root, "trash", [])
+        has_any = isinstance(trash_list, list) and len(trash_list) > 0
+    
+        if hasattr(self, "btn_trash_restore"):
+            self.btn_trash_restore.setEnabled(has_sel)
+        if hasattr(self, "btn_trash_delete"):
+            self.btn_trash_delete.setEnabled(has_sel)
+        if hasattr(self, "btn_trash_empty"):
+            self.btn_trash_empty.setEnabled(has_any)
+    
+        if not hasattr(self, "trash_detail"):
+            return
+    
+        if not has_sel:
+            self.trash_detail.setPlainText("")
+            return
+    
+        row = sel[0].row()
+        it = self.table_trash.item(row, 0)
+        qid = it.data(Qt.UserRole) if it else ""
+        if not isinstance(qid, str) or not qid:
+            self.trash_detail.setPlainText("")
+            return
+    
+        rec = None
+        for r in trash_list if isinstance(trash_list, list) else []:
+            if not isinstance(r, dict):
+                continue
+            qd = r.get("question", {})
+            if isinstance(qd, dict) and qd.get("id", "") == qid:
+                rec = r
+                break
+    
+        if not rec:
+            self.trash_detail.setPlainText("")
+            return
+    
+        qd = rec.get("question", {})
+        if not isinstance(qd, dict):
+            qd = {}
+    
+        title = qd.get("title", "")
+        qtype = qd.get("type", "classic")
+        deleted_at = rec.get("deleted_at", "")
+        gname = rec.get("source_group_name", "")
+        sg_path = rec.get("source_subgroup_path", "")
+        if not isinstance(sg_path, str) or not sg_path:
+            sg_path = rec.get("source_subgroup_name", "")
+    
+        # NOVÉ: náhled bez HTML značek
+        text_html = qd.get("text_html", "") or ""
+        try:
+            doc = QTextDocument()
+            doc.setHtml(text_html)
+            text_plain = doc.toPlainText()
+        except Exception:
+            text_plain = text_html
+    
+        correct_answer = qd.get("correct_answer", "") or ""
+    
+        txt = []
+        txt.append(f"Název: {title}")
+        txt.append(f"Typ: {'BONUS' if qtype == 'bonus' else 'Klasická'}")
+        txt.append(f"Smazáno: {deleted_at}")
+        txt.append(f"Původní skupina: {gname}")
+        txt.append(f"Původní cesta (podskupiny): {sg_path}")
+        txt.append("")
+        txt.append("Obsah:")
+        txt.append(text_plain)
+        if correct_answer:
+            txt.append("")
+            txt.append("Správná odpověď:")
+            txt.append(correct_answer)
+    
+        self.trash_detail.setPlainText("\n".join(txt))
+        
+    def _ensure_restored_targets(self) -> Tuple["Group", "Subgroup"]:
+        restored_group_name = "Obnovené ze smazaných"
+        restored_subgroup_name = "Obnovené otázky"
+    
+        g = None
+        for gg in self.root.groups:
+            if gg.name == restored_group_name:
+                g = gg
+                break
+        if g is None:
+            g = Group(id=str(_uuid.uuid4()), name=restored_group_name, subgroups=[])
+            self.root.groups.append(g)
+    
+        sg = None
+        for s in g.subgroups:
+            if s.name == restored_subgroup_name:
+                sg = s
+                break
+        if sg is None:
+            sg = Subgroup(id=str(_uuid.uuid4()), name=restored_subgroup_name, subgroups=[], questions=[])
+            g.subgroups.append(sg)
+    
+        return g, sg
+
+    def _refresh_trash_table(self) -> None:
+        if not hasattr(self, "table_trash"):
+            return
+    
+        trash_list = getattr(self.root, "trash", [])
+        if not isinstance(trash_list, list):
+            trash_list = []
+    
+        # Zobrazíme nejnovější nahoře
+        def sort_key(r: dict) -> str:
+            if isinstance(r, dict):
+                return str(r.get("deleted_at", ""))
+            return ""
+        rows = sorted(trash_list, key=sort_key, reverse=True)
+    
+        self.table_trash.setSortingEnabled(False)
+        self.table_trash.setRowCount(0)
+    
+        for rec in rows:
+            if not isinstance(rec, dict):
+                continue
+            qd = rec.get("question", {})
+            if not isinstance(qd, dict):
+                qd = {}
+    
+            qid = qd.get("id", "")
+            title = qd.get("title") or "(bez názvu)"
+            qtype = qd.get("type", "classic")
+            type_txt = "BONUS" if qtype == "bonus" else "Klasická"
+            deleted_at = rec.get("deleted_at", "")
+            gname = rec.get("source_group_name", "")
+            # NOVÉ: celá cesta podskupin (fallback na původní název)
+            sg_path = rec.get("source_subgroup_path", "")
+            if not isinstance(sg_path, str) or not sg_path:
+                sg_path = rec.get("source_subgroup_name", "")
+    
+            row = self.table_trash.rowCount()
+            self.table_trash.insertRow(row)
+    
+            it_title = QTableWidgetItem(title)
+            it_title.setData(Qt.UserRole, qid)
+    
+            it_type = QTableWidgetItem(type_txt)
+            it_deleted = QTableWidgetItem(deleted_at)
+            it_g = QTableWidgetItem(gname)
+            it_path = QTableWidgetItem(sg_path)
+    
+            self.table_trash.setItem(row, 0, it_title)
+            self.table_trash.setItem(row, 1, it_type)
+            self.table_trash.setItem(row, 2, it_deleted)
+            self.table_trash.setItem(row, 3, it_g)
+            self.table_trash.setItem(row, 4, it_path)
+    
+        self.table_trash.setSortingEnabled(True)
+    
+        # Fit sloupců na obsah (kromě názvu otázky)
+        header = self.table_trash.horizontalHeader()
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+    
+        self._on_trash_selection_changed()
+        
+    def _trash_delete_tree_items(self, items: List[QTreeWidgetItem]) -> None:
+        """Smaže zvolené položky do Koše (bez dalšího potvrzování). Používá se pro DnD vyhození mimo seznam."""
+        if not items:
+            return
+    
+        if not hasattr(self.root, "trash") or not isinstance(getattr(self.root, "trash", None), list):
+            self.root.trash = []
+    
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        trash_records: List[dict] = []
+        seen_qids: set[str] = set()
+    
+        selected_question_metas: List[dict] = []
+        selected_subgroup_metas: List[dict] = []
+        selected_group_ids: List[str] = []
+    
+        to_delete_q_ids = set()
+        to_delete_sg_ids = set()
+        to_delete_g_ids = set()
+    
+        for it in items:
+            meta = it.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind")
+            if kind == "question":
+                to_delete_q_ids.add(meta.get("id"))
+                selected_question_metas.append(meta)
+            elif kind == "subgroup":
+                to_delete_sg_ids.add(meta.get("id"))
+                selected_subgroup_metas.append(meta)
+            elif kind == "group":
+                to_delete_g_ids.add(meta.get("id"))
+                selected_group_ids.append(meta.get("id"))
+    
+        def add_question_to_trash(q: Question, gid: str, sgid: str, gname: str, sgname: str, sg_path: str) -> None:
+            if not q or not q.id:
+                return
+            if q.id in seen_qids:
+                return
+            seen_qids.add(q.id)
+            trash_records.append({
+                "question": asdict(q),
+                "deleted_at": now_iso,
+                "source_group_id": gid or "",
+                "source_group_name": gname or "",
+                "source_subgroup_id": sgid or "",
+                "source_subgroup_name": sgname or "",
+                "source_subgroup_path": sg_path or "",
+            })
+    
+        def collect_questions_under_subgroups(subgroups: List[Subgroup], gid: str, gname: str, path_names: List[str]) -> None:
+            for sg in subgroups:
+                p_names = list(path_names) + [sg.name]
+                sg_path = " / ".join([n for n in p_names if n])
+    
+                for q in sg.questions:
+                    add_question_to_trash(q, gid, sg.id, gname, sg.name, sg_path)
+    
+                if sg.subgroups:
+                    collect_questions_under_subgroups(sg.subgroups, gid, gname, p_names)
+    
+        # 1) Skupiny
+        for gid in selected_group_ids:
+            g = self._find_group(gid)
+            if not g:
+                continue
+            collect_questions_under_subgroups(g.subgroups, g.id, g.name, [])
+    
+        # 2) Podskupiny
+        for meta in selected_subgroup_metas:
+            gid = meta.get("parent_group_id") or ""
+            sgid = meta.get("id") or ""
+            g = self._find_group(gid)
+            gname = g.name if g else ""
+            sg = self._find_subgroup(gid, sgid)
+            if not sg:
+                continue
+            collect_questions_under_subgroups([sg], gid, gname, [])
+    
+        # 3) Konkrétní otázky
+        for meta in selected_question_metas:
+            gid = meta.get("parent_group_id") or ""
+            sgid = meta.get("parent_subgroup_id") or ""
+            qid = meta.get("id") or ""
+            if not qid:
+                continue
+            q = self._find_question(gid, sgid, qid)
+            if not q:
+                continue
+            g = self._find_group(gid)
+            gname = g.name if g else ""
+            sg = self._find_subgroup(gid, sgid)
+            sgname = sg.name if sg else ""
+            add_question_to_trash(q, gid, sgid, gname, sgname, sgname)
+    
+        if trash_records:
+            self.root.trash.extend(trash_records)
+    
+        # Smazání z modelu
+        self.root.groups = [g for g in self.root.groups if g.id not in to_delete_g_ids]
+        for g in self.root.groups:
+            g.subgroups = [sg for sg in g.subgroups if sg.id not in to_delete_sg_ids]
+            self._clean_subgroups_recursive(g.subgroups, to_delete_sg_ids, to_delete_q_ids)
+    
+        self._refresh_tree()
+        self._refresh_trash_table()
+        self._clear_editor()
+        self.save_data()
+        self.statusBar().showMessage("Položka odstraněna ze seznamu (uloženo do Koše).", 3000)
 
     # -------------------- Pomocné --------------------
 

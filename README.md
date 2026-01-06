@@ -1,5 +1,24 @@
 # Crypto Exam Generator
 
+## v8.3.6 — 2026-01-06
+- Import z DOCX: po importu se zachová stav sbalení/rozbalení stromu.
+- Rozbalí se **pouze** podskupina, do které byl import proveden (tlačítkem *Import* i přes kontextovou akci).
+
+## v8.3.5 — 2026-01-06
+- Kontextové menu podskupiny: přidána akce **„Import z DOCX do této podskupiny…“**.
+- Import z DOCX nyní umí jednorázové **předvolení cíle**, takže lze přeskočit dialog s výběrem skupiny/podskupiny.
+
+## v8.3.4 — 2026-01-06
+- Strom otázek: přidána kontextová akce **„Přejmenovat…“** pro skupiny i podskupiny.
+  Přejmenování probíhá s uchováním stavu sbalení/rozbalení stromu.
+  
+## v8.3.3 — 2026-01-06
+- Strom otázek: při přejmenování skupiny/podskupiny se zachová stav sbalení/rozbalení (žádné hromadné auto-rozbalení).
+
+## v8.3.2 — 2026-01-06
+- Při přidání podskupiny se po obnově stavu rozbalí **jen rodičovská větev** (skupina/podskupina),
+  pokud byla před akcí **sbalená**. Ostatní větve zůstávají beze změny.
+
 **Verze:** v8.3.0 · **Platforma:** macOS · **GUI:** PySide6
 
 Crypto Exam Generator je desktopová aplikace pro správu otázek (skupiny → podskupiny → otázky) a generování **DOCX** dokumentů ze šablon.

@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.3.4"
+APP_VERSION = "8.3.6"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -4423,7 +4423,7 @@ class MainWindow(QMainWindow):
             return
             
         self.tree.setCurrentItem(item)
-
+    
         # Robustní získání metadat (podpora tuple i dict)
         raw_data = item.data(0, Qt.UserRole)
         kind = "unknown"
@@ -4432,45 +4432,50 @@ class MainWindow(QMainWindow):
             kind = raw_data[0]
         elif isinstance(raw_data, dict):
             kind = raw_data.get("kind", "unknown")
-
+    
         menu = QMenu(self.tree)
         has_action = False
-
+    
         # 1. Přidat podskupinu (Group/Subgroup)
         if kind in ("group", "subgroup"):
             act = menu.addAction("Přidat podskupinu")
             act.triggered.connect(self._add_subgroup)
             has_action = True
-
+    
         # 2. Přidat otázku (Subgroup)
         if kind == "subgroup":
             act = menu.addAction("Přidat otázku")
             act.triggered.connect(self._add_question)
             has_action = True
-            
+    
+            # NOVÉ: Import z DOCX přímo do vybrané podskupiny (přeskočí volbu cíle)
+            act_imp = menu.addAction("Import z DOCX do této podskupiny…")
+            act_imp.triggered.connect(self._import_docx_into_selected_subgroup)
+            has_action = True
+                
         # 3. Duplikovat otázku (Question)
         if kind == "question":
             act = menu.addAction("Duplikovat otázku")
             act.triggered.connect(self._duplicate_question)
             has_action = True
-
+    
             # NOVÉ: Duplikovat do podskupiny
             act_dup_to = menu.addAction("Duplikovat do podskupiny")
             act_dup_to.triggered.connect(self._duplicate_question_to_subgroup)
             has_action = True
-            
+                
         if kind in ("group", "subgroup"):
             act_rename = menu.addAction("Přejmenovat…")
             act_rename.triggered.connect(self._rename_group_or_subgroup_dialog)
             has_action = True
-
+    
         if has_action:
             menu.addSeparator()
-
+    
         # 4. Smazat (Vše) -> Použijeme existující metodu _delete_selected
         act_del = menu.addAction("Smazat")
         act_del.triggered.connect(self._delete_selected)
-
+    
         menu.exec(self.tree.mapToGlobal(pos))
 
     def _change_indent(self, steps: int) -> None:
@@ -7217,50 +7222,65 @@ class MainWindow(QMainWindow):
         # V importu si vytvoříme "Klasické" a "Bonusové" specificky.
         return g.id, None
 
-
     def _import_from_docx(self) -> None:
         # Výchozí složka pro import
         import_dir = self.project_root / "data" / "Staré písemky"
         import_dir.mkdir(parents=True, exist_ok=True)
-
+    
         paths, _ = QFileDialog.getOpenFileNames(self, "Import z DOCX", str(import_dir), "Word dokument (*.docx)")
         if not paths:
             return
-
-        # 1. Výběr cílové skupiny/podskupiny pomocí dialogu (NOVÉ)
-        dlg = MoveTargetDialog(self)
-        dlg.setWindowTitle("Importovat do...")
-        if dlg.exec() != QDialog.Accepted:
-            return
-        
-        target_gid, target_sgid = dlg.selected_target()
-        if not target_gid:
-             return
-
-        # Získání reference na cílovou podskupinu
+    
+        # 1) Cílová skupina/podskupina
+        #    Podporujeme jednorázové předvolení cíle z kontextového menu podskupiny.
+        override = getattr(self, "_import_target_override", None)
+        if override:
+            try:
+                target_gid, target_sgid = override
+            except Exception:
+                target_gid, target_sgid = None, None
+            # úklid override, aby běžný import dál fungoval standardně
+            try:
+                delattr(self, "_import_target_override")
+            except Exception:
+                pass
+            if not target_gid:
+                return
+        else:
+            dlg = MoveTargetDialog(self)
+            dlg.setWindowTitle("Importovat do...")
+            if dlg.exec() != QDialog.Accepted:
+                return
+            target_gid, target_sgid = dlg.selected_target()
+            if not target_gid:
+                return
+    
+        # Získání reference na cílovou podskupinu (případně vytvoření Default)
         target_sg = None
         if target_sgid:
             target_sg = self._find_subgroup(target_gid, target_sgid)
         else:
-            # Pokud vybral jen skupinu, zkusíme najít/vytvořit první podskupinu
+            # Pokud vybral jen skupinu, použij první nebo vytvoř Default
             g = self._find_group(target_gid)
             if g:
                 if g.subgroups:
                     target_sg = g.subgroups[0]
                 else:
-                    # Vytvoření defaultní podskupiny, pokud skupina žádnou nemá
                     new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
                     g.subgroups.append(new_sg)
                     target_sg = new_sg
-
+                    target_sgid = new_sg.id  # doplníme ID nově vytvořené podskupiny
+    
         if not target_sg:
             QMessageBox.warning(self, "Chyba", "Nepodařilo se určit cílovou podskupinu.")
             return
-
-        # 2. Vytvoření indexu existujících otázek pro kontrolu duplicit
-        #    Jako klíč použijeme ostripovaný HTML obsah.
+    
+        # 2) Uložit aktuální stav rozbalení před změnou
+        expanded_before = self._capture_tree_expansion_state()
+    
+        # 3) Index existujících otázek (duplicitní ochrana)
         existing_hashes = set()
-
+    
         def index_questions(node):
             # Rekurzivně projít strom
             if isinstance(node, RootData):
@@ -7273,51 +7293,86 @@ class MainWindow(QMainWindow):
                         existing_hashes.add(q.text_html.strip())
                 for sub in node.subgroups:
                     index_questions(sub)
-
+    
         index_questions(self.root)
-
+    
         total_imported = 0
         total_duplicates = 0
-
+    
+        # 4) Import z vybraných DOCX souborů
         for p in paths:
             try:
                 paras = self._extract_paragraphs_from_docx(Path(p))
                 qs = self._parse_questions_from_paragraphs(paras)
-                
                 if not qs:
-                    # Info, ale nepovažujeme za chybu přerušující ostatní soubory
                     continue
-
+    
                 file_imported_count = 0
-                
+    
                 for q in qs:
                     content_hash = (q.text_html or "").strip()
-                    
-                    # Kontrola duplicit
+    
                     if content_hash in existing_hashes:
                         total_duplicates += 1
                         continue
-                    
-                    # Pokud není duplicitní, přidáme do DB a aktualizujeme hashset
+    
                     existing_hashes.add(content_hash)
-                    
-                    # Vložíme přímo do vybrané cílové podskupiny (nerozlišujeme složky Klasické/Bonusové)
                     target_sg.questions.append(q)
-                    
                     file_imported_count += 1
-
+    
                 total_imported += file_imported_count
-
+    
             except Exception as e:
                 QMessageBox.warning(self, "Import – chyba", f"Soubor: {p}\n{e}")
-
-        self._refresh_tree()
+    
+        # 5) Potlačit auto-rozbalení během refresh, obnovit stav a rozbalit pouze cílovou podskupinu
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+    
+        # vrátit původní rozbalení…
+        self._apply_tree_expansion_state(expanded_before)
+        # …a navíc rozbalit jen cílovou podskupinu (aby byl import vidět)
+        self._expand_subgroup_by_id(target_sg.id)
+    
         self.save_data()
-
-        msg = f"Import dokončen do: {target_sg.name}\n\nÚspěšně importováno: {total_imported}\nDuplicitních (přeskočeno): {total_duplicates}"
+    
+        msg = (
+            f"Import dokončen do: {target_sg.name}\n\n"
+            f"Úspěšně importováno: {total_imported}\n"
+            f"Duplicitních (přeskočeno): {total_duplicates}"
+        )
         QMessageBox.information(self, "Výsledek importu", msg)
 
-
+    def _import_docx_into_selected_subgroup(self) -> None:
+        """
+        Kontextová akce nad podskupinou:
+        - přeskočí dialog s výběrem cíle,
+        - rovnou otevře výběr *.docx,
+        - a použije stejnou logiku importu jako tlačítko 'Import'.
+        """
+        kind, meta = self._selected_node()
+        if kind != "subgroup":
+            return
+    
+        gid = meta.get("parent_group_id")
+        sgid = meta.get("id")
+        if not gid or not sgid:
+            return
+    
+        # Nastavit jednorázový override cíle a použít stávající import
+        self._import_target_override = (gid, sgid)
+        try:
+            self._import_from_docx()
+        finally:
+            # pojistka – kdyby importer override neodstranil, uklidíme zde
+            if hasattr(self, "_import_target_override"):
+                try:
+                    delattr(self, "_import_target_override")
+                except Exception:
+                    pass
 
     # -------------------- Přesun otázky --------------------
 
