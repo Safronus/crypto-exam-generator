@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.3.0"
+APP_VERSION = "8.3.2"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -5796,14 +5796,40 @@ class MainWindow(QMainWindow):
 
     # -------------------- Akce: přidání/mazání/přejmenování --------------------
 
+    def _expand_group_by_id(self, group_id: str) -> None:
+        """Rozbalí skupinu podle ID, pokud existuje ve stromu."""
+        if not group_id:
+            return
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            meta = item.data(0, Qt.UserRole) or {}
+            if meta.get("kind") == "group" and meta.get("id") == group_id:
+                item.setExpanded(True)
+                break
+
     def _add_group(self) -> None:
         from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "Nová skupina", "Název skupiny:")
         if not ok or not name.strip():
             return
+    
+        # 1) uložit stav rozbalení
+        expanded_before = self._capture_tree_expansion_state()
+    
+        # 2) změna modelu
         g = Group(id=str(_uuid.uuid4()), name=name.strip(), subgroups=[])
         self.root.groups.append(g)
-        self._refresh_tree()
+    
+        # 3) potlačit auto-expand během refresh
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+    
+        # 4) obnovit původní rozbalení (nová skupina se sama nerozbalí)
+        self._apply_tree_expansion_state(expanded_before)
+    
         self.save_data()
 
     def _add_subgroup(self) -> None:
@@ -5811,11 +5837,29 @@ class MainWindow(QMainWindow):
         if kind not in ("group", "subgroup"):
             QMessageBox.information(self, "Výběr", "Vyberte skupinu (nebo podskupinu) pro přidání podskupiny.")
             return
+    
         from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "Nová podskupina", "Název podskupiny:")
         if not ok or not name.strip():
             return
-
+    
+        # 1) uložit stav rozbalení před změnou
+        expanded_before = self._capture_tree_expansion_state()
+    
+        # 2) zjištění, zda byl rodič (skupina/podskupina) rozbalený
+        parent_was_expanded = False
+        parent_group_id: Optional[str] = None
+        parent_subgroup_id: Optional[str] = None
+    
+        if kind == "group":
+            parent_group_id = meta["id"]
+            parent_was_expanded = ("group", parent_group_id) in expanded_before
+        else:
+            parent_group_id = meta["parent_group_id"]
+            parent_subgroup_id = meta["id"]
+            parent_was_expanded = ("subgroup", parent_subgroup_id) in expanded_before
+    
+        # 3) změna modelu – vložení nové podskupiny
         if kind == "group":
             g = self._find_group(meta["id"])
             if not g:
@@ -5826,8 +5870,25 @@ class MainWindow(QMainWindow):
             if not parent_sg:
                 return
             parent_sg.subgroups.append(Subgroup(id=str(_uuid.uuid4()), name=name.strip(), subgroups=[], questions=[]))
-
-        self._refresh_tree()
+    
+        # 4) potlačit auto-rozbalení během refresh
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+    
+        # 5) obnovit původní rozbalení
+        self._apply_tree_expansion_state(expanded_before)
+    
+        # 6) pokud byl rodič před akcí SBALENÝ, rozbalíme právě a jen tu větev,
+        #    do které jsme vkládali (skupina nebo podskupina)
+        if not parent_was_expanded:
+            if parent_subgroup_id:
+                self._expand_subgroup_by_id(parent_subgroup_id)
+            elif parent_group_id:
+                self._expand_group_by_id(parent_group_id)
+    
         self.save_data()
 
     def _add_question(self) -> None:
