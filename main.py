@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.3.7d"
+APP_VERSION = "8.4.0"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -3460,6 +3460,7 @@ class MainWindow(QMainWindow):
             self.root.trash = []
     
         self._refresh_tree()
+        self._refresh_tree_question_subtitles()
         self._refresh_funny_answers_tab()
     
         # NOVÉ: refresh koše po načtení
@@ -3467,6 +3468,40 @@ class MainWindow(QMainWindow):
     
         # ZMĚNA: Strom 60%, Editor 40% (cca 840px : 560px)
         self.splitter.setSizes([940, 860])
+        
+    def _refresh_tree_question_subtitles(self) -> None:
+        """
+        Po vykreslení stromu doplní/normalizuje text ve sloupci 'Typ / body'
+        pro všechny otázky (hned po startu aplikace).
+        Nezasahuje do rozbalení ani výběru.
+        """
+        if not hasattr(self, "tree") or self.tree is None:
+            return
+    
+        def format_subtitle(q: Question) -> str:
+            is_bonus = str(q.type).lower() == "bonus" or q.type == 1
+            if is_bonus:
+                return f"BONUS | +{q.bonus_correct}/{q.bonus_wrong} b."
+            else:
+                return f"Klasická | {q.points} b."
+    
+        def rec(item: QTreeWidgetItem) -> None:
+            meta = item.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind") or meta.get("type")
+            if kind == "question":
+                gid = meta.get("parent_group_id")
+                sgid = meta.get("parent_subgroup_id")
+                qid = meta.get("id")
+                q = self._find_question(gid, sgid, qid)
+                if q:
+                    item.setText(1, format_subtitle(q))
+            for i in range(item.childCount()):
+                rec(item.child(i))
+    
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top is not None:
+                rec(top)
 
     def _init_trash_tab(self) -> None:
         self.tab_trash = QWidget()
@@ -6797,8 +6832,30 @@ class MainWindow(QMainWindow):
             parent.sortChildren(0, Qt.AscendingOrder)
 
     def _update_selected_question_item_subtitle(self, text: str) -> None:
+        """
+        Aktualizuje sloupec 'Typ / body' u právě vybrané otázky.
+        Minimal-change normalizace:
+        - pokud jde o klasickou otázku a řetězec končí jen číslem (bez jednotky),
+          doplní se ' b.' (např. 'Klasická | 1' -> 'Klasická | 1 b.').
+        - Bonusové popisky ponechává beze změny.
+        """
+        t = text.strip()
+    
+        # Doplnit jednotku pouze pro klasické otázky, pokud chybí ' b.'
+        # (tj. vzor 'Klasická | <číslo>')
+        if t.lower().startswith("klasická") and " b." not in t:
+            try:
+                after_pipe = t.split("|", 1)[1].strip()
+                # Končí čistě číslem (bez jednotky)?
+                if after_pipe and after_pipe[-1].isdigit():
+                    t = f"{t} b."
+            except Exception:
+                # Při jakémkoli problému nechat beze změny
+                pass
+    
         items = self.tree.selectedItems()
-        if items: items[0].setText(1, text)
+        if items:
+            items[0].setText(1, t)
 
     # -------------------- Vyhledávače --------------------
 

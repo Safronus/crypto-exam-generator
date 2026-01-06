@@ -1,5 +1,10 @@
 # Crypto Exam Generator
 
+## v8.4.0 — 2026-01-06
+- Strom „Otázky“: sloupec **Typ / body** se správně vyplní hned po startu aplikace.
+- Fix: Po editaci otázky se ve sloupci **Typ / body** u klasických otázek ztrácelo `b.`.
+  Nyní se automaticky doplní, pokud chybí (např. „Klasická | 1“ → „Klasická | 1 b.“).
+
 ## v8.3.7d — 2026-01-06
 - Drag&drop („vyhození do koše“): po smazání se **zachová** stav sbalení/rozbalení stromu,
   během obnovy UI je potlačeno auto-rozbalení.
