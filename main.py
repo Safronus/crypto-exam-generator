@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.3.6"
+APP_VERSION = "8.3.7d"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -528,6 +528,9 @@ class DnDTree(QTreeWidget):
     def dropEvent(self, event) -> None:
         ids_before = self.owner._selected_question_ids()
     
+        # NOVĚ: uložit stav rozbalení před DnD
+        expanded_before = self.owner._capture_tree_expansion_state()
+    
         # Pokud uživatel pustí drag mimo položky (na prázdnou plochu / mimo seznam),
         # upozorníme, že tím položku "vyhodí" ze seznamu. Po potvrzení ji opravdu smažeme.
         try:
@@ -585,9 +588,21 @@ class DnDTree(QTreeWidget):
             # Odstraňovat od nejhlubších (bezpečnější)
             selected.sort(key=depth, reverse=True)
     
-            # ZMĚNA: místo ručního odmazání ze stromu + _sync_model_from_tree uložíme do koše a smažeme z modelu
+            # Do koše + smazat z modelu
             self.owner._trash_delete_tree_items(selected)
+    
+            # NOVĚ: refresh bez auto-rozbalení + obnova původního stavu i pro „vyhození“
+            self.owner._suppress_auto_expand = True
+            try:
+                self.owner._refresh_tree()
+            finally:
+                self.owner._suppress_auto_expand = False
+            self.owner._apply_tree_expansion_state(expanded_before)
+    
+            # Zpět výběr a uložení
             self.owner._reselect_questions(ids_before)
+            self.owner.save_data()
+            self.owner.statusBar().showMessage("Odstraněno do koše (uloženo).", 3000)
             return
     
         # Necháme QTreeWidget provést interní DnD
@@ -731,7 +746,15 @@ class DnDTree(QTreeWidget):
                 break
     
         self.owner._sync_model_from_tree()
-        self.owner._refresh_tree()
+    
+        # NOVĚ: refresh bez auto-rozbalení + obnova původního stavu
+        self.owner._suppress_auto_expand = True
+        try:
+            self.owner._refresh_tree()
+        finally:
+            self.owner._suppress_auto_expand = False
+        self.owner._apply_tree_expansion_state(expanded_before)
+    
         self.owner._reselect_questions(ids_before)
         self.owner.save_data()
         self.owner.statusBar().showMessage("Přesun dokončen (uloženo).", 3000)
@@ -4442,28 +4465,39 @@ class MainWindow(QMainWindow):
             act.triggered.connect(self._add_subgroup)
             has_action = True
     
-        # 2. Přidat otázku (Subgroup)
+        # 2. Přidat otázku + Import + Přesunout vybrané (Subgroup)
         if kind == "subgroup":
             act = menu.addAction("Přidat otázku")
             act.triggered.connect(self._add_question)
             has_action = True
     
-            # NOVÉ: Import z DOCX přímo do vybrané podskupiny (přeskočí volbu cíle)
+            # Import z DOCX přímo do vybrané podskupiny (přeskočí volbu cíle)
             act_imp = menu.addAction("Import z DOCX do této podskupiny…")
             act_imp.triggered.connect(self._import_docx_into_selected_subgroup)
             has_action = True
+    
+            # NOVĚ: Přesunout vybrané… (stejný dialog jako tlačítko)
+            act_move = menu.addAction("Přesunout vybrané…")
+            act_move.triggered.connect(self._move_selected_dialog)
+            has_action = True
                 
-        # 3. Duplikovat otázku (Question)
+        # 3. Duplikovat + Přesunout vybrané (Question)
         if kind == "question":
             act = menu.addAction("Duplikovat otázku")
             act.triggered.connect(self._duplicate_question)
             has_action = True
     
-            # NOVÉ: Duplikovat do podskupiny
+            # Duplikovat do podskupiny
             act_dup_to = menu.addAction("Duplikovat do podskupiny")
             act_dup_to.triggered.connect(self._duplicate_question_to_subgroup)
             has_action = True
+    
+            # NOVĚ: Přesunout vybrané… (multi-select podporuje _move_selected_dialog)
+            act_move_q = menu.addAction("Přesunout vybrané…")
+            act_move_q.triggered.connect(self._move_selected_dialog)
+            has_action = True
                 
+        # 4. Přejmenovat (Group/Subgroup)
         if kind in ("group", "subgroup"):
             act_rename = menu.addAction("Přejmenovat…")
             act_rename.triggered.connect(self._rename_group_or_subgroup_dialog)
@@ -4472,7 +4506,7 @@ class MainWindow(QMainWindow):
         if has_action:
             menu.addSeparator()
     
-        # 4. Smazat (Vše) -> Použijeme existující metodu _delete_selected
+        # 5. Smazat (Vše) -> použijeme existující metodu
         act_del = menu.addAction("Smazat")
         act_del.triggered.connect(self._delete_selected)
     
@@ -5199,73 +5233,142 @@ class MainWindow(QMainWindow):
             self._autosave_schedule()
         
     def _move_selected_dialog(self) -> None:
-        """Otevře dialog pro přesun vybraných otázek do jiné skupiny/podskupiny."""
-        ids = self._selected_question_ids()
-        if not ids:
-            QMessageBox.information(self, "Přesun", "Vyberte otázky k přesunu.")
+        """
+        Otevře dialog pro přesun vybraných položek (otázky i podskupiny) do jiné podskupiny.
+        Podskupiny se přesouvají jako celek včetně vnoření; zamezí se cyklům i dvojitému přesunu.
+        Po akci se zachová původní stav rozbalení/sbalení stromu.
+        """
+        items = self.tree.selectedItems()
+        if not items:
+            QMessageBox.information(self, "Přesun", "Vyberte otázky nebo podskupiny k přesunu.")
             return
-
-        # MoveTargetDialog musí být definován v souboru (byl vidět v původním výpisu)
+    
         dlg = MoveTargetDialog(self)
         if dlg.exec() != QDialog.Accepted:
             return
-
+    
         gid, sgid = dlg.selected_target()
         if not gid:
             return
-
-        # Nalezení cílové podskupiny
-        target_sg: Optional[Subgroup] = None
-        if sgid:
-            target_sg = self._find_subgroup(gid, sgid)
-        else:
-            # Cíl je skupina -> zkusíme najít první podskupinu nebo vytvoříme Default
-            g = self._find_group(gid)
-            if g:
-                if g.subgroups:
-                    target_sg = g.subgroups[0]
-                else:
-                    # Vytvoření defaultní podskupiny, pokud skupina žádnou nemá
-                    new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
-                    g.subgroups.append(new_sg)
-                    target_sg = new_sg
-
-        if not target_sg:
-            QMessageBox.warning(self, "Chyba", "Cílová skupina/podskupina nebyla nalezena.")
+    
+        # cílová podskupina (nebo vytvořit Default)
+        g = self._find_group(gid)
+        if not g:
             return
-
-        # PROVEDENÍ PŘESUNU
-        # 1. Najdeme a vyjmeme otázky z původních umístění
-        moved_questions: List[Question] = []
-
-        def remove_from_list(sgs: List[Subgroup]):
-            for sg in sgs:
-                # Ponecháme jen ty, které NEJSOU v seznamu k přesunu
-                # Ty co JSOU, si uložíme
-                to_keep = []
-                for q in sg.questions:
-                    if q.id in ids:
-                        moved_questions.append(q)
-                    else:
-                        to_keep.append(q)
-                sg.questions = to_keep
-                
-                # Rekurze
-                remove_from_list(sg.subgroups)
-
-        for g in self.root.groups:
-            remove_from_list(g.subgroups)
-
-        # 2. Vložíme je do cíle
-        # (Otázky se přidají na konec cílové podskupiny)
-        target_sg.questions.extend(moved_questions)
-
-        # 3. Uložit a obnovit
-        self._refresh_tree()
-        self._reselect_questions(ids) # Zkusíme znovu označit přesunuté
+        target_sg: Optional[Subgroup] = self._find_subgroup(gid, sgid) if sgid else None
+        if not target_sg:
+            if g.subgroups:
+                target_sg = g.subgroups[0]
+            else:
+                new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
+                g.subgroups.append(new_sg)
+                target_sg = new_sg
+    
+        # --- uložit stav rozbalení před změnou ---
+        expanded_before = self._capture_tree_expansion_state()
+    
+        # --- sběr výběru ---
+        selected_subgroups = []
+        selected_questions = []
+    
+        for it in items:
+            meta = it.data(0, Qt.UserRole) or {}
+            kind = meta.get("kind") or meta.get("type")
+            if kind == "subgroup":
+                gsrc = meta.get("parent_group_id")
+                sgid_src = meta.get("id")
+                parent_sgid = meta.get("parent_subgroup_id")
+                sg_obj = self._find_subgroup(gsrc, sgid_src)
+                if gsrc and sgid_src and sg_obj:
+                    selected_subgroups.append((gsrc, parent_sgid, sgid_src, sg_obj))
+            elif kind == "question":
+                gsrc = meta.get("parent_group_id")
+                sgid_src = meta.get("parent_subgroup_id")
+                qid = meta.get("id")
+                if gsrc and sgid_src and qid:
+                    selected_questions.append((gsrc, sgid_src, qid))
+    
+        if not selected_subgroups and not selected_questions:
+            QMessageBox.information(self, "Přesun", "Vyberte otázky nebo podskupiny k přesunu.")
+            return
+    
+        def is_descendant(root_sg: Subgroup, candidate_sgid: str) -> bool:
+            if not root_sg or not candidate_sgid:
+                return False
+            for child in root_sg.subgroups or []:
+                if child.id == candidate_sgid:
+                    return True
+                if is_descendant(child, candidate_sgid):
+                    return True
+            return False
+    
+        # top-level podskupiny
+        top_level_subgroups = []
+        for (gsrc, parent_sgid, sgid_src, sg_obj) in selected_subgroups:
+            skip = False
+            for (_, _, other_id, other_obj) in selected_subgroups:
+                if other_id == sgid_src:
+                    continue
+                if is_descendant(other_obj, sgid_src):
+                    skip = True
+                    break
+            if not skip:
+                top_level_subgroups.append((gsrc, parent_sgid, sgid_src, sg_obj))
+    
+        # otázky mimo přesouvané sub-stromy
+        def is_within_any_moved_subgroup(parent_sgid: str) -> bool:
+            for (_, _, moved_id, moved_obj) in top_level_subgroups:
+                if moved_id == parent_sgid or is_descendant(moved_obj, parent_sgid):
+                    return True
+            return False
+    
+        filtered_questions = [(gsrc, sgid_src, qid) for (gsrc, sgid_src, qid) in selected_questions if not is_within_any_moved_subgroup(sgid_src)]
+    
+        # cykly
+        safe_subgroups = []
+        for (gsrc, parent_sgid, sgid_src, sg_obj) in top_level_subgroups:
+            if target_sg.id == sgid_src or is_descendant(sg_obj, target_sg.id):
+                continue
+            safe_subgroups.append((gsrc, parent_sgid, sgid_src, sg_obj))
+    
+        moved_sg = 0
+        moved_q = 0
+        moved_q_ids: List[str] = []
+    
+        # přesuny
+        for (gsrc, parent_sgid, sgid_src, sg_obj) in safe_subgroups:
+            if parent_sgid:
+                parent_sg = self._find_subgroup(gsrc, parent_sgid)
+                if parent_sg:
+                    parent_sg.subgroups = [s for s in parent_sg.subgroups if s.id != sgid_src]
+            else:
+                g_src = self._find_group(gsrc)
+                if g_src:
+                    g_src.subgroups = [s for s in g_src.subgroups if s.id != sgid_src]
+            target_sg.subgroups.append(sg_obj)
+            moved_sg += 1
+    
+        for (gsrc, sgid_src, qid) in filtered_questions:
+            src_sg = self._find_subgroup(gsrc, sgid_src)
+            q = self._find_question(gsrc, sgid_src, qid)
+            if src_sg and q:
+                src_sg.questions = [qq for qq in src_sg.questions if qq.id != qid]
+                target_sg.questions.append(q)
+                moved_q += 1
+                moved_q_ids.append(q.id)
+    
+        # --- refresh bez auto-rozbalení + obnova původního stavu ---
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+        self._apply_tree_expansion_state(expanded_before)
+    
+        if moved_q_ids:
+            self._reselect_questions(moved_q_ids)
         self.save_data()
-        self.statusBar().showMessage(f"Přesunuto {len(moved_questions)} otázek.", 3000)
-
+        self.statusBar().showMessage(f"Přesunuto {moved_sg} podskupin a {moved_q} otázek.", 3000)
 
     # -------------------- Práce s daty (JSON) --------------------
 
@@ -7401,32 +7504,143 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Otázka přesunuta do {g_name} / {sg_name}.", 4000)
 
     def _bulk_move_selected(self) -> None:
-        items = [it for it in self.tree.selectedItems() if (it.data(0, Qt.UserRole) or {}).get('kind') == 'question']
+        """
+        Hromadný přesun vybraných položek (otázky i podskupiny) do zvolené podskupiny.
+        Podskupiny se přesouvají jako celek včetně vnořených podskupin a otázek.
+        Zamezí se cyklům a dvojitému přesunu potomků.
+        Po akci se zachová původní stav rozbalení/sbalení stromu.
+        """
+        items = self.tree.selectedItems()
         if not items:
-            QMessageBox.information(self, "Přesun", "Vyberte ve stromu alespoň jednu otázku."); return
+            QMessageBox.information(self, "Přesun", "Vyberte otázky nebo podskupiny k přesunu.")
+            return
+    
         dlg = MoveTargetDialog(self)
-        if dlg.exec() != QDialog.Accepted: return
+        if dlg.exec() != QDialog.Accepted:
+            return
+    
         g_id, sg_id = dlg.selected_target()
-        if not g_id: return
-        g = self._find_group(g_id); 
-        if not g: return
+        if not g_id:
+            return
+    
+        g = self._find_group(g_id)
+        if not g:
+            return
+    
         target_sg = self._find_subgroup(g_id, sg_id) if sg_id else None
         if not target_sg:
             if not g.subgroups:
                 g.subgroups.append(Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[]))
             target_sg = g.subgroups[0]
-        moved = 0
+    
+        # --- uložit stav rozbalení před změnou ---
+        expanded_before = self._capture_tree_expansion_state()
+    
+        # --- sběr výběru ---
+        selected_subgroups = []  # (gid, parent_sgid, sgid, sg_obj)
+        selected_questions = []  # (gid, sgid, qid)
+    
         for it in items:
             meta = it.data(0, Qt.UserRole) or {}
-            qid = meta.get('id')
-            sg = self._find_subgroup(meta.get('parent_group_id'), meta.get('parent_subgroup_id'))
-            q = self._find_question(meta.get('parent_group_id'), meta.get('parent_subgroup_id'), qid)
-            if sg and q:
-                sg.questions = [qq for qq in sg.questions if qq.id != qid]
-                target_sg.questions.append(q); moved += 1
-        self._refresh_tree(); self.save_data()
-        g_name = g.name if g else ""; sg_name = target_sg.name if target_sg else "Default"
-        self.statusBar().showMessage(f"Přesunuto {moved} otázek do {g_name} / {sg_name}.", 4000)
+            kind = meta.get('kind') or meta.get('type')
+            if kind == 'subgroup':
+                gid = meta.get('parent_group_id')
+                sgid = meta.get('id')
+                parent_sgid = meta.get('parent_subgroup_id')
+                sg_obj = self._find_subgroup(gid, sgid)
+                if gid and sgid and sg_obj:
+                    selected_subgroups.append((gid, parent_sgid, sgid, sg_obj))
+            elif kind == 'question':
+                gid = meta.get('parent_group_id')
+                sgid = meta.get('parent_subgroup_id')
+                qid = meta.get('id')
+                if gid and sgid and qid:
+                    selected_questions.append((gid, sgid, qid))
+    
+        if not selected_subgroups and not selected_questions:
+            QMessageBox.information(self, "Přesun", "Vyberte otázky nebo podskupiny k přesunu.")
+            return
+    
+        def is_descendant(root_sg: Subgroup, candidate_sgid: str) -> bool:
+            if not root_sg or not candidate_sgid:
+                return False
+            for child in root_sg.subgroups or []:
+                if child.id == candidate_sgid:
+                    return True
+                if is_descendant(child, candidate_sgid):
+                    return True
+            return False
+    
+        # top-level podskupiny (nepřesouvat potomky, pokud je vybraný i jejich předek)
+        top_level_subgroups = []
+        for (gid, parent_sgid, sgid, sg_obj) in selected_subgroups:
+            skip = False
+            for (_, _, other_id, other_obj) in selected_subgroups:
+                if other_id == sgid:
+                    continue
+                if is_descendant(other_obj, sgid):
+                    skip = True
+                    break
+            if not skip:
+                top_level_subgroups.append((gid, parent_sgid, sgid, sg_obj))
+    
+        # otázky mimo přesouvané sub-stromy
+        def is_within_any_moved_subgroup(parent_sgid: str) -> bool:
+            for (_, _, moved_id, moved_obj) in top_level_subgroups:
+                if moved_id == parent_sgid or is_descendant(moved_obj, parent_sgid):
+                    return True
+            return False
+    
+        filtered_questions = [(gid, sgid, qid) for (gid, sgid, qid) in selected_questions if not is_within_any_moved_subgroup(sgid)]
+    
+        # cykly (nelze přesunout podskupinu do sebe/vlastního potomka)
+        safe_subgroups = []
+        for (gid, parent_sgid, sgid, sg_obj) in top_level_subgroups:
+            if target_sg.id == sgid or is_descendant(sg_obj, target_sg.id):
+                continue
+            safe_subgroups.append((gid, parent_sgid, sgid, sg_obj))
+    
+        moved_sg = 0
+        moved_q = 0
+        moved_q_ids: List[str] = []
+    
+        # --- přesun: napřed celé podskupiny, pak otázky ---
+        for (gid, parent_sgid, sgid, sg_obj) in safe_subgroups:
+            if parent_sgid:
+                parent_sg = self._find_subgroup(gid, parent_sgid)
+                if parent_sg:
+                    parent_sg.subgroups = [s for s in parent_sg.subgroups if s.id != sgid]
+            else:
+                gsrc = self._find_group(gid)
+                if gsrc:
+                    gsrc.subgroups = [s for s in gsrc.subgroups if s.id != sgid]
+            target_sg.subgroups.append(sg_obj)
+            moved_sg += 1
+    
+        for (gid, sgid, qid) in filtered_questions:
+            src_sg = self._find_subgroup(gid, sgid)
+            q = self._find_question(gid, sgid, qid)
+            if src_sg and q:
+                src_sg.questions = [qq for qq in src_sg.questions if qq.id != qid]
+                target_sg.questions.append(q)
+                moved_q += 1
+                moved_q_ids.append(q.id)
+    
+        # --- refresh bez auto-rozbalení + obnova původního stavu ---
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+        self._apply_tree_expansion_state(expanded_before)
+    
+        if moved_q_ids:
+            self._reselect_questions(moved_q_ids)
+        self.save_data()
+    
+        g_name = g.name if g else ""
+        sg_name = target_sg.name if target_sg else "Default"
+        self.statusBar().showMessage(f"Přesunuto {moved_sg} podskupin a {moved_q} otázek do {g_name} / {sg_name}.", 4000)
 
     # -------------------- Export DOCX --------------------
 

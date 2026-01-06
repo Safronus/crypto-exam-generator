@@ -1,5 +1,16 @@
 # Crypto Exam Generator
 
+## v8.3.7d — 2026-01-06
+- Drag&drop („vyhození do koše“): po smazání se **zachová** stav sbalení/rozbalení stromu,
+  během obnovy UI je potlačeno auto-rozbalení.
+  
+## v8.3.7c — 2026-01-06
+- Drag&drop: po přesunu se **zachová** stav sbalení/rozbalení stromu (žádné auto-rozbalení).
+
+## v8.3.7b — 2026-01-06
+- Přesun vybraných (tlačítko i kontextová akce): po přesunu se **zachová** stav sbalení/rozbalení stromu.
+- Žádné automatické rozbalení dalších větví (strom vypadá stejně jako před akcí).
+
 ## v8.3.6 — 2026-01-06
 - Import z DOCX: po importu se zachová stav sbalení/rozbalení stromu.
 - Rozbalí se **pouze** podskupina, do které byl import proveden (tlačítkem *Import* i přes kontextovou akci).
