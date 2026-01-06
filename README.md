@@ -1,5 +1,18 @@
 # Crypto Exam Generator
 
+## v8.4.3b — 2026-01-06
+- Filtr: po vymazání filtru se obnoví stav sbalení/rozbalení stromu tak,
+  jak byl před prvním použitím filtru.
+
+## v8.4.3 — 2026-01-06
+- Filtr otázek: pokud filtr najde otázky v **sbalených** podskupinách, tyto se nyní **automaticky rozbalí**,
+  aby byly všechny shody okamžitě viditelné. Původní logika skrývání se nemění.
+  
+## v8.4.2a — 2026-01-06
+- Start aplikace – volba DB: vylepšené popisky file dialogů.
+- Volba „Nahrát jinou DB a předtím uložit aktuální DB“ nyní otevře druhý dialog **Uložit jako…**,
+  kde lze zvolit **umístění i název** zálohy. Výchozí návrh je `data/backups/<název>-backup-<timestamp>.json`.
+
 ## v8.4.1 — 2026-01-06
 - Import z DOCX: nová volba **rozsahu kontroly duplicit** – buď proti **celé databázi** (původní chování),
   nebo **jen proti cílové podskupině**. Výběr v jednoduchém dialogu.

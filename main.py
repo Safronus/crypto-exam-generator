@@ -3437,8 +3437,7 @@ class MainWindow(QMainWindow):
             QApplication.instance().setWindowIcon(app_icon)
     
         self.root: RootData = RootData(groups=[])
-    
-        # NOVÉ: aby koš fungoval i když RootData nemá trash jako pole (minimal-change)
+        # Koš (pro starší JSONy bez 'trash')
         if not hasattr(self.root, "trash") or not isinstance(getattr(self.root, "trash", None), list):
             self.root.trash = []
     
@@ -3452,22 +3451,132 @@ class MainWindow(QMainWindow):
     
         self._build_ui()
         self._connect_signals()
-        
-        self.load_data()
     
-        # NOVÉ: po load znovu zajistit koš (kdyby JSON byl starší bez trash)
+        # >>> NOVÉ (8.4.2): Před načtením dat umožnit zvolit DB režim
+        self._startup_db_choice()
+    
+        self.load_data()
+        # Koš po načtení znovu zajistit (pro případ starého JSONu)
         if not hasattr(self.root, "trash") or not isinstance(getattr(self.root, "trash", None), list):
             self.root.trash = []
     
         self._refresh_tree()
-        self._refresh_tree_question_subtitles()
-        self._refresh_funny_answers_tab()
+        # 8.4.0 – po prvním vykreslení doplnit "Typ / body"
+        if hasattr(self, "_refresh_tree_question_subtitles"):
+            self._refresh_tree_question_subtitles()
     
-        # NOVÉ: refresh koše po načtení
+        self._refresh_funny_answers_tab()
+        # Refresh koše po načtení
         self._refresh_trash_table()
     
-        # ZMĚNA: Strom 60%, Editor 40% (cca 840px : 560px)
+        # Rozdělení: Strom 60%, Editor 40%
         self.splitter.setSizes([940, 860])
+        
+    def _startup_db_choice(self) -> None:
+        """
+        Při startu nabídne volbu práce s DB:
+          1) Pokračovat v aktuální DB (beze změny),
+          2) Nahrát jinou DB a přepsat aktuální,
+          3) Nahrát jinou DB a předtím uložit (zálohovat) aktuální DB – uživatel zvolí umístění i název zálohy.
+    
+        Minimal-change:
+        - U (2)/(3) se vybraný JSON zkopíruje na self.data_path (aby zbytek aplikace fungoval beze změny).
+        - U (3) se po výběru nové DB vyžádá cílová cesta pro zálohu (Save As).
+        - Zrušení kteréhokoli dialogu akci přeruší a pokračuje se s původní DB.
+        """
+        from PySide6.QtWidgets import QInputDialog, QFileDialog, QMessageBox
+        import shutil
+        from datetime import datetime
+    
+        choices = [
+            "Pokračovat v aktuální DB",
+            "Nahrát jinou DB a přepsat aktuální",
+            "Nahrát jinou DB a předtím uložit aktuální DB",
+        ]
+        # Stručný popis v dialogu volby režimu
+        mode_desc = (
+            "Zvolte režim práce s databází (JSON):\n"
+            "• Pokračovat – načte se poslední používaný soubor.\n"
+            "• Nahrát a přepsat – vyberete nový JSON; ten nahradí aktuální DB.\n"
+            "• Nahrát a přepsat se zálohou – po výběru nové DB uložíte zálohu aktuální DB (vyberete umístění a název)."
+        )
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Start – volba databáze",
+            mode_desc,
+            choices,
+            0,  # výchozí: pokračovat
+            False
+        )
+        if not ok or not choice or choice.startswith("Pokračovat"):
+            return  # beze změny
+    
+        # --- 1) VÝBĚR NOVÉ DB (OPEN) – s jasným popisem v titulku ---
+        data_dir = (self.project_root / "data")
+        data_dir.mkdir(parents=True, exist_ok=True)
+        open_caption = (
+            "Vyberte JSON databázi k NAHRÁNÍ\n\n"
+            "• Soubor (*.json) s otázkami/skupinami se zkopíruje na aktuální umístění DB a nahradí ji.\n"
+            "• Import neprovádí merge – jde o úplné přepsání aktuální DB novým souborem."
+        )
+        src_path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            open_caption,
+            str(data_dir),
+            "Databázový soubor JSON (*.json);;Všechny soubory (*)"
+        )
+        if not src_path_str:
+            return  # zrušeno → pokračovat jako doteď
+    
+        src_path = Path(src_path_str)
+        if not src_path.exists():
+            QMessageBox.warning(self, "Chyba", f"Soubor neexistuje:\n{src_path}")
+            return
+    
+        # --- 2) VOLBA „ULOŽIT ZÁLOHU“ (SAVE AS) – pouze u třetí možnosti ---
+        if choice.startswith("Nahrát jinou DB a předtím uložit"):
+            if self.data_path.exists():
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backups_dir = data_dir / "backups"
+                backups_dir.mkdir(parents=True, exist_ok=True)
+                suggested_name = f"{self.data_path.stem}-backup-{ts}{self.data_path.suffix}"
+                default_target = backups_dir / suggested_name
+    
+                save_caption = (
+                    "Zvolte umístění a název ZÁLOHY aktuální DB (JSON)\n\n"
+                    "• Před přepsáním aktuální DB bude uložen její obsah do zvoleného souboru.\n"
+                    "• Záloha slouží k návratu ke stávajícím datům."
+                )
+                save_path_str, _ = QFileDialog.getSaveFileName(
+                    self,
+                    save_caption,
+                    str(default_target),
+                    "Databázový soubor JSON (*.json)"
+                )
+                if not save_path_str:
+                    # Uživatel nevybral kam zálohovat → bezpečně ukončíme operaci bez změn
+                    QMessageBox.information(self, "Záloha zrušena", "Operace byla zrušena – aktuální DB nebyla přepsána.")
+                    return
+    
+                save_path = Path(save_path_str)
+                # Dodat příponu .json, pokud chybí
+                if save_path.suffix.lower() != ".json":
+                    save_path = save_path.with_suffix(".json")
+    
+                try:
+                    shutil.copy2(self.data_path, save_path)
+                except Exception as e:
+                    QMessageBox.warning(self, "Záloha DB", f"Zálohu aktuální DB se nepodařilo vytvořit:\n{e}")
+                    return  # neúspěšná záloha → nepokračovat v přepsání
+    
+        # --- 3) PŘEPSÁNÍ AKTUÁLNÍ DB NOVOU ---
+        try:
+            self.data_path.parent.mkdir(parents=True, exist_ok=True)
+            if src_path.resolve() != self.data_path.resolve():
+                shutil.copy2(src_path, self.data_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Přepsání DB selhalo", f"Přepsání cílového souboru selhalo:\n{e}")
+            return
         
     def _refresh_tree_question_subtitles(self) -> None:
         """
@@ -7123,6 +7232,13 @@ class MainWindow(QMainWindow):
 
     def _apply_filter(self, text: str) -> None:
         pat = (text or '').strip().lower()
+    
+        # 1) Při prvním použití NEPRÁZDNÉHO filtru ulož stav rozbalení
+        if pat:
+            if not hasattr(self, "_pre_filter_expansion_state") or self._pre_filter_expansion_state is None:
+                # uložíme pouze jednou až do vymazání filtru
+                self._pre_filter_expansion_state = self._capture_tree_expansion_state()
+    
         def question_matches(qid: str) -> bool:
             q = None
             for g in self.root.groups:
@@ -7131,22 +7247,35 @@ class MainWindow(QMainWindow):
                     sg = stack.pop()
                     for qq in sg.questions:
                         if qq.id == qid:
-                            q = qq; break
-                    if q: break
+                            q = qq
+                            break
+                    if q:
+                        break
                     stack.extend(sg.subgroups)
-                if q: break
-            if not q: return False
+                if q:
+                    break
+            if not q:
+                return False
             plain = re.sub(r'<[^>]+>', ' ', q.text_html)
             plain = _html.unescape(plain).lower()
             title = (q.title or '').lower()
             return (pat in title) or (pat in plain)
+    
+        def expand_parents(it: QTreeWidgetItem) -> None:
+            p = it.parent()
+            while p is not None:
+                p.setExpanded(True)
+                p = p.parent()
+    
         def apply_item(item) -> bool:
             meta = item.data(0, Qt.UserRole) or {}
             kind = meta.get('kind')
+    
             any_child = False
             for i in range(item.childCount()):
                 if apply_item(item.child(i)):
                     any_child = True
+    
             self_match = False
             if not pat:
                 self_match = True
@@ -7154,11 +7283,22 @@ class MainWindow(QMainWindow):
                 self_match = pat in item.text(0).lower()
             elif kind == 'question':
                 self_match = question_matches(meta.get('id'))
+                # Při aktivním filtru: shodná otázka → rozbalit její předky
+                if self_match and pat:
+                    expand_parents(item)
+    
             show = self_match or any_child
             item.setHidden(not show)
             return show
+    
         for i in range(self.tree.topLevelItemCount()):
             apply_item(self.tree.topLevelItem(i))
+    
+        # 2) Pokud je filtr VYMAZÁN (pat == ''), obnov stav rozbalení a snapshot zruš
+        if not pat and getattr(self, "_pre_filter_expansion_state", None):
+            # Obnova rozbalení přes uložený snapshot (minimal-change)
+            self._apply_tree_expansion_state(self._pre_filter_expansion_state)
+            self._pre_filter_expansion_state = None
 
     # -------------------- Import z DOCX --------------------
 
