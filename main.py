@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSizePolicy
 )
 
-APP_VERSION = "8.4.3b"
+APP_VERSION = "8.4.7"
 APP_NAME = f"Správce zkouškových testů (v{APP_VERSION})"
 
 # ---------------------------------------------------------------------------
@@ -3113,10 +3113,12 @@ class ExportWizard(QWizard):
                 repl_plain["DatumCas"] = dt_str
                 repl_plain["DATUMCAS"] = dt_str
                 
+                # --- Sestavení verze (Prefix + Datum testu) ---
                 prefix = self.le_prefix.text().strip()
-                today = datetime.now().strftime("%Y-%m-%d")
+                # ZMĚNA v 8.3.1: Místo aktuálního data 'now' používáme datum zvolené v dt_edit
+                test_date_str = raw_dt.toString("yyyy-MM-dd")
                 version_suffix = f"-{i+1}" if is_multi else ""
-                verze_str = f"{prefix}{version_suffix} {today}"
+                verze_str = f"{prefix}{version_suffix} {test_date_str}"
                 
                 repl_plain["PoznamkaVerze"] = verze_str
                 repl_plain["POZNAMKAVERZE"] = verze_str
@@ -3255,7 +3257,7 @@ class ExportWizard(QWizard):
             self.button(QWizard.FinishButton).setEnabled(True)
             self.button(QWizard.BackButton).setEnabled(True)
             QMessageBox.critical(self, "Kritická chyba", f"Neočekávaná chyba:\n{e}")
-
+            
 # --------------------------- Hlavní okno (UI + logika) ---------------------------
 
 class FunnyAnswerDialog(QDialog):
@@ -3949,15 +3951,29 @@ class MainWindow(QMainWindow):
         q_orig = self._find_question(gid, sgid, qid)
         if not q_orig:
             return
+        
+        # Najdeme cílovou podskupinu (zde stejná jako zdrojová)
+        target_sg = self._find_subgroup(gid, sgid)
+        if not target_sg:
+            return
     
         # 1) uložit stav rozbalení + zda byla cílová podskupina rozbalená
         expanded_before = self._capture_tree_expansion_state()
         was_expanded = ("subgroup", sgid) in expanded_before
+        
+        # Logika pro název: Pokud název v podskupině už je, přidáme (kopie).
+        # U duplikace na místě tam originál vždy je, takže se (kopie) přidá vždy.
+        existing_titles = {q.title for q in target_sg.questions}
+        base_title = q_orig.title or "Otázka"
+        new_title = base_title
+        
+        if base_title in existing_titles:
+            new_title += " (kopie)"
     
         # 2) vytvořit kopii (bez funny_answers)
         data = asdict(q_orig)
         data["id"] = str(_uuid.uuid4())
-        data["title"] = (q_orig.title or "Otázka") + " (kopie)"
+        data["title"] = new_title
         # --- NOVĚ: nepřenášet vtipné odpovědi ---
         if "funny_answers" in data:
             data["funny_answers"] = []
@@ -3969,9 +3985,6 @@ class MainWindow(QMainWindow):
             pass
     
         # 3) vložit do cílové podskupiny
-        target_sg = self._find_subgroup(gid, sgid)
-        if not target_sg:
-            return
         target_sg.questions.append(new_q)
     
         # 4) potlačit auto-expand během refresh
@@ -4033,11 +4046,19 @@ class MainWindow(QMainWindow):
         # 1) uložit stav rozbalení + zda byla cílová podskupina rozbalená
         expanded_before = self._capture_tree_expansion_state()
         was_expanded = ("subgroup", sgid_tgt) in expanded_before
+        
+        # Logika pro název: Zkontrolujeme, zda v CÍLOVÉ podskupině název existuje
+        existing_titles = {q.title for q in target_sg.questions}
+        base_title = q_orig.title or "Otázka"
+        new_title = base_title
+        
+        if base_title in existing_titles:
+            new_title += " (kopie)"
     
         # 2) vytvořit kopii (bez funny_answers)
         data = asdict(q_orig)
         data["id"] = str(_uuid.uuid4())
-        data["title"] = (q_orig.title or "Otázka") + " (kopie)"
+        data["title"] = new_title
         # --- NOVĚ: nepřenášet vtipné odpovědi ---
         if "funny_answers" in data:
             data["funny_answers"] = []
@@ -4651,6 +4672,111 @@ class MainWindow(QMainWindow):
             if hasattr(self, "_refresh_funny_answers_tab"):
                 self._refresh_funny_answers_tab()
 
+    def _bulk_duplicate_selected_to_subgroup(self) -> None:
+        """
+        Hromadná duplikace vybraných otázek do uživatelem zvolené podskupiny.
+        """
+        items = self.tree.selectedItems()
+        # Filtrujeme pouze položky typu 'question'
+        selected_questions_meta = []
+        for it in items:
+            meta = it.data(0, Qt.UserRole) or {}
+            if meta.get("kind") == "question":
+                selected_questions_meta.append(meta)
+
+        if not selected_questions_meta:
+            QMessageBox.information(self, "Duplikace", "Vyberte alespoň jednu otázku k duplikaci.")
+            return
+
+        # Zobrazení dialogu pro výběr cíle
+        dlg = MoveTargetDialog(self)
+        dlg.setWindowTitle("Duplikovat vybrané do...")
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        gid_tgt, sgid_tgt = dlg.selected_target()
+        if not gid_tgt:
+            return
+
+        # Najít / vytvořit cílovou podskupinu
+        target_sg = self._find_subgroup(gid_tgt, sgid_tgt)
+        if not target_sg:
+            g = self._find_group(gid_tgt)
+            if not g:
+                return
+            if g.subgroups:
+                target_sg = g.subgroups[0]
+                sgid_tgt = target_sg.id
+            else:
+                new_sg = Subgroup(id=str(_uuid.uuid4()), name="Default", subgroups=[], questions=[])
+                g.subgroups.append(new_sg)
+                target_sg = new_sg
+                sgid_tgt = new_sg.id
+
+        # 1) Uložit stav rozbalení + zda byla cílová podskupina rozbalená
+        expanded_before = self._capture_tree_expansion_state()
+        was_expanded = ("subgroup", sgid_tgt) in expanded_before
+
+        duplicated_count = 0
+
+        # 2) Iterace přes vybrané otázky a jejich duplikace
+        for meta in selected_questions_meta:
+            gid_src = meta.get("parent_group_id")
+            sgid_src = meta.get("parent_subgroup_id")
+            qid = meta.get("id")
+
+            q_orig = self._find_question(gid_src, sgid_src, qid)
+            if not q_orig:
+                continue
+
+            # Logika pro název: Zkontrolujeme aktuální stav cílové podskupiny.
+            # Kontrolujeme dynamicky uvnitř cyklu, protože předchozí iterace mohla přidat otázku se stejným názvem.
+            existing_titles = {q.title for q in target_sg.questions}
+            base_title = q_orig.title or "Otázka"
+            new_title = base_title
+            
+            if base_title in existing_titles:
+                new_title += " (kopie)"
+
+            # Klonování dat
+            data = asdict(q_orig)
+            data["id"] = str(_uuid.uuid4())
+            data["title"] = new_title
+            # Nepřenášet vtipné odpovědi (čistý štít pro kopii)
+            if "funny_answers" in data:
+                data["funny_answers"] = []
+            
+            try:
+                new_q = Question(**data)
+                # Pojistka pro instance
+                new_q.funny_answers = []
+                
+                # Vložení do cíle
+                target_sg.questions.append(new_q)
+                duplicated_count += 1
+            except Exception as e:
+                print(f"Chyba při duplikaci otázky {qid}: {e}")
+
+        if duplicated_count == 0:
+            return
+
+        # 3) Potlačit auto-expand během refresh
+        self._suppress_auto_expand = True
+        try:
+            self._refresh_tree()
+        finally:
+            self._suppress_auto_expand = False
+
+        # 4) Obnovit původní rozbalení
+        self._apply_tree_expansion_state(expanded_before)
+
+        # 5) Pokud byla cílová podskupina původně sbalená, rozbal jen ji
+        if not was_expanded:
+            self._expand_subgroup_by_id(sgid_tgt)
+
+        # 6) Uložit
+        self.save_data()
+        self.statusBar().showMessage(f"Duplikováno {duplicated_count} otázek.", 3000)
 
     def _on_tree_context_menu(self, pos: QPoint) -> None:
         """Kontextové menu stromu otázek (v6.7.2)."""
@@ -4658,7 +4784,11 @@ class MainWindow(QMainWindow):
         if not item:
             return
             
-        self.tree.setCurrentItem(item)
+        # OPRAVA: Pokud položka, na kterou klikáme pravým tlačítkem, UŽ JE vybraná,
+        # neměníme výběr (aby se nezrušil multiselect).
+        # Pokud vybraná není, vybereme ji (standardní chování).
+        if not item.isSelected():
+            self.tree.setCurrentItem(item)
     
         # Robustní získání metadat (podpora tuple i dict)
         raw_data = item.data(0, Qt.UserRole)
@@ -4671,47 +4801,61 @@ class MainWindow(QMainWindow):
     
         menu = QMenu(self.tree)
         has_action = False
+        
+        # Zjistíme počet vybraných otázek pro multiselect akce
+        selected_items = self.tree.selectedItems()
+        # Spočítáme kolik z vybraných jsou skutečně otázky
+        selected_questions_count = sum(1 for it in selected_items if (it.data(0, Qt.UserRole) or {}).get("kind") == "question")
     
-        # 1. Přidat podskupinu (Group/Subgroup)
-        if kind in ("group", "subgroup"):
+        # 1. Přidat podskupinu (Group/Subgroup) - jen pokud není multiselect nebo dává smysl
+        if kind in ("group", "subgroup") and len(selected_items) <= 1:
             act = menu.addAction("Přidat podskupinu")
             act.triggered.connect(self._add_subgroup)
             has_action = True
     
         # 2. Přidat otázku + Import + Přesunout vybrané (Subgroup)
-        if kind == "subgroup":
+        if kind == "subgroup" and len(selected_items) <= 1:
             act = menu.addAction("Přidat otázku")
             act.triggered.connect(self._add_question)
             has_action = True
     
-            # Import z DOCX přímo do vybrané podskupiny (přeskočí volbu cíle)
+            # Import z DOCX přímo do vybrané podskupiny
             act_imp = menu.addAction("Import z DOCX do této podskupiny…")
             act_imp.triggered.connect(self._import_docx_into_selected_subgroup)
             has_action = True
     
-            # NOVĚ: Přesunout vybrané… (stejný dialog jako tlačítko)
+            # Přesunout vybrané…
             act_move = menu.addAction("Přesunout vybrané…")
             act_move.triggered.connect(self._move_selected_dialog)
             has_action = True
                 
-        # 3. Duplikovat + Přesunout vybrané (Question)
+        # 3. Akce nad otázkami
         if kind == "question":
-            act = menu.addAction("Duplikovat otázku")
-            act.triggered.connect(self._duplicate_question)
-            has_action = True
+            # A) SINGLE AKCE
+            if selected_questions_count == 1:
+                act = menu.addAction("Duplikovat otázku")
+                act.triggered.connect(self._duplicate_question)
+                has_action = True
+        
+                act_dup_to = menu.addAction("Duplikovat do podskupiny")
+                act_dup_to.triggered.connect(self._duplicate_question_to_subgroup)
+                has_action = True
+
+            # B) MULTI AKCE (zobrazí se, pokud je vybrána alespoň jedna otázka, typicky > 1)
+            if selected_questions_count > 1:
+                # Text akce se dynamicky mění podle počtu
+                act_bulk_dup = menu.addAction(f"Hromadně duplikovat ({selected_questions_count}) do...")
+                act_bulk_dup.triggered.connect(self._bulk_duplicate_selected_to_subgroup)
+                has_action = True
     
-            # Duplikovat do podskupiny
-            act_dup_to = menu.addAction("Duplikovat do podskupiny")
-            act_dup_to.triggered.connect(self._duplicate_question_to_subgroup)
-            has_action = True
-    
-            # NOVĚ: Přesunout vybrané… (multi-select podporuje _move_selected_dialog)
+            # C) SPOLEČNÉ (Single i Multi)
+            menu.addSeparator()
             act_move_q = menu.addAction("Přesunout vybrané…")
             act_move_q.triggered.connect(self._move_selected_dialog)
             has_action = True
                 
-        # 4. Přejmenovat (Group/Subgroup)
-        if kind in ("group", "subgroup"):
+        # 4. Přejmenovat (Group/Subgroup) - jen single selection
+        if kind in ("group", "subgroup") and len(selected_items) <= 1:
             act_rename = menu.addAction("Přejmenovat…")
             act_rename.triggered.connect(self._rename_group_or_subgroup_dialog)
             has_action = True
@@ -4719,8 +4863,8 @@ class MainWindow(QMainWindow):
         if has_action:
             menu.addSeparator()
     
-        # 5. Smazat (Vše) -> použijeme existující metodu
-        act_del = menu.addAction("Smazat")
+        # 5. Smazat (funguje pro Single i Multi)
+        act_del = menu.addAction("Smazat vybrané")
         act_del.triggered.connect(self._delete_selected)
     
         menu.exec(self.tree.mapToGlobal(pos))
@@ -6023,10 +6167,18 @@ class MainWindow(QMainWindow):
     
             parent_item.addChild(sg_item)
     
-            # Otázky v podskupině (původní logika zachována)
+            # Otázky v podskupině
             sorted_q = sorted(sg.questions, key=lambda q: (q.type or "", (q.title or "").lower()))
             for q in sorted_q:
-                q_item = QTreeWidgetItem([q.title or "Otázka", q.type or ""])
+                # --- OPRAVA: Formátování sloupce 'Typ / body' ihned při vytváření ---
+                is_bonus = str(q.type).lower() == "bonus" or q.type == 1
+                if is_bonus:
+                    subtitle = f"BONUS | +{q.bonus_correct}/{q.bonus_wrong} b."
+                else:
+                    subtitle = f"Klasická | {q.points} b."
+                # --------------------------------------------------------------------
+
+                q_item = QTreeWidgetItem([q.title or "Otázka", subtitle])
                 q_item.setData(0, Qt.UserRole, {
                     "kind": "question",
                     "id": q.id,
@@ -6043,7 +6195,7 @@ class MainWindow(QMainWindow):
                 sorted_nested = sorted(sg.subgroups, key=lambda s: s.name.lower())
                 self._add_subgroups_to_item(sg_item, group_id, sorted_nested)
     
-            # <<< ZMĚNA: nerozbalovat při potlačení auto-expandu >>>
+            # nerozbalovat při potlačení auto-expandu
             if not getattr(self, "_suppress_auto_expand", False):
                 sg_item.setExpanded(True)
 
